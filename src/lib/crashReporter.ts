@@ -30,12 +30,18 @@ function report(source: string, value: unknown) {
 
     const message =
       value instanceof Error ? value.message : String(value).slice(0, 200);
-    useToastStore.getState().push({
-      kind: "error",
-      key: "uncaught-error", // one slot — later errors replace, never stack
-      title: "Something went wrong",
-      message: message || "An unexpected error occurred. The app is still running.",
-    });
+    // Deferred: in dev React replays render errors through a synthetic window
+    // "error" event dispatched synchronously INSIDE the render phase, so pushing
+    // the toast here would itself be a setState-in-render ("Cannot update Toaster
+    // while rendering …"). A macrotask hop lands the push safely outside render.
+    setTimeout(() => {
+      useToastStore.getState().push({
+        kind: "error",
+        key: "uncaught-error", // one slot — later errors replace, never stack
+        title: "Something went wrong",
+        message: message || "An unexpected error occurred. The app is still running.",
+      });
+    }, 0);
   } catch {
     // Last resort: there is nowhere safe left to report to.
   }

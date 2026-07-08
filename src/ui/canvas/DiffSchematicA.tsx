@@ -90,12 +90,18 @@ export function DiffSchematicA() {
         const txt = await getSheetSvgA(bSheet.num, bSheet.svg);
         if (disposed || loadedEpoch.current !== camBridge.epoch) return;
         island.innerHTML = txt;
-        const svg = island.querySelector("svg");
-        curSvg.current = svg as SVGSVGElement | null;
+        const svg = island.querySelector("svg") as SVGSVGElement | null;
+        curSvg.current = svg;
         if (svg) {
+          // The extractor SVG carries only a viewBox, so give it an intrinsic size from
+          // that viewBox (1px = 1mm world units) — exactly as the B Canvas does in
+          // loadSheet. The .diff-a-world/.diff-a-island wrappers have no size of their
+          // own, so a sized SVG is the only thing giving the pane dimensions; without it
+          // the whole A island collapsed to 0×0 (an invisible left pane).
+          const raw = (svg.getAttribute("viewBox") ?? "0 0 297 210").split(/\s+/).map(Number);
+          svg.setAttribute("width", String(raw[2] || 297));
+          svg.setAttribute("height", String(raw[3] || 210));
           svg.style.display = "block";
-          svg.removeAttribute("width");
-          svg.removeAttribute("height");
         }
         paintFocused();
       } catch {
@@ -170,7 +176,12 @@ export function DiffSchematicA() {
   return (
     <div className="diff-a-stage" ref={stageRef}>
       <div className="diff-a-world" ref={worldRef}>
-        <div className="diff-a-island" ref={islandRef} />
+        {/* `canvas-island` carries the whole KiCad schematic colour theme — those rules
+            are scoped to that class, so without it the A (older) SVG renders unthemed
+            (labels/pin numbers fill:none, symbol strokes black). Reusing the class themes
+            A identically to B and gives it the same paper card. `.diff-a-island` keeps the
+            read-only-side layout hooks. */}
+        <div className="diff-a-island canvas-island" ref={islandRef} />
       </div>
     </div>
   );

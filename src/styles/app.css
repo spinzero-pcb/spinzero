@@ -3079,6 +3079,49 @@ button {
 .diff-banner-btn { display: inline-flex; align-items: center; gap: 4px; }
 .diff-banner-close { font-size: 14px; }
 
+/* PCB compare-mode toggle (overlay / flicker / wipe) in the diff banner. */
+.diff-mode-toggle { display: inline-flex; align-items: center; gap: 2px; margin-right: var(--sp-2); }
+.diff-mode-toggle .diff-banner-btn.is-active {
+  color: var(--accent);
+  background: var(--bg-3);
+  border-radius: var(--radius-1);
+}
+
+/* Diff wipe mode: the draggable divider over the GL canvas (A left / B right). */
+.pcb-wipe-divider {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 14px;
+  margin-left: -7px; /* centre the grab zone on the split */
+  cursor: ew-resize;
+  z-index: 5;
+  touch-action: none;
+}
+.pcb-wipe-divider::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 2px;
+  margin-left: -1px;
+  background: var(--accent);
+  opacity: 0.85;
+}
+.pcb-wipe-tag {
+  position: absolute;
+  top: 6px;
+  font-size: 10px;
+  padding: 1px 5px;
+  border-radius: var(--radius-1);
+  background: var(--bg-2);
+  border: 1px solid var(--border-1);
+  pointer-events: none;
+}
+.pcb-wipe-tag-a { right: 100%; margin-right: 4px; color: var(--diff-remove); }
+.pcb-wipe-tag-b { left: 100%; margin-left: 4px; color: var(--diff-add); }
+
 /* Push the canvases below the banner while diffing so it never overlaps the art. */
 .canvas-area.diffing .view-fill { top: 30px; }
 

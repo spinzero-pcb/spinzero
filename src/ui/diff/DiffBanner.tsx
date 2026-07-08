@@ -1,5 +1,13 @@
-import { useDiffStore } from "../../stores/diffStore";
+import { useDiffStore, type PcbDiffMode } from "../../stores/diffStore";
+import { useViewStore } from "../../stores/viewStore";
 import { IconRefresh } from "../icons";
+
+/** The PCB compare modes (plan §4), in toolbar order. Side-by-side is deferred. */
+const PCB_MODES: { id: PcbDiffMode; label: string; title: string }[] = [
+  { id: "onion", label: "Overlay", title: "Isolated layer: removed copper red, added green, over the greyed-out base" },
+  { id: "flicker", label: "Flicker", title: "Blink between the two revisions (~2 Hz) — hold Space to pause" },
+  { id: "wipe", label: "Wipe", title: "Drag a divider: older revision left, newer right" },
+];
 
 /** Short, git-style revision id for the banner's trailing ref. */
 const shortId = (id: string) => id.slice(0, 8);
@@ -14,6 +22,9 @@ export function DiffBanner() {
   const preparing = useDiffStore((s) => s.preparing);
   const swap = useDiffStore((s) => s.swap);
   const exitDiff = useDiffStore((s) => s.exitDiff);
+  const pcbMode = useDiffStore((s) => s.pcbMode);
+  const setPcbMode = useDiffStore((s) => s.setPcbMode);
+  const view = useViewStore((s) => s.view);
 
   if (!active || !a || !b) return null;
 
@@ -31,6 +42,21 @@ export function DiffBanner() {
       </span>
       {preparing && <span className="diff-preparing">Preparing comparison…</span>}
       <span style={{ flex: 1 }} />
+      {/* PCB compare-mode toggle (plan §4) — only meaningful on the PCB canvas. */}
+      {view === "pcb" && (
+        <span className="diff-mode-toggle" role="group" aria-label="PCB compare mode">
+          {PCB_MODES.map((m) => (
+            <button
+              key={m.id}
+              className={`btn-ghost diff-banner-btn ${pcbMode === m.id ? "is-active" : ""}`}
+              title={m.title}
+              onClick={() => setPcbMode(m.id)}
+            >
+              {m.label}
+            </button>
+          ))}
+        </span>
+      )}
       <button
         className="btn-ghost diff-banner-btn"
         title="Swap direction (compare the other way round)"

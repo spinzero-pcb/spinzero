@@ -74,6 +74,15 @@ export function HistoryGraph() {
   }, [open, closeGraph, publishing, confirmDel, compareFrom]);
 
   const layout = useMemo(() => layoutDag(extractions, showHidden), [extractions, showHidden]);
+
+  // DAG tips = revisions that are nobody's parent (the branch heads). Two+ tips is the
+  // fork case the "Compare tips" shortcut targets. Computed before the early return
+  // below so hook order stays stable across open/closed renders.
+  const tips = useMemo(() => {
+    const isParent = new Set(extractions.flatMap((e) => e.parents));
+    return extractions.filter((e) => !e.hidden && !isParent.has(e.id));
+  }, [extractions]);
+
   if (!open) return null;
 
   const latestId = extractions[0]?.id ?? null;
@@ -93,13 +102,6 @@ export function HistoryGraph() {
     const present = r.parents.find((p) => extractions.some((e) => e.id === p));
     return present ?? null;
   };
-
-  // DAG tips = revisions that are nobody's parent (the branch heads). Two+ tips is the
-  // fork case the "Compare tips" shortcut targets.
-  const tips = useMemo(() => {
-    const isParent = new Set(extractions.flatMap((e) => e.parents));
-    return extractions.filter((e) => !e.hidden && !isParent.has(e.id));
-  }, [extractions]);
 
   // Start a comparison and close the graph; enterDiff normalizes order + pins B active.
   const startCompare = (a: string, b: string) => {

@@ -120,6 +120,35 @@ export function netLabelRows(lab: Pick<NetLabel, "key" | "num" | "net">, acrossP
 
 /** RGB components in 0..1. */
 export type RGB = [number, number, number];
+
+/** Per-primitive "changed" flags for diff mode (visual-diff plan §4), one byte per IR
+ *  primitive in IR order: 1 = this primitive is NOT present on the other side (removed
+ *  when the geometry is the A side, added when it is B), 0 = unchanged. Computed by
+ *  `glDiff.ts` from a content-hash set-diff of the two revisions' geometry IRs and
+ *  baked into the GPU batches as a per-instance attribute at build time. */
+export interface DiffFlags {
+  seg: Uint8Array;
+  arc: Uint8Array;
+  vias: Uint8Array;
+  pads: Uint8Array;
+  zones: Uint8Array;
+  graphics: Uint8Array;
+}
+
+/** Options for a single `render` call in diff mode. Default = the normal single-
+ *  revision draw (clear + full palette + holes). */
+export interface RenderOpts {
+  /** Clear the framebuffer first (default true). Compare modes composite several
+   *  passes, so the later passes pass false. */
+  clear?: boolean;
+  /** 0 = normal; 1 = "base" pass: draw ONLY unchanged primitives, dimmed; 2 =
+   *  "changed-only" pass: draw ONLY changed primitives recoloured in `diffColor`. */
+  diffPass?: 0 | 1 | 2;
+  /** Recolour for pass 2 (removed = red from A's buffers, added = green from B's). */
+  diffColor?: RGB;
+  /** Draw drill holes (default true; the changed-only overlay passes skip them). */
+  holes?: boolean;
+}
 /** A highlighted net/component: its IR index plus the colour. `emphasize` keeps the
  *  primitive's own layer colour (a selected net, undimmed) instead of recolouring it in
  *  `color` (a pinned "highlight in colour"). */
@@ -173,9 +202,23 @@ vec4 hotColor(float net, float comp){
   if (comp >= 0.0) { vec4 t = texelFetch(uCompMask, ivec2(int(comp + 0.5), 0), 0); if (t.a > 0.25) return t; }
   return vec4(0.0);
 }
-vec4 shade(vec3 baseColor, float layerAlpha, float coverage, float net, float comp){
+// Diff compare passes (visual-diff §4): 0 = off; 1 = base (unchanged only, painted a
+// flat neutral grey — fully greyed out, not hue-dimmed — so only the red/green changed
+// copper carries colour); 2 = changed-only (recoloured flat in uDiffColor).
+uniform int uDiffPass;
+uniform vec3 uDiffColor;
+uniform vec3 uDiffBase;      // flat grey for the unchanged base (whitish/blackish)
+vec4 shade(vec3 baseColor, float layerAlpha, float coverage, float net, float comp, float flag){
+  if (uDiffPass == 1 && flag > 0.5) discard;   // base pass: changed prims are the overlay's job
+  if (uDiffPass == 2) {
+    if (flag < 0.5) discard;                   // changed-only pass: unchanged prims skipped
+    float ac = layerAlpha * uObjAlpha * coverage;
+    if (ac < 0.003) discard;
+    return vec4(uDiffColor, ac);
+  }
   vec3 col = baseColor;
   float a = layerAlpha * uObjAlpha;
+  if (uDiffPass == 1) { col = uDiffBase; a *= 0.85; } // unchanged copper → flat grey
   if (uSel > 0.5) {
     vec4 hot = hotColor(net, comp);
     if (hot.a > 0.25) {
@@ -202,10 +245,12 @@ layout(location=3) in float aHW;
 layout(location=4) in float aLayer;
 layout(location=5) in float aNet;
 layout(location=6) in float aComp;
+layout(location=7) in float aFlag;
 ${CAMERA_UNIFORMS}
 out vec2 vWorld; out vec2 vA; out vec2 vB; out float vHW;
-flat out int vLayer; out float vNet; out float vComp;
+flat out int vLayer; out float vNet; out float vComp; out float vFlag;
 void main(){
+  vFlag = aFlag;
   vec2 d = aB - aA; float len = length(d);
   vec2 u = len > 1e-6 ? d / len : vec2(1.0, 0.0);
   vec2 v = vec2(-u.y, u.x);
@@ -221,7 +266,7 @@ void main(){
 const LINE_FS = `#version 300 es
 ${FRAG_COMMON}
 in vec2 vWorld; in vec2 vA; in vec2 vB; in float vHW;
-flat in int vLayer; in float vNet; in float vComp;
+flat in int vLayer; in float vNet; in float vComp; in float vFlag;
 out vec4 frag;
 void main(){
   if (cullLayer(vLayer)) discard;
@@ -230,7 +275,7 @@ void main(){
   float dist = length(pa - ba * h);
   float cov = 1.0 - smoothstep(vHW - uAA, vHW + uAA, dist);
   if (cov <= 0.0) discard;
-  frag = shade(uLayerColor[vLayer], uLayerAlpha[vLayer], cov, vNet, vComp);
+  frag = shade(uLayerColor[vLayer], uLayerAlpha[vLayer], cov, vNet, vComp, vFlag);
 }`;
 
 // --- pads (instanced rounded-rect SDF) ---
@@ -243,10 +288,12 @@ layout(location=4) in float aRadius;
 layout(location=5) in float aLayer;
 layout(location=6) in float aNet;
 layout(location=7) in float aComp;
+layout(location=8) in float aFlag;
 ${CAMERA_UNIFORMS}
 out vec2 vLocal; out vec2 vHalf; out float vRadius;
-flat out int vLayer; out float vNet; out float vComp;
+flat out int vLayer; out float vNet; out float vComp; out float vFlag;
 void main(){
+  vFlag = aFlag;
   float ca = cos(aAngle), sa = sin(aAngle);
   vec2 local = aCorner * (aHalf + uAA);
   // Board space is Y-down: x' = lx*cos + ly*sin, y' = -lx*sin + ly*cos (matches place_fp).
@@ -259,7 +306,7 @@ void main(){
 const PAD_FS = `#version 300 es
 ${FRAG_COMMON}
 in vec2 vLocal; in vec2 vHalf; in float vRadius;
-flat in int vLayer; in float vNet; in float vComp;
+flat in int vLayer; in float vNet; in float vComp; in float vFlag;
 out vec4 frag;
 void main(){
   if (cullLayer(vLayer)) discard;
@@ -267,7 +314,7 @@ void main(){
   float d = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - vRadius;
   float cov = 1.0 - smoothstep(-uAA, uAA, d);
   if (cov <= 0.0) discard;
-  frag = shade(uLayerColor[vLayer], uLayerAlpha[vLayer], cov, vNet, vComp);
+  frag = shade(uLayerColor[vLayer], uLayerAlpha[vLayer], cov, vNet, vComp, vFlag);
 }`;
 
 // --- vias (instanced annulus, fixed metal colour) ---
@@ -279,10 +326,12 @@ layout(location=3) in float aDrill;
 layout(location=4) in float aLayer;
 layout(location=5) in float aNet;
 layout(location=6) in float aRing;    // 1 = full annular ring on this layer, 0 = barrel + wall only
+layout(location=7) in float aFlag;
 ${CAMERA_UNIFORMS}
 out vec2 vLocal; out float vOuter; out float vDrill;
-flat out int vLayer; out float vNet; flat out int vRing;
+flat out int vLayer; out float vNet; flat out int vRing; out float vFlag;
 void main(){
+  vFlag = aFlag;
   vec2 local = aCorner * (aOuter + uAA);
   vLocal = local; vOuter = aOuter; vDrill = aDrill;
   vLayer = int(aLayer + 0.5); vNet = aNet; vRing = int(aRing + 0.5);
@@ -295,7 +344,7 @@ uniform vec3 uViaColor;   // plated barrel — exposed copper/gold (the via cent
 uniform vec3 uViaHole;    // hole-wall ring (KiCad via_hole_walls): a light ring at the drill edge
 uniform float uForceBarrel; // 1 = a mask/paste/silk layer is active: drop the copper ring, show barrel + wall only
 in vec2 vLocal; in float vOuter; in float vDrill;
-flat in int vLayer; in float vNet; flat in int vRing;
+flat in int vLayer; in float vNet; flat in int vRing; in float vFlag;
 out vec4 frag;
 void main(){
   if (cullLayer(vLayer)) discard;
@@ -315,7 +364,7 @@ void main(){
     // mask/paste/silk-only view (every via instance is keyed to a copper layer). shade()
     // multiplies this by uObjAlpha, so pass 1.0 (not uObjAlpha) here.
     float la = uForceBarrel > 0.5 ? 1.0 : uLayerAlpha[vLayer];
-    frag = shade(mix(uViaColor, uViaHole, wall), la, cov, vNet, -1.0);
+    frag = shade(mix(uViaColor, uViaHole, wall), la, cov, vNet, -1.0, vFlag);
     return;
   }
   // Solid disc — no centre hole; the plated barrel fills the middle (matches KiCad).
@@ -326,7 +375,7 @@ void main(){
   // layer's colour) outside it.
   vec3 col = mix(uViaColor, uLayerColor[vLayer], smoothstep(vDrill - uAA, vDrill + uAA, r));
   col = mix(col, uViaHole, wall);
-  frag = shade(col, uLayerAlpha[vLayer], cov, vNet, -1.0);
+  frag = shade(col, uLayerAlpha[vLayer], cov, vNet, -1.0, vFlag);
 }`;
 
 // --- drill holes (instanced rounded-rect SDF: a circle for a round drill, a stadium
@@ -389,20 +438,21 @@ layout(location=0) in vec2 aPos;
 layout(location=1) in float aLayer;
 layout(location=2) in float aNet;
 layout(location=3) in float aComp;
+layout(location=4) in float aFlag;
 ${CAMERA_UNIFORMS}
-flat out int vLayer; out float vNet; out float vComp;
+flat out int vLayer; out float vNet; out float vComp; out float vFlag;
 void main(){
-  vLayer = int(aLayer + 0.5); vNet = aNet; vComp = aComp;
+  vLayer = int(aLayer + 0.5); vNet = aNet; vComp = aComp; vFlag = aFlag;
   gl_Position = toClip(aPos);
 }`;
 
 const TRI_FS = `#version 300 es
 ${FRAG_COMMON}
-flat in int vLayer; in float vNet; in float vComp;
+flat in int vLayer; in float vNet; in float vComp; in float vFlag;
 out vec4 frag;
 void main(){
   if (cullLayer(vLayer)) discard;
-  frag = shade(uLayerColor[vLayer], uLayerAlpha[vLayer], 1.0, vNet, vComp);
+  frag = shade(uLayerColor[vLayer], uLayerAlpha[vLayer], 1.0, vNet, vComp, vFlag);
 }`;
 
 // ----------------------------------------------------------------- GL helpers
@@ -459,10 +509,10 @@ interface Batch {
   instanced: boolean;
 }
 
-const LINE_STRIDE = 8; // ax,ay,bx,by,hw,layer,net,comp
-const PAD_STRIDE = 9; // cx,cy,hx,hy,angle,radius,layer,net,comp
-const VIA_STRIDE = 7; // cx,cy,outer,drill,layer,net,ring
-const TRI_STRIDE = 5; // x,y,layer,net,comp
+const LINE_STRIDE = 9; // ax,ay,bx,by,hw,layer,net,comp,flag
+const PAD_STRIDE = 10; // cx,cy,hx,hy,angle,radius,layer,net,comp,flag
+const VIA_STRIDE = 8; // cx,cy,outer,drill,layer,net,ring,flag
+const TRI_STRIDE = 6; // x,y,layer,net,comp,flag
 const HOLE_STRIDE = 6; // cx,cy,hx,hy,angle,npth
 
 /** Mutable arrays accumulated while walking the IR, one per GPU batch. */
@@ -494,8 +544,9 @@ class Accum {
     layer: number,
     net: number,
     comp: number,
+    flag = 0,
   ) {
-    arr.push(ax, ay, bx, by, hw, layer, net, comp);
+    arr.push(ax, ay, bx, by, hw, layer, net, comp, flag);
     this.grow(ax, ay);
     this.grow(bx, by);
   }
@@ -546,13 +597,14 @@ function polylineToLines(
   net: number,
   comp: number,
   close: boolean,
+  flag = 0,
 ) {
   const n = pts.length / 2;
   for (let i = 0; i + 1 < n; i++) {
-    acc.pushLine(arr, pts[i * 2], pts[i * 2 + 1], pts[i * 2 + 2], pts[i * 2 + 3], hw, layer, net, comp);
+    acc.pushLine(arr, pts[i * 2], pts[i * 2 + 1], pts[i * 2 + 2], pts[i * 2 + 3], hw, layer, net, comp, flag);
   }
   if (close && n > 2) {
-    acc.pushLine(arr, pts[(n - 1) * 2], pts[(n - 1) * 2 + 1], pts[0], pts[1], hw, layer, net, comp);
+    acc.pushLine(arr, pts[(n - 1) * 2], pts[(n - 1) * 2 + 1], pts[0], pts[1], hw, layer, net, comp, flag);
   }
 }
 
@@ -564,13 +616,14 @@ function fillPolygon(
   layer: number,
   net: number,
   comp: number,
+  flag = 0,
 ) {
   if (pts.length < 6) return;
   const tris = earcut(pts);
   for (const idx of tris) {
     const x = pts[idx * 2];
     const y = pts[idx * 2 + 1];
-    arr.push(x, y, layer, net, comp);
+    arr.push(x, y, layer, net, comp, flag);
     acc.grow(x, y);
   }
 }
@@ -585,14 +638,15 @@ function fillCircle(
   layer: number,
   net: number,
   comp: number,
+  flag = 0,
 ) {
   const steps = 32;
   for (let i = 0; i < steps; i++) {
     const a0 = (i / steps) * Math.PI * 2;
     const a1 = ((i + 1) / steps) * Math.PI * 2;
-    arr.push(cx, cy, layer, net, comp);
-    arr.push(cx + r * Math.cos(a0), cy + r * Math.sin(a0), layer, net, comp);
-    arr.push(cx + r * Math.cos(a1), cy + r * Math.sin(a1), layer, net, comp);
+    arr.push(cx, cy, layer, net, comp, flag);
+    arr.push(cx + r * Math.cos(a0), cy + r * Math.sin(a0), layer, net, comp, flag);
+    arr.push(cx + r * Math.cos(a1), cy + r * Math.sin(a1), layer, net, comp, flag);
   }
   acc.grow(cx - r, cy - r);
   acc.grow(cx + r, cy + r);
@@ -667,6 +721,8 @@ export class PcbGlRenderer {
   private viaHole: [number, number, number] = [0.93, 0.93, 0.93];
   private drillColor: [number, number, number] = [0.08, 0.09, 0.11];
   private npthColor: [number, number, number] = [0.102, 0.769, 0.824]; // --pcb-npth fallback (#1ac4d2)
+  /** Flat grey for the unchanged base in diff mode (--pcb-diff-base). */
+  private diffBase: [number, number, number] = [0.545, 0.561, 0.596]; // #8b8f98 fallback
   private dpr = 1;
   private selActive = false;
   /** Count of highlighted nets + components in the current mask (the "marked" probe
@@ -680,9 +736,13 @@ export class PcbGlRenderer {
   /** Net-name labels, computed once from the IR (the overlay culls/sizes per frame). */
   private labels: NetLabel[] | null = null;
 
-  constructor(gl: WebGL2RenderingContext, geom: PcbGeometry) {
+  /** Per-primitive changed flags for diff mode (baked into the batches); null = all 0. */
+  private diffFlags: DiffFlags | null = null;
+
+  constructor(gl: WebGL2RenderingContext, geom: PcbGeometry, diffFlags?: DiffFlags) {
     this.gl = gl;
     this.geom = geom;
+    this.diffFlags = diffFlags ?? null;
     this.progLine = link(gl, LINE_VS, LINE_FS);
     this.progPad = link(gl, PAD_VS, PAD_FS);
     this.progVia = link(gl, VIA_VS, VIA_FS);
@@ -728,6 +788,8 @@ export class PcbGlRenderer {
   private build(geom: PcbGeometry): Accum {
     const acc = new Accum();
     const clampLayer = (l: number) => (l >= 0 && l < MAX_LAYERS ? l : 0);
+    const df = this.diffFlags;
+    const flagOf = (arr: Uint8Array | undefined, i: number) => (arr && arr[i] ? 1 : 0);
 
     // tracks: straight segments
     const seg = geom.tracks.seg;
@@ -736,6 +798,7 @@ export class PcbGlRenderer {
         acc.trackLines,
         seg.xy[i * 4], seg.xy[i * 4 + 1], seg.xy[i * 4 + 2], seg.xy[i * 4 + 3],
         seg.w[i] / 2, clampLayer(seg.layer[i]), seg.net[i], -1,
+        flagOf(df?.seg, i),
       );
     }
     // tracks: arcs → flattened polylines
@@ -744,11 +807,13 @@ export class PcbGlRenderer {
       const poly = arcPolyline(
         arc.xy[i * 6], arc.xy[i * 6 + 1], arc.xy[i * 6 + 2], arc.xy[i * 6 + 3], arc.xy[i * 6 + 4], arc.xy[i * 6 + 5],
       );
-      polylineToLines(acc, acc.trackLines, poly, arc.w[i] / 2, clampLayer(arc.layer[i]), arc.net[i], -1, false);
+      polylineToLines(acc, acc.trackLines, poly, arc.w[i] / 2, clampLayer(arc.layer[i]), arc.net[i], -1, false, flagOf(df?.arc, i));
     }
 
     // graphics: board (no comp) vs footprint (comp set)
-    for (const g of geom.graphics) {
+    for (let gi = 0; gi < geom.graphics.length; gi++) {
+      const g = geom.graphics[gi];
+      const flag = flagOf(df?.graphics, gi);
       const layer = clampLayer(g.layer);
       const comp = g.comp ?? -1;
       const lineArr = comp >= 0 ? acc.fpLines : acc.boardLines;
@@ -756,29 +821,31 @@ export class PcbGlRenderer {
       const hw = Math.max(g.width, 0.01) / 2;
       const d = g.data;
       if (g.kind === "seg") {
-        acc.pushLine(lineArr, d[0], d[1], d[2], d[3], hw, layer, 0, comp);
+        acc.pushLine(lineArr, d[0], d[1], d[2], d[3], hw, layer, 0, comp, flag);
       } else if (g.kind === "arc") {
         const poly = arcPolyline(d[0], d[1], d[2], d[3], d[4], d[5]);
-        polylineToLines(acc, lineArr, poly, hw, layer, 0, comp, false);
+        polylineToLines(acc, lineArr, poly, hw, layer, 0, comp, false, flag);
       } else if (g.kind === "circle") {
-        if (g.filled) fillCircle(acc, fillArr, d[0], d[1], d[2], layer, 0, comp);
+        if (g.filled) fillCircle(acc, fillArr, d[0], d[1], d[2], layer, 0, comp, flag);
         else {
           const poly: number[] = [];
           for (let i = 0; i <= ARC_SEG; i++) {
             const a = (i / ARC_SEG) * Math.PI * 2;
             poly.push(d[0] + d[2] * Math.cos(a), d[1] + d[2] * Math.sin(a));
           }
-          polylineToLines(acc, lineArr, poly, hw, layer, 0, comp, false);
+          polylineToLines(acc, lineArr, poly, hw, layer, 0, comp, false, flag);
         }
       } else if (g.kind === "poly") {
-        if (g.filled) fillPolygon(acc, fillArr, d, layer, 0, comp);
-        else polylineToLines(acc, lineArr, d, hw, layer, 0, comp, true);
+        if (g.filled) fillPolygon(acc, fillArr, d, layer, 0, comp, flag);
+        else polylineToLines(acc, lineArr, d, hw, layer, 0, comp, true, flag);
       }
     }
 
     // pads (expanded across the copper layers each pad sits on). A non-plated through
     // hole has no copper — it paints as a bare hole only (no pad disc).
-    for (const p of geom.pads) {
+    for (let pi = 0; pi < geom.pads.length; pi++) {
+      const p = geom.pads[pi];
+      const pFlag = flagOf(df?.pads, pi);
       const ang = (p.angle * Math.PI) / 180;
       if (!p.npth) {
         const baseR = padRadius(p.shape, p.w, p.h, p.rratio ?? 0);
@@ -797,14 +864,14 @@ export class PcbGlRenderer {
             if (isTht) continue;
             const mw = Math.max(p.w + 2 * m, 0.05), mh = Math.max(p.h + 2 * m, 0.05);
             const mr = baseR > 0 ? Math.max(baseR + m, 0) : 0;
-            acc.pads.push(p.x, p.y, mw / 2, mh / 2, ang, mr, clampLayer(layer), p.net, p.comp);
+            acc.pads.push(p.x, p.y, mw / 2, mh / 2, ang, mr, clampLayer(layer), p.net, p.comp, pFlag);
           } else if (role === "paste") {
             if (isTht) continue;
             // Solder-paste aperture: the pad copper footprint (KiCad's default paste margin is
             // 0; a per-pad paste margin isn't carried in the IR). Same shape/size as the copper.
-            acc.pads.push(p.x, p.y, p.w / 2, p.h / 2, ang, baseR, clampLayer(layer), p.net, p.comp);
+            acc.pads.push(p.x, p.y, p.w / 2, p.h / 2, ang, baseR, clampLayer(layer), p.net, p.comp, pFlag);
           } else if (this.isCopperLayerIdx(geom, layer)) {
-            acc.pads.push(p.x, p.y, p.w / 2, p.h / 2, ang, baseR, clampLayer(layer), p.net, p.comp);
+            acc.pads.push(p.x, p.y, p.w / 2, p.h / 2, ang, baseR, clampLayer(layer), p.net, p.comp, pFlag);
           }
         }
       }
@@ -826,24 +893,28 @@ export class PcbGlRenderer {
     // a full annular ring on that layer: on the layers a via doesn't connect to (KiCad
     // "remove unused layers") the shader draws only the barrel + hole wall, no ring.
     // Identical concentric discs otherwise, so stacking visible layers is harmless.
-    for (const v of geom.vias) {
+    for (let vi = 0; vi < geom.vias.length; vi++) {
+      const v = geom.vias[vi];
+      const vFlag = flagOf(df?.vias, vi);
       const layers = v.layers.length ? v.layers : [0];
       const ring = v.ring ? new Set(v.ring) : null; // null → every spanned layer keeps its ring
       for (const layer of layers) {
         const hasRing = !ring || ring.has(layer) ? 1 : 0;
-        acc.vias.push(v.x, v.y, v.size / 2, v.drill / 2, clampLayer(layer), v.net, hasRing);
+        acc.vias.push(v.x, v.y, v.size / 2, v.drill / 2, clampLayer(layer), v.net, hasRing, vFlag);
       }
       acc.grow(v.x - v.size, v.y - v.size);
       acc.grow(v.x + v.size, v.y + v.size);
     }
 
     // zones → triangles
-    for (const z of geom.zones) {
+    for (let zi = 0; zi < geom.zones.length; zi++) {
+      const z = geom.zones[zi];
+      const zFlag = flagOf(df?.zones, zi);
       if (!z.filled) {
         // keepout / unfilled: outline only
-        polylineToLines(acc, acc.boardLines, z.pts, 0.06, clampLayer(z.layer), z.net, -1, true);
+        polylineToLines(acc, acc.boardLines, z.pts, 0.06, clampLayer(z.layer), z.net, -1, true, zFlag);
       } else {
-        fillPolygon(acc, acc.zoneTris, z.pts, clampLayer(z.layer), z.net, -1);
+        fillPolygon(acc, acc.zoneTris, z.pts, clampLayer(z.layer), z.net, -1, zFlag);
       }
     }
 
@@ -890,6 +961,7 @@ export class PcbGlRenderer {
       { loc: 4, size: 1, offset: 5 },
       { loc: 5, size: 1, offset: 6 },
       { loc: 6, size: 1, offset: 7 },
+      { loc: 7, size: 1, offset: 8 }, // aFlag
     ];
     const padAttrs: AttrSpec[] = [
       { loc: 1, size: 2, offset: 0 },
@@ -899,6 +971,7 @@ export class PcbGlRenderer {
       { loc: 5, size: 1, offset: 6 },
       { loc: 6, size: 1, offset: 7 },
       { loc: 7, size: 1, offset: 8 },
+      { loc: 8, size: 1, offset: 9 }, // aFlag
     ];
     const viaAttrs: AttrSpec[] = [
       { loc: 1, size: 2, offset: 0 },
@@ -907,12 +980,14 @@ export class PcbGlRenderer {
       { loc: 4, size: 1, offset: 4 },
       { loc: 5, size: 1, offset: 5 },
       { loc: 6, size: 1, offset: 6 },
+      { loc: 7, size: 1, offset: 7 }, // aFlag
     ];
     const triAttrs: AttrSpec[] = [
       { loc: 0, size: 2, offset: 0 },
       { loc: 1, size: 1, offset: 2 },
       { loc: 2, size: 1, offset: 3 },
       { loc: 3, size: 1, offset: 4 },
+      { loc: 4, size: 1, offset: 5 }, // aFlag
     ];
     const holeAttrs: AttrSpec[] = [
       { loc: 1, size: 2, offset: 0 }, // aCenter
@@ -965,6 +1040,7 @@ export class PcbGlRenderer {
     this.viaHole = resolveCssColor("var(--pcb-hole)");
     this.drillColor = resolveCssColor("var(--pcb-drill)");
     this.npthColor = resolveCssColor("var(--pcb-npth)");
+    this.diffBase = resolveCssColor("var(--pcb-diff-base)");
   }
 
   /** Recompute per-layer alpha + the active-layer index from the hidden set + active
@@ -1275,8 +1351,15 @@ export class PcbGlRenderer {
     gl.uniform1f(gl.getUniformLocation(prog, "uAA"), 1 / Math.max(scale, 1e-6));
   }
 
+  /** Live diff-pass state for the current render call (set by render(opts)). */
+  private diffPass: 0 | 1 | 2 = 0;
+  private diffColor: RGB = [1, 0, 0];
+
   private setCommonUniforms(prog: WebGLProgram, objAlpha: number) {
     const gl = this.gl;
+    gl.uniform1i(gl.getUniformLocation(prog, "uDiffPass"), this.diffPass);
+    gl.uniform3f(gl.getUniformLocation(prog, "uDiffColor"), this.diffColor[0], this.diffColor[1], this.diffColor[2]);
+    gl.uniform3f(gl.getUniformLocation(prog, "uDiffBase"), this.diffBase[0], this.diffBase[1], this.diffBase[2]);
     gl.uniform3fv(gl.getUniformLocation(prog, "uLayerColor"), this.layerColors);
     gl.uniform1fv(gl.getUniformLocation(prog, "uLayerAlpha"), this.layerAlpha);
     gl.uniform1f(gl.getUniformLocation(prog, "uObjAlpha"), objAlpha);
@@ -1361,12 +1444,17 @@ export class PcbGlRenderer {
     gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, batch.count);
   }
 
-  /** Render one frame. `objState` carries the per-class visibility + opacity. */
-  render(cam: Camera, w: number, h: number, objState: ObjectState) {
+  /** Render one frame. `objState` carries the per-class visibility + opacity.
+   *  `opts` drives the diff compare passes (see RenderOpts); omitted = normal draw. */
+  render(cam: Camera, w: number, h: number, objState: ObjectState, opts?: RenderOpts) {
     const gl = this.gl;
+    this.diffPass = opts?.diffPass ?? 0;
+    if (opts?.diffColor) this.diffColor = opts.diffColor;
     gl.viewport(0, 0, w, h);
-    gl.clearColor(0, 0, 0, 0);
-    gl.clear(gl.COLOR_BUFFER_BIT);
+    if (opts?.clear !== false) {
+      gl.clearColor(0, 0, 0, 0);
+      gl.clear(gl.COLOR_BUFFER_BIT);
+    }
 
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, this.netMask);
@@ -1386,10 +1474,13 @@ export class PcbGlRenderer {
 
     // Drill holes ride the "pads" class and paint last so the hole reads on top — but only
     // when a layer they're exposed on (copper/mask/paste/silk) is visible, so they don't
-    // float over a board with every layer turned off.
-    if (objState.objects["pads"] !== false && this.exposedLayerVisible()) {
+    // float over a board with every layer turned off. Holes carry no changed-flag, so the
+    // changed-only overlay pass (2) skips them; the base/normal passes draw them.
+    const wantHoles = (opts?.holes ?? true) && this.diffPass !== 2;
+    if (wantHoles && objState.objects["pads"] !== false && this.exposedLayerVisible()) {
       this.drawHoles(cam, w, h, objState.opacity["pads"] ?? 1);
     }
+    this.diffPass = 0; // never leak a compare pass into the next plain render call
   }
 
   /** Draw every object class once for the current `layerMode` (the shaders cull by

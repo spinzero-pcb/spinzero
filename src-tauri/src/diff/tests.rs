@@ -235,9 +235,91 @@ fn geom_with_comp(refdes: &str, x: f64, y: f64, angle: f64, layer: i32) -> Geome
             y,
             angle,
             bbox: Some([x - 1.0, y - 1.0, 2.0, 2.0]),
+            uuid: String::new(),
         }],
         ..Default::default()
     }
+}
+
+/// A geometry with `n` same-designator footprints at 1 mm x-steps (stitching-via
+/// style), each with uuid `"u<i>"` (or empty when `uuids` is false).
+fn geom_with_dups(refdes: &str, n: usize, uuids: bool, moved: Option<(usize, f64)>) -> Geometry {
+    let mut g = Geometry {
+        layers: vec![GeomLayer { name: "F.Cu".into(), role: "copper".into() }],
+        nets: vec![String::new()],
+        ..Default::default()
+    };
+    for i in 0..n {
+        let mut x = 10.0 + i as f64;
+        if let Some((mi, dx)) = moved {
+            if mi == i {
+                x += dx;
+            }
+        }
+        g.components.push(GeomComp {
+            reference: refdes.into(),
+            layer: 0,
+            x,
+            y: 5.0,
+            angle: 0.0,
+            bbox: Some([x - 0.5, 4.5, 1.0, 1.0]),
+            uuid: if uuids { format!("u{i}") } else { String::new() },
+        });
+    }
+    g
+}
+
+#[test]
+fn placement_uuid_pairs_repeated_designators() {
+    // 136-style repeated designator: 6 STITCH1 footprints, one shifted 2 mm. UUID
+    // pairing must yield exactly ONE placement row (the shifted instance), not a
+    // flood of one row per sibling (the old designator-map collapse).
+    let mut a = bundle(empty_indexes());
+    a.geometry = Some(geom_with_dups("STITCH1", 6, true, None));
+    let mut b = bundle(empty_indexes());
+    b.geometry = Some(geom_with_dups("STITCH1", 6, true, Some((3, 2.0))));
+
+    let doc = diff_bundles(&a, &b, &changed(&["board.kicad_pcb"]));
+    let rows: Vec<_> = doc.changes.iter().filter(|c| c.group == Group::Placement).collect();
+    assert_eq!(rows.len(), 1, "one accurate row, no designator collapse: {rows:?}");
+    assert!(rows[0].title.contains("STITCH1") && rows[0].title.contains("2.00"), "{}", rows[0].title);
+}
+
+#[test]
+fn placement_legacy_fallback_no_flood() {
+    // Same board but extracted before the uuid field existed (empty uuids): the
+    // per-designator positional fallback still reports exactly one moved instance —
+    // exact-position siblings consume each other, the moved pair zips leftover-to-
+    // leftover.
+    let mut a = bundle(empty_indexes());
+    a.geometry = Some(geom_with_dups("STITCH1", 6, false, None));
+    let mut b = bundle(empty_indexes());
+    b.geometry = Some(geom_with_dups("STITCH1", 6, false, Some((3, 2.0))));
+
+    let doc = diff_bundles(&a, &b, &changed(&["board.kicad_pcb"]));
+    let rows: Vec<_> = doc.changes.iter().filter(|c| c.group == Group::Placement).collect();
+    assert_eq!(rows.len(), 1, "positional fallback must not flood: {rows:?}");
+    assert!(rows[0].title.contains("moved"), "{}", rows[0].title);
+}
+
+#[test]
+fn placement_uuid_survives_reannotation() {
+    // The SAME footprint instance (same uuid) renamed R12 → R15 and moved: uuid
+    // pairing still produces one placement row (under the new name), even though
+    // the designators differ on the two sides.
+    let mut ga = geom_with_comp("R12", 10.0, 10.0, 0.0, 0);
+    ga.components[0].uuid = "fixed-uuid".into();
+    let mut gb = geom_with_comp("R15", 14.0, 10.0, 0.0, 0);
+    gb.components[0].uuid = "fixed-uuid".into();
+    let mut a = bundle(empty_indexes());
+    a.geometry = Some(ga);
+    let mut b = bundle(empty_indexes());
+    b.geometry = Some(gb);
+
+    let doc = diff_bundles(&a, &b, &changed(&["board.kicad_pcb"]));
+    let rows: Vec<_> = doc.changes.iter().filter(|c| c.group == Group::Placement).collect();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert!(rows[0].title.contains("R15") && rows[0].title.contains("4.00"), "{}", rows[0].title);
 }
 
 #[test]

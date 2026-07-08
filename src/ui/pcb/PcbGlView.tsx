@@ -14,8 +14,11 @@ import { measureNav, nav, pcbNav, type ChipComment } from "../canvas/navigator";
 import { ContextMenu, type MenuItem } from "../ContextMenu";
 import { IconClose, IconComment, IconCopy, IconFit, IconRuler, IconSheet, IconTrash } from "../icons";
 import type { CommentAnchor } from "../../lib/types";
-import type { PcbTextDef } from "../../lib/pcbGeometry";
-import { PcbGlRenderer, netLabelRows, type BBox, type Camera, type ObjectState } from "./glRenderer";
+import type { PcbGeometry, PcbTextDef } from "../../lib/pcbGeometry";
+import { PcbGlRenderer, netLabelRows, type BBox, type Camera, type DiffFlags, type ObjectState, type RGB } from "./glRenderer";
+import { computeDiffFlags } from "./glDiff";
+import { isTypingTarget } from "../../lib/keymap";
+import { useDiffStore, type PcbDiffMode } from "../../stores/diffStore";
 import { resolveCssColor } from "./glColor";
 import { registerRenderProbe } from "../../lib/renderProbe";
 import { parseMarkup, type MarkupRun } from "./textMarkup";
@@ -292,10 +295,34 @@ export function PcbGlView({ visible }: { visible: boolean }) {
   const measureActive = useMeasureStore((s) => s.active);
   const measureUnits = useMeasureStore((s) => s.units);
 
+  // Visual diff (plan §4): while a comparison is active and BOTH sides carry a PCB
+  // geometry IR, the view renders one of the compare modes instead of the plain board.
+  const diffActive = useDiffStore((s) => s.active);
+  const pcbDiffMode = useDiffStore((s) => s.pcbMode);
+
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const labelCanvasRef = useRef<HTMLCanvasElement>(null);
   const commentLayerRef = useRef<HTMLDivElement>(null);
   const rendererRef = useRef<PcbGlRenderer | null>(null);
+  /** The A (older) side's renderer, sharing the same GL context; null outside diff mode. */
+  const rendererARef = useRef<PcbGlRenderer | null>(null);
+  const glRef = useRef<WebGL2RenderingContext | null>(null);
+  /** Prepared diff inputs (A geometry + both sides' changed flags); renderers rebuild
+   *  with the flags baked in when this lands (diffEpoch bump re-runs the create effect). */
+  const diffDataRef = useRef<{ geomA: PcbGeometry; flagsA: DiffFlags; flagsB: DiffFlags } | null>(null);
+  const [diffEpoch, setDiffEpoch] = useState(0);
+  const diffModeRef = useRef<PcbDiffMode | null>(null);
+  diffModeRef.current = diffActive ? pcbDiffMode : null;
+  /** The indexes the current renderer was built for — a rebuild for the SAME design
+   *  (diff enter/exit) keeps the camera; a new design triggers the first fit. */
+  const lastIndexesRef = useRef<typeof indexes | null>(null);
+  /** Flicker phase (true = showing A) + Space-held pause; wipe divider as a 0..1 fraction. */
+  const flickA = useRef(false);
+  const flickHold = useRef(false);
+  const wipeFrac = useRef(0.5);
+  const [wipePct, setWipePct] = useState(50); // divider position for the DOM handle
+  /** Diff tint colours, re-resolved with the theme (never hardcoded — CLAUDE.md). */
+  const diffColors = useRef<{ removed: RGB; added: RGB }>({ removed: [1, 0.2, 0.2], added: [0.2, 1, 0.4] });
   const cam = useRef<Camera>({ x: 0, y: 0, scale: 1 });
   const dirty = useRef(true);
   const needsFit = useRef(false);
@@ -812,12 +839,40 @@ export function PcbGlView({ visible }: { visible: boolean }) {
     }
   };
 
+  // ---- diff-mode inputs: A geometry + both sides' changed flags ------------
+  // Prepared asynchronously; landing bumps diffEpoch so the create effect below
+  // rebuilds both renderers with the flags baked into their GPU batches.
+  useEffect(() => {
+    if (!diffActive) {
+      if (diffDataRef.current) {
+        diffDataRef.current = null;
+        setDiffEpoch((e) => e + 1); // rebuild back to the plain single-board renderer
+      }
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      const geomB = await getPcbGeometry();
+      const geomA = await useDiffStore.getState().getPcbGeometryA(indexes?.pcb_geometry);
+      if (cancelled || !geomA || !geomB) return; // schematic-only side → plain render
+      const flags = computeDiffFlags(geomA, geomB);
+      diffDataRef.current = { geomA, flagsA: flags.a, flagsB: flags.b };
+      setDiffEpoch((e) => e + 1);
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [diffActive, indexes, getPcbGeometry]);
+
   // ---- create / dispose renderer -----------------------------------------
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas || !indexes?.pcb_geometry) {
       rendererRef.current?.dispose();
       rendererRef.current = null;
+      rendererARef.current?.dispose();
+      rendererARef.current = null;
       return;
     }
     // premultipliedAlpha: true — the SRC_ALPHA blend leaves a premultiplied framebuffer;
@@ -825,36 +880,51 @@ export function PcbGlView({ visible }: { visible: boolean }) {
     // that reads worst on thin tracks).
     const gl = canvas.getContext("webgl2", { antialias: true, premultipliedAlpha: true });
     if (!gl || gl.isContextLost()) return; // a lost context can't build GL resources yet
+    glRef.current = gl;
     let cancelled = false;
     let created: PcbGlRenderer | null = null;
+    let createdA: PcbGlRenderer | null = null;
     void getPcbGeometry().then((geom) => {
       if (cancelled || !geom) return;
+      const diff = diffDataRef.current;
       try {
-        created = new PcbGlRenderer(gl, geom);
+        created = new PcbGlRenderer(gl, geom, diff?.flagsB);
+        // The A side shares the GL context (two compact geometries resident is fine);
+        // its own layer table maps the same hidden/active names.
+        if (diff) createdA = new PcbGlRenderer(gl, diff.geomA, diff.flagsA);
       } catch (e) {
         console.error("PcbGlRenderer init failed", e);
         return;
       }
       rendererRef.current = created;
+      rendererARef.current = createdA;
       snapIndex.current = buildSnapIndex(geom); // measure-tool point-snap targets (§5)
       edgeIndex.current = buildEdgeIndex(geom); // on-edge / edge-to-edge projection (feature 13)
       // Drop any measurement carried over from the previous board.
       mA.current = mB.current = mHover.current = null;
       const pv = usePcbViewStore.getState();
       created.setLayerState(pv.hidden, pv.active);
+      createdA?.setLayerState(pv.hidden, pv.active);
       syncSelection(created);
       renderPcbCommentChips(); // re-anchor chips to the fresh geometry
-      fitted.current = false; // fresh board isn't framed until the first-sized-frame fit
-      needsFit.current = true;
+      // A NEW design refits; a diff-mode rebuild of the SAME board keeps the camera
+      // (entering/leaving a comparison must not yank the user's viewpoint).
+      if (lastIndexesRef.current !== indexes) {
+        lastIndexesRef.current = indexes;
+        fitted.current = false;
+        needsFit.current = true;
+      }
       dirty.current = true;
     });
     return () => {
       cancelled = true;
       created?.dispose();
+      createdA?.dispose();
       if (rendererRef.current === created) rendererRef.current = null;
+      if (rendererARef.current === createdA) rendererARef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [indexes, getPcbGeometry, restoreNonce]);
+  }, [indexes, getPcbGeometry, restoreNonce, diffEpoch]);
 
   // Context-loss recovery (see contextLost above). Prevent the default so the browser can
   // restore the context, drop the now-invalid renderer, and rebuild on restore. Listeners
@@ -886,14 +956,61 @@ export function PcbGlView({ visible }: { visible: boolean }) {
     const r = rendererRef.current;
     if (!r) return;
     r.resolveColors();
+    rendererARef.current?.resolveColors();
     dirty.current = true;
   }, [indexes?.theme]);
+
+  // Diff tint colours track the theme: same removed/added semantics as the schematic
+  // tints (--err / --ok). Re-resolved on theme change and on entering diff mode.
+  useEffect(() => {
+    if (!diffActive) return;
+    diffColors.current = {
+      removed: resolveCssColor("var(--err)"),
+      added: resolveCssColor("var(--ok)"),
+    };
+    dirty.current = true;
+  }, [diffActive, indexes?.theme]);
+
+  // Flicker mode: blink A/B at ~2 Hz; holding Space freezes the current side (plan §4).
+  useEffect(() => {
+    if (!diffActive || pcbDiffMode !== "flicker") {
+      flickA.current = false;
+      return;
+    }
+    const t = setInterval(() => {
+      if (flickHold.current) return;
+      flickA.current = !flickA.current;
+      dirty.current = true;
+    }, 500);
+    const down = (e: KeyboardEvent) => {
+      if (e.code === "Space" && !isTypingTarget(e)) {
+        e.preventDefault();
+        flickHold.current = true;
+      }
+    };
+    const up = (e: KeyboardEvent) => {
+      if (e.code === "Space") flickHold.current = false;
+    };
+    window.addEventListener("keydown", down);
+    window.addEventListener("keyup", up);
+    return () => {
+      clearInterval(t);
+      window.removeEventListener("keydown", down);
+      window.removeEventListener("keyup", up);
+    };
+  }, [diffActive, pcbDiffMode]);
+
+  // Mode switches need a redraw (the loop is dirty-driven).
+  useEffect(() => {
+    dirty.current = true;
+  }, [diffActive, pcbDiffMode]);
 
   // ---- store → renderer sync ---------------------------------------------
   useEffect(() => {
     const r = rendererRef.current;
     if (!r) return;
     r.setLayerState(hidden, active);
+    rendererARef.current?.setLayerState(hidden, active);
     dirty.current = true;
   }, [hidden, active]);
 
@@ -1018,7 +1135,35 @@ export function PcbGlView({ visible }: { visible: boolean }) {
         }
         if (dirty.current && w > 0 && h > 0) {
           r.setDpr(dpr);
-          r.render(cam.current, w, h, objRef.current);
+          const rA = rendererARef.current;
+          const mode = diffModeRef.current;
+          const gl = glRef.current;
+          if (rA && mode && gl) {
+            rA.setDpr(dpr);
+            const { removed, added } = diffColors.current;
+            const obj = objRef.current;
+            if (mode === "onion") {
+              // Isolated-layer overlay: the unchanged common base as a flat grey (from B),
+              // then A's removed copper in red, then B's added copper in green on top.
+              r.render(cam.current, w, h, obj, { diffPass: 1 });
+              rA.render(cam.current, w, h, obj, { clear: false, diffPass: 2, diffColor: removed });
+              r.render(cam.current, w, h, obj, { clear: false, diffPass: 2, diffColor: added });
+            } else if (mode === "flicker") {
+              // A/B blink at the same camera — motion perception catches subtle moves.
+              (flickA.current ? rA : r).render(cam.current, w, h, obj);
+            } else {
+              // Wipe: A left of the divider, B right (scissor test; clear obeys it).
+              const split = Math.round(w * wipeFrac.current);
+              gl.enable(gl.SCISSOR_TEST);
+              gl.scissor(0, 0, Math.max(split, 0), h);
+              rA.render(cam.current, w, h, objRef.current);
+              gl.scissor(split, 0, Math.max(w - split, 0), h);
+              r.render(cam.current, w, h, objRef.current);
+              gl.disable(gl.SCISSOR_TEST);
+            }
+          } else {
+            r.render(cam.current, w, h, objRef.current);
+          }
           drawOverlay(r, canvas.clientWidth, canvas.clientHeight, dpr);
           // Comment chips ride their world anchors at fixed screen size.
           const cw = canvas.clientWidth;
@@ -1280,6 +1425,30 @@ export function PcbGlView({ visible }: { visible: boolean }) {
         />
         {/* Object-anchored comment chips (chips are pointer-interactive; layer is not). */}
         <div ref={commentLayerRef} className="pcb-comments" />
+        {/* Diff wipe mode: draggable vertical divider — A (older) left, B (newer) right. */}
+        {diffActive && pcbDiffMode === "wipe" && (
+          <div
+            className="pcb-wipe-divider"
+            style={{ left: `${wipePct}%` }}
+            onPointerDown={(e) => {
+              e.stopPropagation();
+              (e.currentTarget as Element).setPointerCapture(e.pointerId);
+            }}
+            onPointerMove={(e) => {
+              if (!(e.currentTarget as Element).hasPointerCapture(e.pointerId)) return;
+              const host = (e.currentTarget as HTMLElement).parentElement!;
+              const rect = host.getBoundingClientRect();
+              const f = Math.min(0.98, Math.max(0.02, (e.clientX - rect.left) / rect.width));
+              wipeFrac.current = f;
+              setWipePct(Math.round(f * 1000) / 10);
+              dirty.current = true;
+            }}
+            title="Drag to wipe between the older (left) and newer (right) revision"
+          >
+            <span className="pcb-wipe-tag pcb-wipe-tag-a">old</span>
+            <span className="pcb-wipe-tag pcb-wipe-tag-b">new</span>
+          </div>
+        )}
         {/* Floating tool bar (fit / zoom / measure / comment) — PCB-only, top-centre. */}
         <PcbToolbar onFit={fit} onZoomIn={() => zoomBy(1.4)} onZoomOut={() => zoomBy(1 / 1.4)} />
         {/* GL context loss: show an inline retry instead of a silently-blank board (bug 1). */}

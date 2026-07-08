@@ -119,6 +119,11 @@ pub struct CompDef {
     /// Placed courtyard/graphic extent `[x, y, w, h]`, board mm.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bbox: Option<[f64; 4]>,
+    /// The footprint's KiCad uuid — the stable per-instance identity. Designators
+    /// can repeat (e.g. 136 stitching vias all named STITCH1), so the diff engine
+    /// pairs footprint instances across revisions by this, not by reference.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub uuid: String,
 }
 
 /// Copper tracks — the bulk of a board — kept columnar so the renderer uploads them
@@ -485,6 +490,7 @@ pub fn build(pcb: &Pcb, theme: &crate::theme::Theme, source: &str) -> Geometry {
             angle: r4(fp.at.angle),
             dnp: fp.dnp,
             bbox,
+            uuid: fp.uuid.clone(),
         });
     }
 

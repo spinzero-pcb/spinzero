@@ -39,6 +39,9 @@ export interface PcbCompDef {
   dnp?: boolean;
   /** Placed courtyard/graphic extent [x, y, w, h]. */
   bbox?: [number, number, number, number];
+  /** KiCad footprint uuid — stable per-instance identity (EPOCH ≥ 19; absent on
+   *  legacy caches / Altium). The diff engine pairs instances across revisions by it. */
+  uuid?: string;
 }
 
 /** Straight track segments: `xy` is [x1,y1,x2,y2] per segment; `w`/`layer`/`net`

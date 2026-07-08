@@ -221,6 +221,10 @@ pub struct GeomComp {
     pub angle: f64,
     #[serde(default)]
     pub bbox: Option<[f64; 4]>,
+    /// Stable per-instance identity (the KiCad footprint uuid; EPOCH ≥ 19).
+    /// Empty for legacy caches / Altium — those fall back to designator pairing.
+    #[serde(default)]
+    pub uuid: String,
 }
 
 #[derive(Deserialize, Default, Clone)]
@@ -998,14 +1002,85 @@ fn diff_docs(a: &Bundle, b: &Bundle, out: &mut Vec<Change>) {
 // =========================================================== placement diff
 
 /// Component placement changes from the geometry IR (move / rotate / side flip).
+///
+/// Instances are paired by **footprint uuid** (the stable per-instance identity,
+/// EPOCH ≥ 19): a shifted STITCH1 among 136 same-designator stitching footprints is
+/// one accurate row, unchanged siblings none. Instances without a uuid on either
+/// side (legacy caches extracted before the field existed, Altium) fall back to
+/// designator pairing that is duplicate-safe: within a repeated designator, exact
+/// positions consume each other first, then leftovers pair in sorted-position order
+/// — never the old first-instance collapse that flooded one row per sibling.
 fn diff_placement(a: &Geometry, b: &Geometry, out: &mut Vec<Change>) {
-    let by_ref_a: HashMap<&str, &GeomComp> = a.components.iter().map(|c| (c.reference.as_str(), c)).collect();
-    let mut common: Vec<&GeomComp> =
-        b.components.iter().filter(|c| by_ref_a.contains_key(c.reference.as_str())).collect();
-    common.sort_by(|x, y| x.reference.cmp(&y.reference));
+    // --- 1) uuid pairing (exact identity) ---
+    let by_uuid_a: HashMap<&str, &GeomComp> = a
+        .components
+        .iter()
+        .filter(|c| !c.uuid.is_empty())
+        .map(|c| (c.uuid.as_str(), c))
+        .collect();
+    let mut paired_a: HashSet<&str> = HashSet::new(); // uuids consumed on A
+    let mut pairs: Vec<(&GeomComp, &GeomComp)> = Vec::new();
+    let mut rest_b: Vec<&GeomComp> = Vec::new(); // B instances with no uuid match
+    for cb in &b.components {
+        match (!cb.uuid.is_empty()).then(|| by_uuid_a.get(cb.uuid.as_str())).flatten() {
+            Some(ca) => {
+                paired_a.insert(ca.uuid.as_str());
+                pairs.push((ca, cb));
+            }
+            None => rest_b.push(cb),
+        }
+    }
+    let rest_a: Vec<&GeomComp> = a
+        .components
+        .iter()
+        .filter(|c| c.uuid.is_empty() || !paired_a.contains(c.uuid.as_str()))
+        .collect();
 
-    for cb in common {
-        let ca = by_ref_a[cb.reference.as_str()];
+    // --- 2) designator fallback for the unpaired remainder (legacy / Altium) ---
+    // Group each side's leftovers by designator; within a group, exact-position
+    // matches consume first (an unmoved duplicate never pairs with a moved one),
+    // then the leftovers zip in sorted order. Surplus instances on one side are
+    // add/remove territory (the component diff's job), not placement rows.
+    let mut ga: BTreeMap<&str, Vec<&GeomComp>> = BTreeMap::new();
+    for c in rest_a {
+        ga.entry(c.reference.as_str()).or_default().push(c);
+    }
+    let mut gb: BTreeMap<&str, Vec<&GeomComp>> = BTreeMap::new();
+    for c in rest_b {
+        gb.entry(c.reference.as_str()).or_default().push(c);
+    }
+    let pos_key = |c: &GeomComp| ((c.x * 1e4).round() as i64, (c.y * 1e4).round() as i64);
+    for (refdes, mut va) in ga {
+        let Some(vb) = gb.remove(refdes) else { continue };
+        let mut vb: Vec<&GeomComp> = vb;
+        va.sort_by(|x, y| pos_key(x).cmp(&pos_key(y)));
+        vb.sort_by(|x, y| pos_key(x).cmp(&pos_key(y)));
+        // Exact-position pairs first (still compared: angle/side may have changed).
+        let mut used_b = vec![false; vb.len()];
+        let mut left_a: Vec<&GeomComp> = Vec::new();
+        for ca in va {
+            let hit = (0..vb.len()).find(|&j| !used_b[j] && pos_key(vb[j]) == pos_key(ca));
+            match hit {
+                Some(j) => {
+                    used_b[j] = true;
+                    pairs.push((ca, vb[j]));
+                }
+                None => left_a.push(ca),
+            }
+        }
+        // Zip the moved leftovers in sorted-position order.
+        let left_b: Vec<&GeomComp> =
+            vb.iter().zip(&used_b).filter(|(_, u)| !**u).map(|(c, _)| *c).collect();
+        for (ca, cb) in left_a.into_iter().zip(left_b) {
+            pairs.push((ca, cb));
+        }
+    }
+
+    // --- 3) compare each pair and emit rows for real deltas ---
+    pairs.sort_by(|(_, x), (_, y)| {
+        (x.reference.as_str(), pos_key(x)).cmp(&(y.reference.as_str(), pos_key(y)))
+    });
+    for (ca, cb) in pairs {
         let dx = cb.x - ca.x;
         let dy = cb.y - ca.y;
         let dist = dx.hypot(dy);

@@ -6,6 +6,7 @@ import {
   type DiffDoc,
   type DiffSide,
 } from "../lib/diff";
+import { parsePcbGeometry, type PcbGeometry } from "../lib/pcbGeometry";
 import { useProjectStore } from "./projectStore";
 import { useViewStore } from "./viewStore";
 import { useReviewStore } from "./reviewStore";
@@ -19,6 +20,11 @@ import type { ExtractionMeta } from "../lib/types";
  *  but the store only ever holds `sideBySide`, and no dead toggle is rendered. */
 export type DiffMode = "sideBySide";
 
+/** PCB compare mode (plan §4): combined onion-skin (default — removed red / added
+ *  green over the dimmed common base), A/B flicker (~2 Hz, Space holds), and a
+ *  draggable wipe divider (A left / B right). PCB side-by-side is deferred. */
+export type PcbDiffMode = "onion" | "flicker" | "wipe";
+
 interface DiffState {
   /** True while a comparison is active (diff mode) — view-global. */
   active: boolean;
@@ -30,6 +36,8 @@ interface DiffState {
   cacheKeyB: string | null;
   doc: DiffDoc | null;
   mode: DiffMode;
+  /** PCB compare mode (onion default); reset on every enter/exit. */
+  pcbMode: PcbDiffMode;
   /** The change the stepper is currently on (null = none focused yet). */
   focusedChangeId: string | null;
   /** Reviewer's own progress — ephemeral per app session (plan §11). */
@@ -38,10 +46,15 @@ interface DiffState {
   preparing: boolean;
   /** The active revision id to restore on exit (what B replaced). */
   priorActive: string | null;
+  /** PCB layer visibility/active to restore on exit — diff mode isolates the changed
+   *  layer (hides all others), so we snapshot the user's view and put it back. */
+  priorPcbView: { hidden: string[]; active: string | null } | null;
 
   /** A-side sheet SVG text cache (by sheet number), fetched via read_artifact_from
    *  with cacheKeyA. Lives HERE, not in designStore, so exit = drop it (plan §7). */
   sheetSvgA: Map<number, Promise<string>>;
+  /** Memoised A-side PCB geometry fetch (one per diff session; dropped on exit). */
+  pcbGeomA: Promise<PcbGeometry | null> | null;
 
   /** `normalize: false` keeps the given direction verbatim (used by swap — the
    *  default ancestry normalization would immediately flip it back). */
@@ -55,6 +68,10 @@ interface DiffState {
   markGroupSeen: (ids: string[], seen?: boolean) => void;
   /** Fetch an A-side sheet SVG (cache-relative path), memoised per session. */
   getSheetSvgA: (num: number, relPath: string) => Promise<string>;
+  setPcbMode: (m: PcbDiffMode) => void;
+  /** Fetch + parse the A-side PCB geometry IR (same cache-relative path as B's —
+   *  deterministic extraction), memoised per diff session. Null when A has no board. */
+  getPcbGeometryA: (relPath: string | undefined) => Promise<PcbGeometry | null>;
 }
 
 /** Normalize (revA, revB) to old → new: prefer DAG ancestry (is A an ancestor of B?),
@@ -99,11 +116,14 @@ export const useDiffStore = create<DiffState>((set, get) => ({
   cacheKeyB: null,
   doc: null,
   mode: "sideBySide",
+  pcbMode: "onion",
   focusedChangeId: null,
   seen: new Set(),
   preparing: false,
   priorActive: null,
+  priorPcbView: null,
   sheetSvgA: new Map(),
+  pcbGeomA: null,
 
   enterDiff: async (revA, revB, opts) => {
     if (get().preparing) return; // don't overlap a prepare
@@ -113,6 +133,12 @@ export const useDiffStore = create<DiffState>((set, get) => ({
     // Re-entering while already comparing (swap) must keep the ORIGINAL pre-diff
     // revision as the thing exit restores — the current active is the pinned B.
     const priorActive = get().active ? get().priorActive : activeExtraction;
+    // Snapshot the user's PCB layer view once (a swap keeps the original) so exit can
+    // undo the changed-layer isolation focusChange applies.
+    const pv = usePcbViewStore.getState();
+    const priorPcbView = get().active
+      ? get().priorPcbView
+      : { hidden: [...pv.hidden], active: pv.active };
 
     set({ preparing: true });
     try {
@@ -137,7 +163,10 @@ export const useDiffStore = create<DiffState>((set, get) => ({
         seen: new Set(),
         preparing: false,
         priorActive,
+        priorPcbView,
         sheetSvgA: new Map(),
+        pcbGeomA: null,
+        pcbMode: "onion",
       });
       // The Changes tab auto-activates on enter; the panel appears only in diff mode.
       useReviewStore.getState().setLeftTab("review");
@@ -163,10 +192,16 @@ export const useDiffStore = create<DiffState>((set, get) => ({
   },
 
   exitDiff: () => {
-    const { active, priorActive } = get();
+    const { active, priorActive, priorPcbView } = get();
     if (!active) return;
     // Drop ALL comparison state — exiting diff mode is just dropping this store.
     diffPaint.clearA();
+    // Restore the PCB layer view the changed-layer isolation replaced.
+    if (priorPcbView) {
+      const pv = usePcbViewStore.getState();
+      pv.setHidden(priorPcbView.hidden);
+      pv.setActive(priorPcbView.active);
+    }
     set({
       active: false,
       a: null,
@@ -177,7 +212,10 @@ export const useDiffStore = create<DiffState>((set, get) => ({
       focusedChangeId: null,
       seen: new Set(),
       priorActive: null,
+      priorPcbView: null,
       sheetSvgA: new Map(),
+      pcbGeomA: null,
+      pcbMode: "onion",
     });
     // Restore the revision that was active before we pinned B (best-effort — a failed
     // restore just leaves B active, which is harmless and surfaces its own toast).
@@ -214,8 +252,9 @@ export const useDiffStore = create<DiffState>((set, get) => ({
       diffPaint.clearA(); // no schematic side to show
       const anchor = pcbAnchorToCommentAnchor(change);
       if (anchor) {
-        // Activate the layer this change lives on if cheap (mirrors cross-probe).
-        maybeActivateLayer(pcb.layers);
+        // Isolate the layer(s) this change lives on: make it active and hide every other
+        // layer, so the compare shows just that layer's copper (red/green over grey).
+        isolateLayer(pcb.layers);
         pcbNav.reveal(anchor);
       }
     }
@@ -241,6 +280,25 @@ export const useDiffStore = create<DiffState>((set, get) => ({
       }
       return { seen: next };
     }),
+
+  setPcbMode: (m) => set({ pcbMode: m }),
+
+  getPcbGeometryA: (relPath) => {
+    const { pcbGeomA, cacheKeyA } = get();
+    if (pcbGeomA) return pcbGeomA;
+    if (!cacheKeyA || !relPath) return Promise.resolve(null);
+    const p = ipc
+      .readArtifactFrom(cacheKeyA, relPath)
+      .then((txt) => parsePcbGeometry(txt))
+      .catch((): PcbGeometry | null => {
+        // A schematic-only A side (or a read hiccup): compare modes stay unavailable,
+        // the PCB view falls back to the plain B render. Don't cache the failure.
+        set({ pcbGeomA: null });
+        return null;
+      });
+    set({ pcbGeomA: p });
+    return p;
+  },
 
   getSheetSvgA: (num, relPath) => {
     const { sheetSvgA, cacheKeyA } = get();
@@ -273,12 +331,16 @@ function step(
   if (target) get().focusChange(target.id);
 }
 
-/** Activate the copper layer a PCB change lives on, if the appearance panel supports
- *  it cheaply (mirrors App.tsx activeLayerForSelection). No-op when no layer is known. */
-function maybeActivateLayer(layers: string[] | undefined) {
+/** Isolate the layer(s) a PCB change lives on: make the first active and hide every
+ *  other known layer, so the compare renders only that layer's copper. No-op when no
+ *  layer is known. The pre-diff view is restored on exit (priorPcbView). */
+function isolateLayer(layers: string[] | undefined) {
   const layer = layers?.[0];
   if (!layer) return;
   const pv = usePcbViewStore.getState();
-  pv.showLayer(layer);
+  const keep = new Set(layers);
+  // Hide all known layers except the change's own — `known` is the full layer table
+  // (populated by resetForLayers when the board loads).
+  pv.setHidden(pv.known.filter((l) => !keep.has(l)));
   pv.setActive(layer);
 }
