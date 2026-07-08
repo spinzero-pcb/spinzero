@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useHistoryStore } from "../../stores/historyStore";
 import { useProjectStore } from "../../stores/projectStore";
+import { useDiffStore } from "../../stores/diffStore";
 import { ContextMenu, type MenuItem } from "../ContextMenu";
 import { IconCopy, IconGear, IconHistory, IconPin, IconRefresh, IconSparkle, IconTrash } from "../icons";
 import { formatLocalTime } from "../../lib/time";
@@ -22,7 +23,9 @@ const shortId = (id: string) => id.slice(0, 10);
  *  with a "viewing" marker on the active node and per-row actions: open / rename / tag /
  *  publish (with a required changelog) / hide / delete. Local checkpoints render
  *  distinctly (hollow dot + "local" badge + italic) so a reader sees only the published
- *  line as the "normal" history. (Compare/diff was removed per feedback.) */
+ *  line as the "normal" history. Compare/diff is a first-class feature again (visual-diff
+ *  §3): "Compare with…" enters pick mode, "Compare with previous" uses the parent pointer,
+ *  and "Compare tips" appears when the DAG has two heads. */
 export function HistoryGraph() {
   const open = useHistoryStore((s) => s.open);
   const showHidden = useHistoryStore((s) => s.showHidden);
@@ -40,6 +43,11 @@ export function HistoryGraph() {
   const removeTag = useProjectStore((s) => s.removeTag);
   const deleteCheckpoint = useProjectStore((s) => s.deleteCheckpoint);
   const purgeLocal = useProjectStore((s) => s.purgeLocal);
+  const enterDiff = useDiffStore((s) => s.enterDiff);
+
+  // Compare pick-mode: after "Compare with…", the graph waits for a second row; other
+  // rows get a target affordance and Esc cancels (visual-diff §3).
+  const [compareFrom, setCompareFrom] = useState<string | null>(null);
 
   const [ctx, setCtx] = useState<{ x: number; y: number; id: string } | null>(null);
   const [editing, setEditing] = useState<string | null>(null); // rename
@@ -58,11 +66,12 @@ export function HistoryGraph() {
       if (e.key !== "Escape") return;
       if (confirmDel) setConfirmDel(null);
       else if (publishing) setPublishing(null);
+      else if (compareFrom) setCompareFrom(null); // cancel compare pick-mode
       else closeGraph();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [open, closeGraph, publishing, confirmDel]);
+  }, [open, closeGraph, publishing, confirmDel, compareFrom]);
 
   const layout = useMemo(() => layoutDag(extractions, showHidden), [extractions, showHidden]);
   if (!open) return null;
@@ -77,6 +86,27 @@ export function HistoryGraph() {
 
   const openVersion = (id: string) =>
     void setActiveExtraction(id === latestId ? null : id).then(closeGraph);
+
+  // The nearest present parent for "Compare with previous" (first parent = nearest
+  // ancestor on the active lane, per the VC plan §8). null for a root revision.
+  const parentOf = (r: ExtractionMeta): string | null => {
+    const present = r.parents.find((p) => extractions.some((e) => e.id === p));
+    return present ?? null;
+  };
+
+  // DAG tips = revisions that are nobody's parent (the branch heads). Two+ tips is the
+  // fork case the "Compare tips" shortcut targets.
+  const tips = useMemo(() => {
+    const isParent = new Set(extractions.flatMap((e) => e.parents));
+    return extractions.filter((e) => !e.hidden && !isParent.has(e.id));
+  }, [extractions]);
+
+  // Start a comparison and close the graph; enterDiff normalizes order + pins B active.
+  const startCompare = (a: string, b: string) => {
+    setCompareFrom(null);
+    closeGraph();
+    void enterDiff(a, b);
+  };
 
   function saveLabel(id: string) {
     const label = draft.trim() ? draft.trim() : null;
@@ -106,8 +136,20 @@ export function HistoryGraph() {
 
   function rowMenu(r: ExtractionMeta): MenuItem[] {
     const localOnly = r.is_checkpoint && !r.published;
+    const parent = parentOf(r);
     const items: MenuItem[] = [
       { label: "Open this version", icon: <IconHistory size={14} />, onClick: () => openVersion(r.id) },
+      { separator: true },
+      // Compare (visual-diff §3). "Compare with…" enters pick mode; "Compare with
+      // previous" uses the parent pointer and is disabled for a root (no parent).
+      { label: "Compare with…", icon: <IconHistory size={14} />, onClick: () => { setEditing(null); setTagging(null); setCompareFrom(r.id); } },
+      {
+        label: "Compare with previous",
+        icon: <IconHistory size={14} />,
+        disabled: !parent,
+        onClick: () => parent && startCompare(parent, r.id),
+      },
+      { separator: true },
       { label: "Rename…", icon: <IconGear size={14} />, onClick: () => { setTagging(null); setDraft(r.label ?? ""); setEditing(r.id); } },
       { label: "Add tag…", icon: <IconPin size={14} />, onClick: () => { setEditing(null); setTagDraft(""); setTagging(r.id); } },
     ];
@@ -151,11 +193,30 @@ export function HistoryGraph() {
           <label className="history-toggle">
             <input type="checkbox" checked={showHidden} onChange={toggleHidden} /> Show deleted
           </label>
+          {/* Fork awareness: when the DAG has two heads, one click compares them
+              (visual-diff §3). Compares the two newest tips. */}
+          {tips.length >= 2 && (
+            <button
+              className="btn-ghost history-compare-tips"
+              title={`Compare the two branch heads (${tips[0].id.slice(0, 8)} vs ${tips[1].id.slice(0, 8)})`}
+              onClick={() => startCompare(tips[1].id, tips[0].id)}
+            >
+              <IconHistory size={13} /> Compare tips
+            </button>
+          )}
           <span style={{ flex: 1 }} />
           <button className="btn-ghost" onClick={closeGraph}>
             Close
           </button>
         </div>
+
+        {compareFrom && (
+          <div className="rev-nudge compare-nudge">
+            Pick a revision to compare with{" "}
+            <b>{rowText(extractions.find((e) => e.id === compareFrom) ?? ({} as ExtractionMeta))}</b>{" "}
+            — or press Esc to cancel.
+          </div>
+        )}
 
         {localCount > 0 && (
           <div className="rev-nudge">
@@ -205,10 +266,19 @@ export function HistoryGraph() {
                   return (
                     <div
                       key={r.id}
-                      className={`dag-row ${localOnly ? "is-local" : ""} ${r.hidden ? "is-hidden" : ""} ${r.id === activeId ? "is-viewing" : ""}`}
+                      className={`dag-row ${localOnly ? "is-local" : ""} ${r.hidden ? "is-hidden" : ""} ${r.id === activeId ? "is-viewing" : ""} ${
+                        compareFrom ? (compareFrom === r.id ? "compare-from" : "compare-target") : ""
+                      }`}
                       style={{ height: ROW_H }}
                       onClick={() => {
                         if (editing === r.id || tagging === r.id) return;
+                        // In compare pick-mode a click picks the second revision (unless
+                        // it's the same row — clicking the source again just cancels).
+                        if (compareFrom) {
+                          if (compareFrom === r.id) setCompareFrom(null);
+                          else startCompare(compareFrom, r.id);
+                          return;
+                        }
                         openVersion(r.id);
                       }}
                       onContextMenu={(e) => {

@@ -24,6 +24,7 @@ import type {
   UiSettings,
 } from "./types";
 import type { DesignIndexes } from "./design";
+import type { DiffHandle } from "./diff";
 
 export const ipc = {
   // ---- projects ----
@@ -68,6 +69,16 @@ export const ipc = {
   unhideRevision: (id: string) => invoke<void>("unhide_revision", { id }),
   diffRevisions: (a: string, b: string) =>
     invoke<RevisionDiff>("diff_revisions", { a, b }),
+  /** Semantic visual-diff: ensure both revision caches, run the diff engine, and
+   *  return the changeset + both cache keys + resolved labels (visual-diff §6.1).
+   *  Idempotent + cached; equal revisions short-circuit to an empty doc. */
+  prepareDiff: (revA: string, revB: string) =>
+    invoke<DiffHandle>("prepare_diff", { revA, revB }),
+  /** Read an artifact (metadata-stripped) from a *specific* revision's cache by its
+   *  cache key, so the diff view can load the A (older) side's sheets while B stays
+   *  the active revision (visual-diff §6.2). */
+  readArtifactFrom: (cacheKey: string, relPath: string) =>
+    invoke<string>("read_artifact_from", { cacheKey, relPath }),
   /** Promote a machine-local checkpoint into the synced (shared) history (item 5:
    *  a changelog message is required, enforced in the UI and the backend). */
   publishCheckpoint: (id: string, message: string) =>

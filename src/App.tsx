@@ -8,6 +8,8 @@ import { StatusBar } from "./ui/shell/StatusBar";
 import { ThreadPopover } from "./ui/review/ThreadPopover";
 import { CommentBridge } from "./ui/review/CommentBridge";
 import { Canvas } from "./ui/canvas/Canvas";
+import { DiffSchematicA } from "./ui/canvas/DiffSchematicA";
+import { DiffBanner } from "./ui/diff/DiffBanner";
 import { PcbGlView } from "./ui/pcb/PcbGlView";
 import { BomTab } from "./ui/BomTab";
 import { Palette } from "./ui/Palette";
@@ -26,6 +28,7 @@ import { useViewStore, type MainView } from "./stores/viewStore";
 import { useReviewStore } from "./stores/reviewStore";
 import { useMeasureStore } from "./stores/measureStore";
 import { useHistoryStore } from "./stores/historyStore";
+import { useDiffStore } from "./stores/diffStore";
 import { canvasRestore, measureNav, nav, pcbNav } from "./ui/canvas/navigator";
 import { isTypingTarget, resolveKey } from "./lib/keymap";
 import type { Selection } from "./lib/design";
@@ -77,6 +80,7 @@ export default function App() {
   const view = useViewStore((s) => s.view);
   const setView = useViewStore((s) => s.setView);
   const loadReviews = useReviewStore((s) => s.load);
+  const diffActive = useDiffStore((s) => s.active);
   const [palette, setPalette] = useState<null | "search" | "commands">(null);
 
   useEffect(() => {
@@ -226,6 +230,40 @@ export default function App() {
           }
           break;
         case "crossProbe": {
+          // In diff mode, X toggles the FOCUSED change between its schematic and PCB
+          // anchors (a both-anchored change is one entry — §5). Falls through to the
+          // normal selection cross-probe when the change has only one anchor.
+          const diff = useDiffStore.getState();
+          if (diff.active && diff.focusedChangeId) {
+            const change = diff.doc?.changes.find((c) => c.id === diff.focusedChangeId);
+            const hasSch = !!change?.anchors.schematic;
+            const hasPcb = !!change?.anchors.pcb;
+            if (change && hasSch && hasPcb) {
+              const { view: v } = useViewStore.getState();
+              // Re-focus targeting the other canvas: focusChange prefers schematic, so
+              // flip the view first, then let the anchor land it.
+              if (v === "schematic") {
+                setView("pcb");
+                const anchor = (() => {
+                  const p = change.anchors.pcb!;
+                  if (p.net) return { type: "net" as const, ref: p.net };
+                  if (p.comp) return { type: "component" as const, ref: p.comp };
+                  if (p.bbox)
+                    return {
+                      type: "region" as const,
+                      ref: change.id,
+                      rect: { x: p.bbox[0], y: p.bbox[1], w: p.bbox[2], h: p.bbox[3] },
+                    };
+                  return null;
+                })();
+                if (anchor) pcbNav.reveal(anchor);
+              } else {
+                setView("schematic");
+                diff.focusChange(change.id); // re-runs schematic landing + tint
+              }
+              break;
+            }
+          }
           // X: schematic ↔ PCB with the same selection (WS8).
           const { view: cur } = useViewStore.getState();
           const sel = useSelectionStore.getState().selection;
@@ -344,12 +382,20 @@ export default function App() {
             </button>
           ))}
         </div>
-        <div className={`canvas-area ${view === "pcb" ? "pcb" : ""}`}>
+        <div className={`canvas-area ${view === "pcb" ? "pcb" : ""} ${diffActive ? "diffing" : ""}`}>
+          {/* Diff-mode banner (visual-diff §3): view-global — sits above whichever
+              canvas (schematic / PCB) is up. Renders nothing outside diff mode. */}
+          <DiffBanner />
           {designLoaded ? (
             <>
               {/* Schematic and PCB both stay mounted across view switches so their
-                  camera, history and highlights survive a round-trip (item 3). */}
-              <div className="view-fill" style={{ display: view === "schematic" ? undefined : "none" }}>
+                  camera, history and highlights survive a round-trip (item 3). In diff
+                  mode the schematic view becomes side-by-side: read-only A (left) | B. */}
+              <div
+                className={`view-fill ${diffActive ? "diff-side-by-side" : ""}`}
+                style={{ display: view === "schematic" ? undefined : "none" }}
+              >
+                {diffActive && <DiffSchematicA />}
                 <Canvas />
               </div>
               <div className="view-fill" style={{ display: view === "pcb" ? undefined : "none" }}>

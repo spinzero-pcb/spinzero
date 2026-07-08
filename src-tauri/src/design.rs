@@ -188,6 +188,46 @@ pub fn build_indexes(vault_cache: Option<PathBuf>) -> Result<DesignIndexes, Stri
     build_indexes_kicad(&cache, &design_dir)
 }
 
+/// Extra per-bundle data the diff engine needs beyond the viewer `DesignIndexes`:
+/// the sheet-number → `.kicad_sch` filename map (for source-hash pruning) and the raw
+/// `pcb/geometry.json` text (parsed by the diff engine into its own IR mirror). This
+/// avoids widening the frontend-facing `DesignIndexes`/`design.ts` contract for
+/// backend-only diff needs.
+pub struct DiffBundleExtras {
+    /// Sheet number → source `.kicad_sch` file (design-relative), for pruning.
+    pub sheet_files: HashMap<i64, String>,
+    /// Raw contents of `pcb/geometry.json`, if the bundle has a board.
+    pub geometry_json: Option<String>,
+}
+
+/// Load a bundle's diff extras from its cache dir. Best-effort on the geometry (a
+/// schematic-only bundle simply has `geometry_json = None`); the sheet map is derived
+/// from the design JSON's `sheets[]`.
+pub fn load_diff_extras(cache: &Path) -> Result<DiffBundleExtras, String> {
+    let design_dir = find_design_dir(cache)?;
+    let d = read_design_json(&design_dir)?;
+
+    let mut sheet_files: HashMap<i64, String> = HashMap::new();
+    if let Some(arr) = d.get("sheets").and_then(|s| s.as_array()) {
+        for s in arr {
+            let Some(num) = s.get("sheet_number").and_then(|n| n.as_i64()) else { continue };
+            if let Some(file) = str_at(s, "filename").filter(|f| !f.is_empty()) {
+                sheet_files.insert(num, file.to_string());
+            }
+        }
+    }
+
+    // Geometry path comes from the manifest (same as build_indexes), read raw so the
+    // diff engine can deserialize its own mirror without loading the whole viewer IR.
+    let geometry_json = fs::read_to_string(design_dir.join("design_review_manifest.json"))
+        .ok()
+        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+        .and_then(|m| m.get("pcb_geometry").and_then(|v| v.as_str()).map(|s| s.to_string()))
+        .and_then(|rel| fs::read_to_string(design_dir.join(rel)).ok());
+
+    Ok(DiffBundleExtras { sheet_files, geometry_json })
+}
+
 /// KiCad design-JSON → viewer payload.
 fn build_indexes_kicad(cache: &Path, design_dir: &Path) -> Result<DesignIndexes, String> {
     let d = read_design_json(design_dir)?;

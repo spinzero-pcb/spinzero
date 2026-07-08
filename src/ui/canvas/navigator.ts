@@ -56,6 +56,13 @@ export interface Navigator {
   /** Item 8: center the camera on a comment's anchored object WITHOUT selecting or
    *  highlighting it — clicking a comment row just goes there. */
   reveal: (anchor: CommentAnchor) => void;
+  /** Visual diff: load `sheet` (by design-JSON number) if needed, centre on the given
+   *  element uuids, and paint a diff tint (`err`/`ok`/`warn` CSS-var role) with a pulse.
+   *  Read-only; selection/history are untouched. `uuids` empty ⇒ just fit the sheet
+   *  (added/removed-sheet placeholder). No-op outside diff mode. */
+  revealDiff: (sheet: number, uuids: string[], role: "err" | "ok" | "warn") => void;
+  /** Visual diff: clear any diff tint painted by `revealDiff` (on exit / refocus). */
+  clearDiff: () => void;
 }
 
 const noop = () => {};
@@ -75,6 +82,71 @@ export const nav: Navigator = {
   getViewState: () => null,
   setComments: noop,
   reveal: noop,
+  revealDiff: noop,
+  clearDiff: noop,
+};
+
+/** Shared-camera bridge for the schematic side-by-side (visual diff §4): the primary
+ *  Canvas (B, right) publishes its live camera + current sheet each frame; the read-only
+ *  A-island (left) follows it, and forwards its own pan/zoom deltas back through `drive`
+ *  so panning either side moves both. `drive` is registered by Canvas; `cam`/`sheet` are
+ *  written by Canvas each tick and read by the A-island. Inert outside diff mode. */
+export interface CamBridge {
+  /** Live smoothed camera + viewBox published by the B Canvas each frame. */
+  cam: { x: number; y: number; s: number };
+  vb: [number, number, number, number];
+  /** The sheet number currently loaded on the B Canvas (for name-pairing the A side). */
+  sheet: number | null;
+  /** Apply a pan delta (screen px) + zoom factor to the B Canvas camera. */
+  drive: (dx: number, dy: number, zoomFactor: number, anchorX: number, anchorY: number) => void;
+  /** Monotonic counter bumped whenever the B sheet changes, so the A island reloads. */
+  epoch: number;
+}
+
+export const camBridge: CamBridge = {
+  cam: { x: 0, y: 0, s: 1 },
+  vb: [0, 0, 297, 210],
+  sheet: null,
+  drive: noop,
+  epoch: 0,
+};
+
+import type { Change } from "../../lib/diff";
+import { tintRole } from "../../lib/diff";
+
+/** Diff-focus bridge: `focusChange` in diffStore calls `focus(change)` to drive BOTH
+ *  the B Canvas (via nav.revealDiff) and the A-island (which subscribes here) so the
+ *  two sides paint the same change in lockstep. Kept out of the store so neither canvas
+ *  needs a store import cycle. */
+export interface DiffPaint {
+  /** The change to render on the A island, or null to clear it. Set by `focus`/`clearA`. */
+  focused: Change | null;
+  /** Listeners (the A island) re-render when this changes. */
+  listeners: Set<() => void>;
+  focus: (change: Change) => void;
+  clearA: () => void;
+  subscribe: (fn: () => void) => () => void;
+}
+
+export const diffPaint: DiffPaint = {
+  focused: null,
+  listeners: new Set(),
+  focus(change) {
+    this.focused = change;
+    // Drive the B Canvas (schematic side only; PCB focus goes through pcbNav.reveal).
+    const sch = change.anchors.schematic;
+    if (sch) nav.revealDiff(sch.sheet, sch.uuids, tintRole(change.kind));
+    for (const fn of this.listeners) fn();
+  },
+  clearA() {
+    this.focused = null;
+    nav.clearDiff();
+    for (const fn of this.listeners) fn();
+  },
+  subscribe(fn) {
+    this.listeners.add(fn);
+    return () => this.listeners.delete(fn);
+  },
 };
 
 /** PCB-view imperative bridge: the PcbView owns its camera + islands and registers

@@ -4,8 +4,8 @@ import type { PresenceEntry } from "../lib/types";
 
 /** Ephemeral state for the history-graph overlay. The revision list + mutations live
  *  in `projectStore` (single source of truth); this only owns view state: whether the
- *  overlay is open and the show-hidden toggle, plus the soft presence feed. (Compare /
- *  diff was removed per feedback — the graph is read + act, not a diff tool.) */
+ *  overlay is open and the show-hidden toggle, plus the soft presence feed. Compare/diff
+ *  is driven from the graph again (visual-diff §3) but its state lives in `diffStore`. */
 interface HistoryState {
   open: boolean;
   showHidden: boolean;

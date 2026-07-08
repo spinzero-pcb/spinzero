@@ -5,6 +5,7 @@ import { useDesignStore } from "../../stores/designStore";
 import { useHistoryStore } from "../../stores/historyStore";
 import { useProjectStore } from "../../stores/projectStore";
 import { useSelectionStore } from "../../stores/selectionStore";
+import { useDiffStore } from "../../stores/diffStore";
 import { ipc } from "../../lib/ipc";
 import { formatLocalTime, formatRelative } from "../../lib/time";
 import { IconHistory, IconLocate, IconRefresh } from "../icons";
@@ -36,9 +37,30 @@ function SelectionMirror() {
 function VersionChip() {
   const extractions = useProjectStore((s) => s.extractions);
   const activeExtraction = useProjectStore((s) => s.activeExtraction);
+  const diffActive = useDiffStore((s) => s.active);
+  const diffA = useDiffStore((s) => s.a);
+  const diffB = useDiffStore((s) => s.b);
+  const exitDiff = useDiffStore((s) => s.exitDiff);
   const latestId = extractions[0]?.id ?? null;
   const shownId = activeExtraction ?? latestId;
   const shown = extractions.find((e) => e.id === shownId) ?? null;
+  // While comparing, the chip reflects the diff pair and exits diff mode on click
+  // (a fast off-ramp that doesn't require reaching for the banner ×).
+  if (diffActive && diffA && diffB) {
+    return (
+      <button
+        className="statusbar-btn comparing"
+        title="Comparing revisions — click to exit comparison"
+        onClick={exitDiff}
+      >
+        <IconHistory size={12} />
+        <span className="mono">
+          {diffA.label} → {diffB.label}
+        </span>
+        <span className="rev-old-tag">comparing</span>
+      </button>
+    );
+  }
   if (!shownId && extractions.length === 0) return null;
   const isOld = activeExtraction != null && activeExtraction !== latestId;
   // Footer shows the active revision's DATE and its tag, if any (item 9) — not the

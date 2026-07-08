@@ -2,6 +2,7 @@ mod cache;
 mod checkpoints;
 mod design;
 mod device;
+mod diff;
 mod events;
 mod index_db;
 mod logging;
@@ -628,6 +629,176 @@ fn diff_revisions(
     Ok(rawstore::diff_source_hashes(&from, &to))
 }
 
+/// What `prepare_diff` hands back: the changeset plus the two cache keys (so the
+/// frontend can lazily read B's artifacts via `read_artifact_from` while A stays
+/// active) and the resolved side labels. Field names cross to `src/lib/diff.ts`.
+#[derive(serde::Serialize)]
+struct DiffHandle {
+    doc: diff::DiffDoc,
+    /// Machine-local path of the cached `diff.json` (regenerable, never synced).
+    path: String,
+    cache_key_a: String,
+    cache_key_b: String,
+    label_a: String,
+    label_b: String,
+}
+
+/// Human-facing label for a revision row: its explicit label, else its message's
+/// first line, else the short revision id. Mirrors the history graph's row text.
+fn revision_label(rev: &rawstore::Revision) -> String {
+    if let Some(l) = rev.label.as_ref().filter(|l| !l.is_empty()) {
+        return l.clone();
+    }
+    if let Some(m) = rev.message.as_ref().and_then(|m| m.lines().next()).filter(|m| !m.is_empty()) {
+        return m.to_string();
+    }
+    rev.id.clone()
+}
+
+/// The `.kicad_pcb` source file in a revision's source-hash map (design-relative),
+/// for the diff engine's PCB-pass pruning. `None` for a board-less (schematic-only)
+/// revision.
+fn pcb_source_file(hashes: &std::collections::BTreeMap<String, String>) -> Option<String> {
+    hashes
+        .keys()
+        .find(|k| k.ends_with(".kicad_pcb"))
+        .cloned()
+}
+
+/// Prepare a semantic diff of two revisions (§6.1). Ensures both revision caches
+/// (short-circuits to an empty diff when the cache keys are equal), runs the pure
+/// engine, writes `diff.json` to the machine-local diff cache, GCs it, and returns
+/// the doc + both cache keys + labels. Read-only: no viewer state changes.
+#[tauri::command]
+fn prepare_diff(state: State<AppState>, rev_a: String, rev_b: String) -> Result<DiffHandle, String> {
+    let handle = current_project(&state)?;
+
+    let resolved_a = handle
+        .resolve_rev(&rev_a)
+        .ok_or_else(|| format!("unknown revision {rev_a}"))?;
+    let resolved_b = handle
+        .resolve_rev(&rev_b)
+        .ok_or_else(|| format!("unknown revision {rev_b}"))?;
+    let rev_meta_a = resolved_a.revision().clone();
+    let rev_meta_b = resolved_b.revision().clone();
+
+    let key_a = cache::cache_key(&rev_meta_a.source_hashes);
+    let key_b = cache::cache_key(&rev_meta_b.source_hashes);
+    let label_a = revision_label(&rev_meta_a);
+    let label_b = revision_label(&rev_meta_b);
+
+    // Both bundles are extracted at the current EXTRACTOR_CACHE_EPOCH, so equal cache
+    // keys ⇒ byte-identical bundles ⇒ empty diff. Short-circuit before any extraction.
+    if key_a == key_b {
+        let doc = diff::empty_doc(&rev_meta_a.id, &label_a, &rev_meta_b.id, &label_b);
+        let dkey = diff::diff_key(&key_a, &key_b);
+        let path = write_diff_cache(&handle.project_dir, &dkey, &doc)?;
+        return Ok(DiffHandle { doc, path, cache_key_a: key_a, cache_key_b: key_b, label_a, label_b });
+    }
+
+    // Materialize both bundles' caches up front, even when the diff doc itself is
+    // served from cache below: the frontend reads both sides' artifacts by cache key
+    // right after this returns, and the bundle cache GCs independently of the diff
+    // cache, so a cached doc must not outlive its bundles. (A re-extract is ~1 s.)
+    let cache_dir_a = ensure_revision_cache(&handle, &resolved_a)?;
+    let cache_dir_b = ensure_revision_cache(&handle, &resolved_b)?;
+
+    // Serve a cached diff.json when both bundles are unchanged. The changeset is a
+    // pure function of the two source-identical bundles, but the row labels/revs are
+    // per-request metadata (a revision can be relabeled), so refresh the sides.
+    let dkey = diff::diff_key(&key_a, &key_b);
+    let cache_path = diff::diff_cache_path(&handle.project_dir, &dkey);
+    if let Ok(text) = fs::read_to_string(&cache_path) {
+        if let Ok(mut doc) = serde_json::from_str::<diff::DiffDoc>(&text) {
+            doc.a = diff::DiffSide { rev: rev_meta_a.id.clone(), label: label_a.clone() };
+            doc.b = diff::DiffSide { rev: rev_meta_b.id.clone(), label: label_b.clone() };
+            return Ok(DiffHandle {
+                doc,
+                path: cache_path.to_string_lossy().into_owned(),
+                cache_key_a: key_a,
+                cache_key_b: key_b,
+                label_a,
+                label_b,
+            });
+        }
+    }
+
+    let bundle_a = load_diff_bundle(&cache_dir_a, &rev_meta_a, label_a.clone())?;
+    let bundle_b = load_diff_bundle(&cache_dir_b, &rev_meta_b, label_b.clone())?;
+
+    // Cheap per-file source-hash delta feeds the engine's pruning (§6.4). Altium
+    // prunes nothing (the delta is still computed and simply won't match .kicad_*).
+    let source_diff = rawstore::diff_source_hashes(&rev_meta_a.source_hashes, &rev_meta_b.source_hashes);
+
+    let doc = diff::diff_bundles(&bundle_a, &bundle_b, &source_diff);
+    let path = write_diff_cache(&handle.project_dir, &dkey, &doc)?;
+    diff::gc(&handle.project_dir, 8);
+
+    Ok(DiffHandle { doc, path, cache_key_a: key_a, cache_key_b: key_b, label_a, label_b })
+}
+
+/// Assemble a diff `Bundle` from a revision's cache dir: viewer indexes + the
+/// backend-only extras (sheet→file map, geometry IR).
+fn load_diff_bundle(
+    cache_dir: &Path,
+    rev: &rawstore::Revision,
+    label: String,
+) -> Result<diff::Bundle, String> {
+    let indexes = design::build_indexes(Some(cache_dir.to_path_buf()))?;
+    let extras = design::load_diff_extras(cache_dir)?;
+    let geometry = match extras.geometry_json {
+        Some(text) => serde_json::from_str::<diff::Geometry>(&text)
+            .map_err(|e| format!("geometry parse: {e}"))
+            .map(Some)?,
+        None => None,
+    };
+    Ok(diff::Bundle {
+        rev: rev.id.clone(),
+        label,
+        indexes,
+        sheet_files: extras.sheet_files,
+        geometry,
+        pcb_file: pcb_source_file(&rev.source_hashes),
+    })
+}
+
+/// Serialize + write a diff doc into the machine-local cache, returning its path.
+fn write_diff_cache(project_dir: &Path, dkey: &str, doc: &diff::DiffDoc) -> Result<String, String> {
+    let root = diff::diff_cache_root(project_dir);
+    fs::create_dir_all(&root).map_err(|e| e.to_string())?;
+    let path = diff::diff_cache_path(project_dir, dkey);
+    let text = serde_json::to_string(doc).map_err(|e| e.to_string())?;
+    // Atomic-ish publish: write a temp then rename, so a reader never sees a torn file.
+    let tmp = path.with_extension("json.tmp");
+    fs::write(&tmp, text.as_bytes()).map_err(|e| e.to_string())?;
+    if let Err(e) = fs::rename(&tmp, &path) {
+        let _ = fs::remove_file(&tmp);
+        return Err(e.to_string());
+    }
+    Ok(path.to_string_lossy().into_owned())
+}
+
+/// Read an artifact from a *specific* revision's cache by its cache key (§6.2), so the
+/// frontend can load the comparison (B) side's sheets/geometry while A stays active.
+/// Read-only; mirrors `read_artifact`'s metadata-stripping + path sanitization.
+#[tauri::command]
+fn read_artifact_from(
+    state: State<AppState>,
+    cache_key: String,
+    rel_path: String,
+) -> Result<String, String> {
+    let handle = current_project(&state)?;
+    // Reject a key that isn't a plain cache-key token, so it can't escape the cache root.
+    if cache_key.is_empty() || !cache_key.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return Err("invalid cache key".into());
+    }
+    let dir = cache::cache_dir(&handle.project_dir, &cache_key);
+    if !dir.is_dir() {
+        return Err(format!("no cached bundle for key {cache_key}"));
+    }
+    design::read_artifact(Some(dir), &rel_path)
+}
+
 /// Promote a machine-local checkpoint into the synced (shared) history. Idempotent —
 /// the content id dedupes, so re-publishing is a no-op.
 #[tauri::command]
@@ -1058,6 +1229,8 @@ pub fn run() {
             hide_revision,
             unhide_revision,
             diff_revisions,
+            prepare_diff,
+            read_artifact_from,
             publish_checkpoint,
             get_presence,
             delete_checkpoint,

@@ -10,7 +10,8 @@ import {
 import { sheetMatches, type Selection, type SheetRef } from "../../lib/design";
 import { isTypingTarget } from "../../lib/keymap";
 import { useViewStore } from "../../stores/viewStore";
-import { canvasRestore, nav, type ChipComment } from "./navigator";
+import { camBridge, canvasRestore, nav, type ChipComment } from "./navigator";
+import { useDiffStore } from "../../stores/diffStore";
 import { relabelInstances } from "./relabel";
 import { useReviewStore } from "../../stores/reviewStore";
 import { Overview } from "./Overview";
@@ -368,6 +369,35 @@ export function Canvas() {
         hiddenSources.current.push(src);
       }
       svg.appendChild(ov);
+    }
+    /** Visual-diff tint: clone the changed uuids into a `.hl-diff` overlay coloured by
+     *  the change's role (err/ok/warn CSS vars) and scrim the rest, so the focused change
+     *  reads against a dimmed sheet (§4). Kept in its own class so the normal
+     *  clearPaint/renderHighlights cycle never wipes it; cleared explicitly via clearDiff. */
+    function paintDiff(uuids: string[], role: "err" | "ok" | "warn") {
+      clearDiffPaint();
+      const svg = curSvg.current;
+      if (!svg) return;
+      // Dim the unchanged base (own scrim class, so it survives the highlight cycle).
+      const scrim = document.createElementNS(SVG_NS, "rect");
+      scrim.setAttribute("class", "hl-diff-scrim");
+      scrim.setAttribute("x", String(vb.current[0]));
+      scrim.setAttribute("y", String(vb.current[1]));
+      scrim.setAttribute("width", String(vb.current[2]));
+      scrim.setAttribute("height", String(vb.current[3]));
+      svg.appendChild(scrim);
+      if (uuids.length === 0) return;
+      const ov = document.createElementNS(SVG_NS, "g");
+      ov.setAttribute("class", `hl-diff hl-diff-${role} hl-diff-pulse`);
+      for (const u of uuids) {
+        const src = svg.querySelector(`g[data-uuid="${esc(u)}"]`) as SVGElement | null;
+        if (!src) continue;
+        ov.appendChild(src.cloneNode(true));
+      }
+      svg.appendChild(ov);
+    }
+    function clearDiffPaint() {
+      curSvg.current?.querySelectorAll(".hl-diff, .hl-diff-scrim").forEach((n) => n.remove());
     }
     function netMembersInDom(name: string): string[] {
       const svg = curSvg.current;
@@ -1217,6 +1247,47 @@ export function Canvas() {
             highlights: [...highlights.current],
           };
 
+    // Visual diff (§4): load the change's sheet if needed, centre on its uuids, and
+    // paint the diff tint. Read-only — no pushHistory / selection writes, so exiting
+    // diff mode leaves the normal viewing state exactly as it was.
+    nav.revealDiff = (sheet, uuids, role) =>
+      whenVisible(() => {
+        const land = () => {
+          if (uuids.length && centerOnUuids(uuids, 110)) {
+            /* framed the changed set */
+          } else {
+            fitSheet(); // added/removed sheet, or uuids not on this sheet → show context
+          }
+          paintDiff(uuids, role);
+        };
+        if (sheet !== curSheet.current && idx.sheets.some((s) => s.num === sheet)) {
+          void (async () => {
+            await loadSheet(sheet);
+            land();
+          })();
+        } else {
+          land();
+        }
+      });
+    nav.clearDiff = () => clearDiffPaint();
+
+    // Shared-camera driver for the A-island: it forwards its own pan (screen px) and
+    // wheel-zoom (factor about the cursor, in *this* canvas's screen space) here so
+    // panning/zooming either side moves both (§4).
+    camBridge.drive = (dx, dy, zoomFactor, anchorX, anchorY) => {
+      if (dx || dy) {
+        tgt.current.x += dx;
+        tgt.current.y += dy;
+      }
+      if (zoomFactor !== 1) {
+        const ns = Math.min(60, Math.max(0.2, tgt.current.s * zoomFactor));
+        const ratio = ns / tgt.current.s;
+        tgt.current.x = anchorX - (anchorX - tgt.current.x) * ratio;
+        tgt.current.y = anchorY - (anchorY - tgt.current.y) * ratio;
+        tgt.current.s = ns;
+      }
+    };
+
     // Debug-only render probe (Layer-2 E2E): tauri-pilot can't read the painted SVG
     // island, so expose the live render state for it to assert on via `eval`. No-op
     // outside dev builds. See lib/renderProbe.ts + docs/testing.md.
@@ -1249,6 +1320,18 @@ export function Canvas() {
       c.y += (t.y - c.y) * k;
       c.s += (t.s - c.s) * k;
       world.style.transform = `translate(${c.x}px,${c.y}px) scale(${c.s})`;
+      // Visual diff: publish the live camera + viewBox + sheet so the read-only A-island
+      // follows this (B) side (shared camera, §4). Cheap; only meaningful in diff mode.
+      if (useDiffStore.getState().active) {
+        camBridge.cam.x = c.x;
+        camBridge.cam.y = c.y;
+        camBridge.cam.s = c.s;
+        camBridge.vb = [...vb.current];
+        if (camBridge.sheet !== curSheet.current) {
+          camBridge.sheet = curSheet.current;
+          camBridge.epoch++;
+        }
+      }
       // Region/rubber outlines: compensate stroke for zoom (see .cmt-region css).
       // Set on the tiny group/element only — NOT on world — to avoid cascading a style
       // recalculation over the entire schematic SVG every frame (causes text jank).
@@ -1331,7 +1414,10 @@ export function Canvas() {
         nav.toggleHighlight = nav.fitView = nav.zoomBy = nav.toggleOverview =
         nav.applySelection = nav.setComments = () => {};
       nav.reveal = () => {};
+      nav.revealDiff = () => {};
+      nav.clearDiff = () => {};
       nav.getViewState = () => null;
+      camBridge.drive = () => {};
     };
   }, [indexes, getSheetSvg, setSelectionStore, setHighlightStore, setCurrentSheet]);
 
