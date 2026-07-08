@@ -1,0 +1,8 @@
+[package]
+name = "eda-parse-kicad"
+version = "0.0.1"
+edition = "2021"
+description = "Faithful parser and in-memory model for KiCad project/schematic/board files"
+license = "GPL-3.0-or-later"
+
+[dependencies]

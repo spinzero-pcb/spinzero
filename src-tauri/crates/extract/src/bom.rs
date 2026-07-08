@@ -1,0 +1,651 @@
+//! BOM synthesis from the design model.
+//!
+//! Two products:
+//!  * a **grouped** BOM (CSV + JSON) for the viewer app — coalesces identical
+//!    parts into line items;
+//!  * an **enriched review BOM** (CSV) for the AI review skills — resolves the
+//!    sourcing/compliance fields scattered across each part's free-form
+//!    parameters into stable columns, using a hybrid resolver (name-token
+//!    scoring + value shape + fill rate) with an audit sidecar.
+//!
+//! No JLCPCB/parts-database lookup is performed: manufacturer/MPN come only from
+//! explicit symbol properties; distributor part numbers (LCSC, Mouser, …) are
+//! surfaced as-is in their own columns.
+
+use std::collections::{BTreeMap, BTreeSet};
+
+use serde::Serialize;
+
+use crate::design::Component;
+
+/// Classification buckets excluded from the BOM (mechanical / fab artefacts).
+const EXCLUDED_CLASSES: &[&str] = &["mounting_hole", "fiducial", "test_point", "pcb"];
+
+/// A resolved sourcing/compliance field.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Field {
+    Mpn,
+    Manufacturer,
+    Datasheet,
+    Lifecycle,
+    Msl,
+    Rohs,
+    Reach,
+    Aecq,
+}
+
+impl Field {
+    fn all() -> [Field; 8] {
+        use Field::*;
+        [Mpn, Manufacturer, Datasheet, Lifecycle, Msl, Rohs, Reach, Aecq]
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Field::Mpn => "mpn",
+            Field::Manufacturer => "manufacturer",
+            Field::Datasheet => "datasheet",
+            Field::Lifecycle => "lifecycle",
+            Field::Msl => "msl",
+            Field::Rohs => "rohs",
+            Field::Reach => "reach",
+            Field::Aecq => "aecq",
+        }
+    }
+
+    /// (positive substrings, negative substrings, prefers-URL-shaped-values).
+    fn spec(self) -> (&'static [&'static str], &'static [&'static str], bool) {
+        match self {
+            Field::Mpn => (
+                &["mpn", "partnumber", "partno", "ordernumber", "orderingcode", "orderno"],
+                &["alternate", "supplier", "legacy", "deviceid", "internal", "distributor"],
+                false,
+            ),
+            Field::Manufacturer => (
+                &["manufacturer", "mfr", "mfg", "vendor", "maker", "brand"],
+                &["part", "order", "status", "number"],
+                false,
+            ),
+            Field::Datasheet => (&["datasheet"], &[], true),
+            Field::Lifecycle => (
+                &["lifecycle", "lifestatus", "partstatus", "productstatus", "componentstatus", "plmstatus", "obsolete"],
+                &[],
+                false,
+            ),
+            Field::Msl => (&["msl", "moisturesensitiv"], &[], false),
+            Field::Rohs => (&["rohs"], &[], false),
+            Field::Reach => (&["reach", "svhc"], &[], false),
+            Field::Aecq => (&["aec", "automotive"], &[], false),
+        }
+    }
+}
+
+/// Distributor key aliases -> canonical column name.
+fn distributor_name(nkey: &str) -> Option<&'static str> {
+    const ALIASES: &[(&str, &str)] = &[
+        ("lcsc", "LCSC"),
+        ("jlcpcb", "LCSC"),
+        ("mouser", "Mouser"),
+        ("digikey", "Digi-Key"),
+        ("dig1key", "Digi-Key"),
+        ("newark", "Newark"),
+        ("farnell", "Newark"),
+        ("arrow", "Arrow"),
+    ];
+    ALIASES
+        .iter()
+        .find(|(a, _)| nkey.contains(a))
+        .map(|(_, name)| *name)
+}
+
+/// Normalise a parameter key for matching (lowercase alphanumerics only).
+fn norm(key: &str) -> String {
+    key.chars()
+        .filter(|c| c.is_alphanumeric())
+        .map(|c| c.to_ascii_lowercase())
+        .collect()
+}
+
+/// Treat KiCad placeholders as empty.
+fn clean(value: &str) -> &str {
+    let v = value.trim();
+    if v == "~" || v.eq_ignore_ascii_case("n/a") {
+        ""
+    } else {
+        v
+    }
+}
+
+fn is_url(value: &str) -> bool {
+    let v = value.trim();
+    v.starts_with("http://") || v.starts_with("https://")
+}
+
+/// The resolved mapping: each logical field to an ordered list of source keys,
+/// plus the detected distributor columns.
+#[derive(Debug, Clone, Default)]
+pub struct Mapping {
+    /// Field label -> ordered candidate parameter keys (primary first).
+    pub fields: BTreeMap<&'static str, Vec<String>>,
+    /// Canonical distributor name -> the parameter key carrying its part number.
+    pub distributors: BTreeMap<String, String>,
+}
+
+/// Score parameter keys into logical fields and detect distributor columns.
+pub fn resolve_mapping(components: &[Component]) -> Mapping {
+    // Collect every parameter key with its normalised form and fill rate.
+    let mut keys: BTreeSet<String> = BTreeSet::new();
+    for c in components {
+        for k in c.parameters.keys() {
+            keys.insert(k.clone());
+        }
+    }
+    let total = components.len().max(1) as f64;
+    let fill = |key: &str| -> f64 {
+        let n = components
+            .iter()
+            .filter(|c| c.parameters.get(key).map(|v| !clean(v).is_empty()).unwrap_or(false))
+            .count();
+        n as f64 / total
+    };
+
+    let mut mapping = Mapping::default();
+
+    for field in Field::all() {
+        let (pos, neg, url) = field.spec();
+        let mut scored: Vec<(f64, String)> = Vec::new();
+        for key in &keys {
+            let nkey = norm(key);
+            if neg.iter().any(|t| nkey.contains(t)) {
+                continue;
+            }
+            let name_hit = pos.iter().any(|t| nkey.contains(t));
+            let f = fill(key);
+            let score = if name_hit {
+                2.0 + f
+            } else if url {
+                // datasheet by value shape only
+                let urls = components
+                    .iter()
+                    .filter_map(|c| c.parameters.get(key))
+                    .filter(|v| is_url(v))
+                    .count() as f64;
+                if urls / total > 0.5 {
+                    1.0 + f
+                } else {
+                    continue;
+                }
+            } else {
+                continue;
+            };
+            scored.push((score, key.clone()));
+        }
+        scored.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
+        if !scored.is_empty() {
+            mapping
+                .fields
+                .insert(field.label(), scored.into_iter().map(|(_, k)| k).collect());
+        }
+    }
+
+    for key in &keys {
+        if let Some(name) = distributor_name(&norm(key)) {
+            // First key wins for a given canonical distributor.
+            mapping
+                .distributors
+                .entry(name.to_string())
+                .or_insert_with(|| key.clone());
+        }
+    }
+
+    mapping
+}
+
+impl Mapping {
+    /// Resolve a field for one component: first non-empty value across its keys.
+    /// Datasheet prefers a URL-shaped value.
+    fn value(&self, field: Field, c: &Component) -> String {
+        let Some(keys) = self.fields.get(field.label()) else {
+            return String::new();
+        };
+        if field == Field::Datasheet {
+            for k in keys {
+                if let Some(v) = c.parameters.get(k) {
+                    if is_url(v) {
+                        return v.trim().to_string();
+                    }
+                }
+            }
+        }
+        for k in keys {
+            if let Some(v) = c.parameters.get(k) {
+                let v = clean(v);
+                if !v.is_empty() {
+                    return v.to_string();
+                }
+            }
+        }
+        String::new()
+    }
+
+    fn distributor_value(&self, name: &str, c: &Component) -> String {
+        self.distributors
+            .get(name)
+            .and_then(|k| c.parameters.get(k))
+            .map(|v| clean(v).to_string())
+            .unwrap_or_default()
+    }
+}
+
+/// True if a component should appear in the BOM.
+fn in_bom(c: &Component) -> bool {
+    if c.designator.starts_with('!') {
+        return false;
+    }
+    if EXCLUDED_CLASSES.contains(&c.classification.kind.as_str()) {
+        return false;
+    }
+    c.parameters.get("kicad_in_bom").map(|v| v != "false").unwrap_or(true)
+}
+
+fn is_dnp(c: &Component) -> bool {
+    c.parameters.get("kicad_dnp").map(|v| v == "true").unwrap_or(false)
+}
+
+/// Natural comparison of references (`R2` < `R10` < `U1`).
+fn nat_key(r: &str) -> (String, u64, String) {
+    let prefix: String = r.chars().take_while(|c| !c.is_ascii_digit()).collect();
+    let rest = &r[prefix.len()..];
+    let num: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+    let tail = &rest[num.len()..];
+    (prefix, num.parse().unwrap_or(0), tail.to_string())
+}
+
+fn sort_refs(refs: &mut [String]) {
+    refs.sort_by(|a, b| nat_key(a).cmp(&nat_key(b)));
+}
+
+// ---------------------------------------------------------------------------
+// Enriched review BOM
+// ---------------------------------------------------------------------------
+
+/// One enriched review BOM line.
+#[derive(Debug, Clone)]
+pub struct EnrichedRow {
+    pub references: Vec<String>,
+    pub quantity: u32,
+    pub value: String,
+    pub footprint: String,
+    pub description: String,
+    pub manufacturer: String,
+    pub mpn: String,
+    pub datasheet: String,
+    pub aecq: String,
+    pub rohs: String,
+    pub reach: String,
+    pub lifecycle: String,
+    pub msl: String,
+    pub dnp: bool,
+    pub distributors: BTreeMap<String, String>,
+}
+
+/// Build the enriched review BOM and the list of distributor columns present.
+pub fn build_enriched(components: &[Component], mapping: &Mapping) -> (Vec<EnrichedRow>, Vec<String>) {
+    let dist_cols: Vec<String> = mapping.distributors.keys().cloned().collect();
+
+    // Group identical parts.
+    type Key = (String, String, String, String, bool);
+    let mut groups: BTreeMap<Key, EnrichedRow> = BTreeMap::new();
+    for c in components.iter().filter(|c| in_bom(c)) {
+        let manufacturer = mapping.value(Field::Manufacturer, c);
+        let mpn = mapping.value(Field::Mpn, c);
+        let dnp = is_dnp(c);
+        let key = (
+            manufacturer.to_lowercase(),
+            mpn.to_lowercase(),
+            c.value.to_lowercase(),
+            c.footprint.to_lowercase(),
+            dnp,
+        );
+        let entry = groups.entry(key).or_insert_with(|| EnrichedRow {
+            references: Vec::new(),
+            quantity: 0,
+            value: c.value.clone(),
+            footprint: c.footprint.clone(),
+            description: c.description.clone(),
+            manufacturer: manufacturer.clone(),
+            mpn: mpn.clone(),
+            datasheet: mapping.value(Field::Datasheet, c),
+            aecq: mapping.value(Field::Aecq, c),
+            rohs: mapping.value(Field::Rohs, c),
+            reach: mapping.value(Field::Reach, c),
+            lifecycle: mapping.value(Field::Lifecycle, c),
+            msl: mapping.value(Field::Msl, c),
+            dnp,
+            distributors: BTreeMap::new(),
+        });
+        entry.references.push(c.designator.clone());
+        entry.quantity += 1;
+        // First non-empty wins for fields that may be sparse within a group.
+        fill_if_empty(&mut entry.description, &c.description);
+        for name in &dist_cols {
+            let v = mapping.distributor_value(name, c);
+            if !v.is_empty() {
+                entry.distributors.entry(name.clone()).or_insert(v);
+            }
+        }
+    }
+
+    let mut rows: Vec<EnrichedRow> = groups.into_values().collect();
+    for r in &mut rows {
+        sort_refs(&mut r.references);
+    }
+    rows.sort_by(|a, b| nat_key(&a.references[0]).cmp(&nat_key(&b.references[0])));
+    (rows, dist_cols)
+}
+
+fn fill_if_empty(slot: &mut String, candidate: &str) {
+    if slot.is_empty() && !candidate.is_empty() {
+        *slot = candidate.to_string();
+    }
+}
+
+/// Render the enriched BOM to CSV.
+pub fn enriched_csv(rows: &[EnrichedRow], dist_cols: &[String]) -> String {
+    let mut header = vec![
+        "Reference",
+        "Quantity",
+        "Value",
+        "Footprint",
+        "Description",
+        "Manufacturer",
+        "Manufacturer Part Number",
+        "Datasheet",
+        "AEC-Q",
+        "RoHS",
+        "REACH",
+        "Lifecycle",
+        "MSL",
+        "DNP",
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect::<Vec<_>>();
+    header.extend(dist_cols.iter().cloned());
+
+    let mut out = String::new();
+    out.push_str(&csv_record(&header));
+    for r in rows {
+        let mut rec = vec![
+            r.references.join(", "),
+            r.quantity.to_string(),
+            r.value.clone(),
+            r.footprint.clone(),
+            r.description.clone(),
+            r.manufacturer.clone(),
+            r.mpn.clone(),
+            r.datasheet.clone(),
+            r.aecq.clone(),
+            r.rohs.clone(),
+            r.reach.clone(),
+            r.lifecycle.clone(),
+            r.msl.clone(),
+            if r.dnp { "DNP".into() } else { String::new() },
+        ];
+        for name in dist_cols {
+            rec.push(r.distributors.get(name).cloned().unwrap_or_default());
+        }
+        out.push_str(&csv_record(&rec));
+    }
+    out
+}
+
+fn csv_record(fields: &[String]) -> String {
+    let mut line = fields.iter().map(|f| csv_field(f)).collect::<Vec<_>>().join(",");
+    line.push('\n');
+    line
+}
+
+fn csv_field(f: &str) -> String {
+    if f.contains([',', '"', '\n', '\r']) {
+        format!("\"{}\"", f.replace('"', "\"\""))
+    } else {
+        f.to_string()
+    }
+}
+
+/// The mapping audit, written as a `.mapping.json` sidecar for the agent to scan.
+pub fn mapping_report(mapping: &Mapping, components: &[Component]) -> serde_json::Value {
+    let total = components.len().max(1) as f64;
+    let coverage = |key: &str| -> u32 {
+        let n = components
+            .iter()
+            .filter(|c| c.parameters.get(key).map(|v| !clean(v).is_empty()).unwrap_or(false))
+            .count();
+        ((n as f64 / total) * 100.0).round() as u32
+    };
+    let fields: serde_json::Map<String, serde_json::Value> = mapping
+        .fields
+        .iter()
+        .map(|(f, keys)| {
+            let primary = &keys[0];
+            (
+                f.to_string(),
+                serde_json::json!({
+                    "primary": primary,
+                    "fallbacks": &keys[1..],
+                    "coverage_pct": coverage(primary),
+                }),
+            )
+        })
+        .collect();
+    serde_json::json!({
+        "fields": fields,
+        "distributors": mapping.distributors,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Grouped BOM (app)
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize)]
+struct GroupedLine {
+    item: u32,
+    quantity: u32,
+    designators: Vec<String>,
+    dnp: bool,
+    fields: BTreeMap<String, String>,
+}
+
+#[derive(Serialize)]
+struct GroupedSource {
+    path: String,
+    name: String,
+    stem: String,
+}
+
+/// The grouped BOM document the app ingests.
+#[derive(Serialize)]
+pub struct GroupedBom {
+    schema: String,
+    source: GroupedSource,
+    variant: Option<String>,
+    pub line_count: u32,
+    pub component_count: u32,
+    pub dnp_line_count: u32,
+    lines: Vec<GroupedLine>,
+}
+
+/// Build the grouped BOM for the app (groups by value/footprint/lib_ref/desc).
+pub fn build_grouped(components: &[Component], mapping: &Mapping, project_path: &str, stem: &str) -> GroupedBom {
+    type Key = (String, String, String, String, bool);
+    let mut groups: BTreeMap<Key, GroupedLine> = BTreeMap::new();
+    let mut component_count = 0u32;
+    for c in components.iter().filter(|c| in_bom(c)) {
+        component_count += 1;
+        let dnp = is_dnp(c);
+        let key = (
+            c.value.to_lowercase(),
+            c.footprint.to_lowercase(),
+            c.library_ref.to_lowercase(),
+            c.description.to_lowercase(),
+            dnp,
+        );
+        let line = groups.entry(key).or_insert_with(|| {
+            let mut fields = BTreeMap::new();
+            fields.insert("value".into(), c.value.clone());
+            fields.insert("footprint".into(), c.footprint.clone());
+            fields.insert("description".into(), c.description.clone());
+            let mpn = mapping.value(Field::Mpn, c);
+            if !mpn.is_empty() {
+                fields.insert("manufacturer_part_number".into(), mpn);
+            }
+            let mfr = mapping.value(Field::Manufacturer, c);
+            if !mfr.is_empty() {
+                fields.insert("manufacturer".into(), mfr);
+            }
+            // Mirror the app's expectation: LCSC part lands as jlcpcb_part_number.
+            let lcsc = mapping.distributor_value("LCSC", c);
+            if !lcsc.is_empty() {
+                fields.insert("jlcpcb_part_number".into(), lcsc);
+            }
+            GroupedLine {
+                item: 0,
+                quantity: 0,
+                designators: Vec::new(),
+                dnp,
+                fields,
+            }
+        });
+        line.designators.push(c.designator.clone());
+        line.quantity += 1;
+    }
+
+    let mut lines: Vec<GroupedLine> = groups.into_values().collect();
+    for l in &mut lines {
+        sort_refs(&mut l.designators);
+    }
+    lines.sort_by(|a, b| nat_key(&a.designators[0]).cmp(&nat_key(&b.designators[0])));
+    let dnp_line_count = lines.iter().filter(|l| l.dnp).count() as u32;
+    for (i, l) in lines.iter_mut().enumerate() {
+        l.item = (i + 1) as u32;
+    }
+
+    GroupedBom {
+        schema: "extract.bom.grouped.a0".into(),
+        source: GroupedSource {
+            path: project_path.to_string(),
+            name: format!("{stem}.kicad_pro"),
+            stem: stem.to_string(),
+        },
+        variant: None,
+        line_count: lines.len() as u32,
+        component_count,
+        dnp_line_count,
+        lines,
+    }
+}
+
+/// Render a grouped BOM to the sparse fab-style CSV.
+pub fn grouped_csv(bom: &GroupedBom) -> String {
+    let mut out = String::new();
+    out.push_str(&csv_record(&[
+        "mfg".into(),
+        "mpn".into(),
+        "description".into(),
+        "quantity".into(),
+        "designators".into(),
+    ]));
+    for l in &bom.lines {
+        out.push_str(&csv_record(&[
+            l.fields.get("manufacturer").cloned().unwrap_or_default(),
+            l.fields.get("manufacturer_part_number").cloned().unwrap_or_default(),
+            l.fields.get("description").cloned().unwrap_or_default(),
+            l.quantity.to_string(),
+            l.designators.join(", "),
+        ]));
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::design::{Classification, Component, Hierarchy};
+
+    fn comp(des: &str, value: &str, fp: &str, kind: &str, params: &[(&str, &str)]) -> Component {
+        let mut parameters: BTreeMap<String, String> = BTreeMap::new();
+        for (k, v) in params {
+            parameters.insert((*k).into(), (*v).into());
+        }
+        parameters.entry("kicad_in_bom".into()).or_insert("true".into());
+        Component {
+            designator: des.into(),
+            svg_id: format!("{des}-uuid"),
+            value: value.into(),
+            footprint: fp.into(),
+            library_ref: "Device:C".into(),
+            description: "cap".into(),
+            hierarchy: Hierarchy {
+                base_designator: des.into(),
+                channel: None,
+                channel_index: None,
+                sheet: "/".into(),
+                sheet_path: "/".into(),
+                sheet_path_uuids: "/".into(),
+            },
+            classification: Classification {
+                prefix: crate::design::prefix_of(des),
+                kind: kind.into(),
+                pin_count: 2,
+            },
+            parameters,
+            bbox: None,
+        }
+    }
+
+    #[test]
+    fn groups_and_excludes() {
+        let comps = vec![
+            comp("C1", "470n", "0603", "passive_2pin", &[("LCSC", "C1623")]),
+            comp("C2", "470n", "0603", "passive_2pin", &[("LCSC", "C1623")]),
+            comp("MH1", "M2", "Hole", "mounting_hole", &[("kicad_in_bom", "false")]),
+            comp("U1", "REG", "SOT23", "ic", &[("Manufacturer", "TI"), ("MPN", "TPS")]),
+        ];
+        let mapping = resolve_mapping(&comps);
+        // LCSC detected as a distributor, MPN/Manufacturer resolved.
+        assert_eq!(mapping.distributors.get("LCSC").map(String::as_str), Some("LCSC"));
+        assert!(mapping.fields.contains_key("mpn"));
+        assert!(mapping.fields.contains_key("manufacturer"));
+
+        let (rows, dist) = build_enriched(&comps, &mapping);
+        assert_eq!(dist, vec!["LCSC".to_string()]);
+        // C1+C2 coalesce; MH1 excluded; U1 separate -> 2 lines.
+        assert_eq!(rows.len(), 2);
+        let caps = rows.iter().find(|r| r.value == "470n").unwrap();
+        assert_eq!(caps.quantity, 2);
+        assert_eq!(caps.references, vec!["C1", "C2"]);
+        assert_eq!(caps.distributors.get("LCSC").map(String::as_str), Some("C1623"));
+        let u1 = rows.iter().find(|r| r.mpn == "TPS").unwrap();
+        assert_eq!(u1.manufacturer, "TI");
+
+        let grouped = build_grouped(&comps, &mapping, "p", "p");
+        assert_eq!(grouped.component_count, 3); // MH1 excluded
+        assert_eq!(grouped.line_count, 2);
+    }
+
+    #[test]
+    fn negative_guard_keeps_alternate_out_of_mpn() {
+        let comps = vec![comp(
+            "U1",
+            "X",
+            "Y",
+            "ic",
+            &[("Alternate Part Number", "ALT"), ("MPN", "REAL")],
+        )];
+        let mapping = resolve_mapping(&comps);
+        let (rows, _) = build_enriched(&comps, &mapping);
+        assert_eq!(rows[0].mpn, "REAL");
+    }
+}

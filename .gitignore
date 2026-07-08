@@ -1,0 +1,42 @@
+# Node / frontend
+node_modules/
+dist/
+
+# Rust / Tauri
+src-tauri/target/
+src-tauri/gen/
+
+# Python helper scripts
+__pycache__/
+*.pyc
+
+# Local build secrets (updater signing key path, Sentry DSN) — see .env.example
+.env
+
+# Scratch E2E fixtures (regenerate via pcb-extract)
+.smoke/
+public/dev-geometry.json
+
+*.log
+
+docs/
+
+# --- Private working files: present locally, never in the public repo ---
+.claude/
+.codegraph/
+.github/*
+!.github/ISSUE_TEMPLATE/
+web/
+website/
+CLAUDE.md
+review.md
+plan.md
+plan-marketing.md
+ideas.md
+feature-plan.md
+implementation-notes.md
+visualizing_tool.md
+product-strategy.html
+gldev.html
+change-report.html
+feedback

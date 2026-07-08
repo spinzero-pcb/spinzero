@@ -1,0 +1,186 @@
+/* ============================================================
+   tokens.css — the entire theme. No color/size/font literal may
+   appear anywhere else in the app; components consume tokens only.
+   Dark-first (plan §5.1).
+   ============================================================ */
+
+/* KiCad's drawing font. Newstroke is KiCad's built-in stroke face (used for all
+   schematic/board text); osifont is its ISO-3098 fallback. Embedding them makes
+   the canvas text render exactly like KiCad instead of a sans-serif substitute.
+   The extractor's SVGs already ask for these families by name. */
+@font-face {
+  font-family: "Newstroke";
+  src: url("/fonts/newstroke.ttf") format("truetype");
+  font-weight: normal;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "osifont";
+  src: url("/fonts/osifont.ttf") format("truetype");
+  font-weight: normal;
+  font-style: normal;
+  font-display: swap;
+}
+
+:root {
+  color-scheme: dark;
+
+  /* Surfaces (lowest to highest elevation) */
+  --bg-0: #0e1116; /* app background / canvas well */
+  --bg-1: #14181f; /* side panels, bottom panel */
+  --bg-2: #1b212b; /* raised: cards, inputs, tabs */
+  --bg-3: #242c38; /* hover / active */
+
+  /* Lines */
+  --border-0: #262d39;
+  --border-1: #333c4b;
+
+  /* Text */
+  --fg-0: #e8ebf0;
+  --fg-1: #a9b2c0;
+  --fg-2: #6a7585;
+
+  /* Accent — single accent (plan §5.1). Blue is the default; the user can change
+     it at runtime (View ▸ Appearance). settingsStore writes --accent/-fg/-dim
+     inline on :root, so the values here are the default/fallback. */
+  --accent: #4f8cff;
+  --accent-fg: #ffffff;
+  --accent-dim: rgba(79, 140, 255, 0.16);
+
+  /* Brand — SpinZero mark/logo copper. Fixed brand colour (matches the logo and
+     app icon), deliberately distinct from --accent so a theme tweak — or a
+     user-chosen accent — never recolours the logo. */
+  --brand: #c87f42;
+
+  /* Canvas highlight palette (Phase 1): nets = accent, components = amber.
+     Scrim de-emphasises base content WITHOUT group opacity (keeps vectors crisp). */
+  --hl-net: #4f8cff;
+  --hl-comp: #ff9f43;
+  /* Multi-select highlight palette (feedback item 4): distinct colours cycled as the
+     user builds a compare set, read into TS via getComputedStyle (selectionStore) so
+     these theme literals live only here. --hl-1/-2 are the net/component defaults. */
+  --hl-1: #4f8cff;
+  --hl-2: #ff9f43;
+  --hl-3: #3fb950;
+  --hl-4: #d2a8ff;
+  --hl-5: #f778ba;
+  --hl-6: #56d4dd;
+  --canvas-well: #0f1115;
+  --pcb-well: #06080c; /* PCB stage background — darker than the schematic well so copper pops */
+  --canvas-paper: #f5f4ef; /* KiCad schematic background */
+  --canvas-scrim: rgba(245, 244, 239, 0.72);
+
+  /* KiCad default schematic palette (applied over the B&W plots via data-primitive).
+     One token per KiCad `schematic.*` colour key so kicadTheme.ts maps each 1:1 and a
+     rule never borrows one element's colour for another (e.g. pin name ≠ pin number).
+     Values mirror KiCad-Default; a loaded theme overrides each via applyKicadTheme. */
+  --sch-wire: rgb(0, 150, 0);
+  --sch-bus: rgb(0, 0, 132);
+  --sch-junction: rgb(0, 150, 0); /* KiCad junction (== wire by default, own key) */
+  --sch-noconnect: rgb(0, 0, 132);
+  --sch-outline: rgb(132, 0, 0); /* component_outline (symbol bodies) */
+  --sch-pin: rgb(132, 0, 0); /* pin lines (KiCad pin) */
+  --sch-body-fill: rgb(255, 255, 194); /* component_body */
+  --sch-pin-name: rgb(0, 100, 100); /* KiCad pin_name (teal) */
+  --sch-pin-number: rgb(169, 0, 0); /* KiCad pin_number (a distinct red) */
+  --sch-fields: rgb(0, 100, 100); /* reference field + symbol body text (KiCad reference) */
+  --sch-value: rgb(0, 100, 100); /* value field (KiCad value) */
+  --sch-field: rgb(0, 100, 100); /* other user fields (KiCad fields) */
+  --sch-label: rgb(15, 15, 15); /* local label (KiCad label_local) */
+  --sch-label-global: rgb(132, 0, 0); /* global label (KiCad label_global) */
+  --sch-label-hier: rgb(114, 86, 0); /* hierarchical label (KiCad label_hier) */
+  --sch-note: rgb(0, 0, 194); /* free text / notes (KiCad note) */
+  --sch-sheet: rgb(132, 0, 0); /* sheet symbol border (KiCad sheet) */
+  --sch-sheet-name: rgb(0, 100, 100); /* sheet name + sheet-pin labels (KiCad sheet_name/label) */
+  --sch-netclass-flag: rgb(72, 72, 72); /* net-class directive flag (KiCad netclass_flag) */
+
+  /* KiCad default board palette */
+  --pcb-fcu: #c83434;
+  --pcb-bcu: #4d7fc4;
+  --pcb-in1: #7fc87f;
+  --pcb-in2: #ce7d2c;
+  --pcb-fsilk: #f2eda1;
+  --pcb-bsilk: #e8b2a7;
+  /* Mask/paste are translucent in KiCad; these opaque fallbacks are the KiCad-default
+     rgba composited over the default board background rgb(0,16,35) so a theme-less bundle
+     reads like KiCad. A resolved theme overrides them (kicadTheme.ts, composited too). */
+  --pcb-fmask: #56327b; /* f_mask rgba(216,100,255,0.4) over bg */
+  --pcb-bmask: #017074; /* b_mask rgba(2,255,238,0.4) over bg */
+  --pcb-ffab: #afafaf;
+  --pcb-bfab: #585d84;
+  --pcb-fcrtyd: #ff26e2;
+  --pcb-bcrtyd: #26e9ff;
+  --pcb-fpaste: #a2928e; /* f_paste rgba(180,160,154,0.902) over bg */
+  --pcb-bpaste: #00b1b2; /* b_paste rgba(0,194,194,0.902) over bg */
+  --pcb-edge: #d0d2cd;
+  --pcb-hole: #ececec;
+  --pcb-via-copper: #c9a83c; /* via plated barrel — exposed copper/gold (the centre) */
+  --pcb-npth: #1ac4d2; /* non-plated through hole (mechanical) — KiCad default non_plated_hole rgb(26,196,210) */
+  --pcb-drill: #15171c; /* plated through-hole drill — dark drilled hole */
+  --pcb-netlabel: #f2f2f2; /* net-name label text (copper/zones — light on dark copper) */
+  --pcb-netlabel-via: #111111; /* net-name label text on a via — dark on the gold barrel */
+  --pcb-worksheet: #c86464; /* drawing-sheet frame + title block (KiCad worksheet red, lightened to read on the dark canvas) */
+  --pcb-dim: #3a3f47; /* mix base for dulled layers while a selection is active */
+
+  /* Measure tool (docs/measure-tool-plan.md): a KiCad-style ruler — white line, ticks
+     and text (KiCad's LAYER_AUX_ITEMS colour) over a black drop-shadow so it reads over
+     any copper. Tool overlay only — never always-on telemetry. */
+  --measure-line: #ffffff;
+  --measure-shadow: #000000;
+  --measure-text: #ffffff;
+
+  /* Semantic */
+  --ok: #3fb950;
+  --ok-dim: rgba(63, 185, 80, 0.14);
+  --warn: #d29922;
+  --warn-dim: rgba(210, 153, 34, 0.14);
+  --err: #f85149;
+  --err-dim: rgba(248, 81, 73, 0.12);
+
+  /* History graph + diff (alias semantic tokens so theming stays coherent — no raw
+     literals; components consume these). */
+  --graph-edge: var(--border-1);
+  --graph-edge-merge: var(--warn);
+  --graph-edge-pending: var(--fg-2);
+  --graph-dot: var(--fg-1);
+  --graph-dot-active: var(--accent);
+  --diff-add: var(--ok);
+  --diff-remove: var(--err);
+  --diff-change: var(--warn);
+
+  /* Type */
+  --font-ui: "Inter", "Segoe UI", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", "Cascadia Mono", Consolas, monospace;
+  /* KiCad's drawing-sheet font — used for canvas text (schematic/PCB) so it reads
+     exactly like KiCad. Mirrors the family stack the extractor bakes into its SVGs. */
+  --font-stroke: "Newstroke", "osifont", "Noto Sans", "DejaVu Sans", sans-serif;
+  --fs-0: 11px;
+  --fs-1: 12px;
+  --fs-2: 13px;
+  --fs-3: 15px;
+  --fs-4: 18px;
+
+  /* Spacing — 8px grid with a half step */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 16px;
+  --sp-4: 24px;
+  --sp-5: 32px;
+
+  /* Shape & motion */
+  --radius-1: 4px;
+  --radius-2: 6px;
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --dur-1: 120ms;
+  --dur-2: 150ms;
+
+  /* Fixed chrome sizes */
+  --menubar-h: 30px;
+  --activitybar-w: 48px;
+  --sidepanel-w: 280px;
+  --rightpanel-w: 240px;
+  --statusbar-h: 26px;
+  --tabstrip-h: 35px;
+  --bottompanel-h: 200px;
+}

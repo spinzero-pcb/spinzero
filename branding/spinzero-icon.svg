@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="120" height="120" viewBox="0 0 120 120" role="img" aria-label="SpinZero app icon">
+  <title>SpinZero icon</title>
+  <rect x="0" y="0" width="120" height="120" rx="28" fill="#0B1210"/>
+  <circle cx="60" cy="60" r="40" fill="#C87F42"/>
+  <circle cx="60" cy="60" r="28" fill="none" stroke="#EDF3EF" stroke-width="5"/>
+  <circle cx="60" cy="60" r="16" fill="#0B1210"/>
+</svg>

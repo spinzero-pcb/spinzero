@@ -1,0 +1,79 @@
+[package]
+name = "spinzero"
+version = "0.0.5"
+description = "SpinZero — local-first PCB design review"
+edition = "2021"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/spinzero-pcb/spinzero"
+
+# The extraction pipeline lives in sibling crates compiled into this app
+# (replacing the external Python importer). `extract` also builds the
+# `pcb-extract` binary used by the review skills.
+[workspace]
+members = ["crates/eda-parse-kicad", "crates/extract"]
+resolver = "2"
+
+[lib]
+name = "spinzero_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# In-process design extraction.
+extract = { path = "crates/extract" }
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+# Auto-update from GitHub Releases (item 6): checks the public releases repo's
+# latest.json and installs a signed update. Pubkey + endpoint live in tauri.conf.json;
+# the matching private key is held only by the release signer (never committed).
+tauri-plugin-updater = "2"
+# Relaunch the app after an update installs (the JS `relaunch()` companion).
+tauri-plugin-process = "2"
+# AI-driven E2E testing harness (tauri-pilot). Only activated in debug builds —
+# see `run()` in lib.rs, which gates the plugin behind `debug_assertions`. Drives
+# the real webview + Rust backend so an agent can click/fill/snapshot/assert.
+# Requires Rust >= 1.95 to compile. Docs: https://github.com/mpiton/tauri-pilot
+tauri-plugin-pilot = "0.7"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+notify = "6"
+blake3 = "1"
+# Resolve the OS local-data dir (%LOCALAPPDATA% on Windows) so regenerable,
+# machine-local artifacts (extraction cache + SQLite index) live OUTSIDE the
+# project folder and never get copied by a folder sync (SharePoint/OneDrive/git).
+dirs = "5"
+zstd = "0.13"
+rusqlite = { version = "0.32", features = ["bundled"] }
+walkdir = "2"
+time = { version = "0.3", features = ["formatting", "parsing", "macros", "local-offset"] }
+# --- Observability ---
+# Logging: the official Tauri logging plugin (rotating file in the app-log dir,
+# stdout mirror, and a JS API so the frontend logs into the SAME file). Replaces
+# the previous hand-rolled file writer + the log_frontend_error IPC bridge.
+tauri-plugin-log = "2"
+# The logging facade every module writes through; tauri-plugin-log is the backend.
+log = "0.4"
+# Telemetry: Sentry for anonymized crash + performance + release-health usage.
+# DSN-gated — with no DSN configured the client is disabled and nothing is sent,
+# so the capability is inert until an operator points it at a collector. Default
+# features include the reqwest/rustls transport + panic & context integrations.
+# The `log` feature bridges the `log` facade into Sentry (errors → events,
+# warn/info → breadcrumbs) via a wrapper around tauri-plugin-log — see run().
+sentry = { version = "0.48", features = ["log"] }
+# A stable, random per-install id used as Sentry's anonymous `user.id` (no machine
+# name, user name, or design data). `getrandom` is already in the tree.
+uuid = { version = "1", features = ["v4"] }
+
+[profile.dev]
+# rusqlite/zstd are painfully slow unoptimized; keep deps optimized in dev.
+opt-level = 1
+# Incremental + an optimized dev profile makes rustc emit LLVM-internal `anon.*`
+# symbols that fail to export from the cdylib, breaking the link with
+# `LNK1120: unresolved externals` on Windows. Disabling incremental for the dev
+# profile sidesteps it; dep optimization (the slow part) is still cached.
+incremental = false
+
+[profile.dev.package."*"]
+opt-level = 2

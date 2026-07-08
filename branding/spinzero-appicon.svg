@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-label="SpinZero app icon">
+  <title>SpinZero app icon</title>
+  <!-- source for generated platform icons: npx tauri icon branding/spinzero-appicon.svg
+       (render to 1024px PNG first if the tooling wants a raster input) -->
+  <rect x="0" y="0" width="512" height="512" rx="100" fill="#0B1210"/>
+  <circle cx="256" cy="256" r="170.67" fill="#C87F42"/>
+  <circle cx="256" cy="256" r="119.47" fill="none" stroke="#EDF3EF" stroke-width="21.33"/>
+  <circle cx="256" cy="256" r="68.27" fill="#0B1210"/>
+</svg>

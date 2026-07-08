@@ -1,0 +1,649 @@
+//! Design-index assembly + artifact serving for the Phase-1 canvas.
+//!
+//! `get_design_indexes` ports `prototypes/extract_data2.py` to Rust: it reads the
+//! crunched design JSON and emits the single payload the hyperlinked viewer needs —
+//! `svg_to_net` / `svg_to_component` / per-element kind for hit-testing, plus per-net
+//! (class, terminals, sheets, by-sheet element ids) and per-component card data.
+//! `read_artifact` serves a `<metadata>`-stripped sheet SVG (U5's serve-time fallback).
+//!
+//! Both resolve their source from the active vault's cache, or from
+//! `PCBREVIEW_CACHE_DIR` when set — the dev override that lets the canvas run against
+//! an already-crunched `output/` bundle with no re-crunch.
+
+use std::collections::HashMap;
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use serde::Serialize;
+use serde_json::Value;
+
+/// Largest artifact we will read off disk before stripping. Raw KiCad sheets top out
+/// ~5 MB, but a dense PCB user/fab layer on a large board (per-footprint graphics for
+/// thousands of parts) can run to 60+ MB — so this is a path-traversal / runaway-file
+/// backstop, not a real limit, and is set well above any legitimate layer.
+const MAX_ARTIFACT_BYTES: u64 = 128 * 1024 * 1024;
+
+/// Resolve the crunch cache dir: explicit dev override wins, else the active
+/// extraction's bundle dir (`extractions/<id>/`).
+pub fn cache_dir(active_extraction: Option<PathBuf>) -> Result<PathBuf, String> {
+    if let Ok(over) = std::env::var("PCBREVIEW_CACHE_DIR") {
+        if !over.is_empty() {
+            return Ok(PathBuf::from(over));
+        }
+    }
+    active_extraction.ok_or_else(|| "no extraction available (open a project)".to_string())
+}
+
+/// Locate the design subdirectory (holding `*_design.json` + `schematics/`) inside a
+/// crunch bundle — mirrors index_db's manifest discovery.
+fn find_design_dir(cache_dir: &Path) -> Result<PathBuf, String> {
+    for sub in ["design", "design_review", "."] {
+        let dir = cache_dir.join(sub);
+        if dir.join("schematics").is_dir()
+            || fs::read_dir(&dir).map(|mut rd| {
+                rd.any(|e| {
+                    e.ok().map_or(false, |e| {
+                        e.file_name().to_string_lossy().ends_with("_design.json")
+                    })
+                })
+            }).unwrap_or(false)
+        {
+            return Ok(dir);
+        }
+    }
+    Err("no design directory found in crunch cache".into())
+}
+
+fn read_design_json(design_dir: &Path) -> Result<Value, String> {
+    let path = fs::read_dir(design_dir)
+        .map_err(|e| e.to_string())?
+        .flatten()
+        .map(|e| e.path())
+        .find(|p| {
+            p.file_name()
+                .map_or(false, |n| n.to_string_lossy().ends_with("_design.json"))
+        })
+        .ok_or("design JSON not found in bundle")?;
+    let text = fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    serde_json::from_str(&text).map_err(|e| format!("design JSON parse: {e}"))
+}
+
+// ---------------------------------------------------------------- payload types
+
+#[derive(Serialize)]
+pub struct SheetLite {
+    pub num: i64,
+    pub name: String,
+    /// Relative path from the cache dir, ready for `read_artifact`.
+    pub svg: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct TerminalLite {
+    pub d: String,        // designator
+    pub p: String,        // pin
+    pub pn: String,       // pin name
+    pub pt: String,       // pin type
+}
+
+#[derive(Serialize)]
+pub struct NetLite {
+    pub class: String,
+    pub terminals: Vec<TerminalLite>,
+    pub sheets: Vec<i64>,
+    /// sheet number (as string key) -> element uuids of this net on that sheet
+    pub by_sheet: HashMap<String, Vec<String>>,
+}
+
+#[derive(Serialize)]
+pub struct CompLite {
+    pub value: String,
+    pub mpn: String,
+    pub mfr: String,
+    pub fp: String,
+    pub desc: String,
+    pub sheet: Option<i64>,
+    pub dnp: bool,
+    pub nets: Vec<String>,
+    pub svg_id: String,
+}
+
+#[derive(Serialize)]
+pub struct LayerLite {
+    pub name: String,
+    /// Cache-relative SVG path, ready for `read_artifact`.
+    pub svg: String,
+    /// EDA-agnostic layer role from the manifest (copper/silkscreen/mask/paste/
+    /// courtyard/fab/edge). Drives viewer theming without hardcoding KiCad-style
+    /// names. None for older copper-only bundles.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    /// Board side (front/back/inner) when the manifest carries it. KiCad
+    /// encodes side in the name (F./B.), so the frontend derives it there.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub side: Option<String>,
+    /// Designer's display name for a renamed/user layer (`User.3` → "Mechanical
+    /// Drawing"), when the board's layer table carries one. The viewer shows this
+    /// instead of the canonical name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_name: Option<String>,
+    /// Resolved `#RRGGBB` for a non-standard ("user") layer, from the KiCad theme.
+    /// The standard fabrication layers stay `None` — they theme via CSS vars. The
+    /// frontend paints this colour directly when present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct DesignIndexes {
+    pub sheets: Vec<SheetLite>,
+    /// PCB copper layers from the manifest (WS8) — sourced here rather than the
+    /// SQLite index so the `PCBREVIEW_CACHE_DIR` dev override works too.
+    pub layers: Vec<LayerLite>,
+    pub svg_to_net: HashMap<String, String>,
+    /// Multi-valued variant: on sheets instantiated several times from one source
+    /// file (gate_driver U/V/W) elements share uuids across instances, so one uuid
+    /// maps to one net *per instance*. The frontend disambiguates by current sheet.
+    pub svg_to_nets: HashMap<String, Vec<String>>,
+    pub svg_to_comp: HashMap<String, String>,
+    pub elem_kind: HashMap<String, String>,
+    pub nets: HashMap<String, NetLite>,
+    pub components: HashMap<String, CompLite>,
+    /// The KiCad colour theme the extractor resolved (`schematic`/`board` colour
+    /// maps), forwarded verbatim so the viewer themes with the user's real palette
+    /// instead of the static `tokens.css` mirror. `Null` for theme-less bundles.
+    pub theme: Value,
+    /// Cache-relative path of the structured PCB geometry IR (`pcb/geometry.json`),
+    /// the GPU renderer's input. `None` for schematic-only / older bundles.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pcb_geometry: Option<String>,
+}
+
+fn str_at<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
+    v.get(key).and_then(|x| x.as_str())
+}
+
+/// Map a net's `terminals` array into the compact `TerminalLite` list the payload
+/// carries. Missing fields become "".
+fn parse_terminals(net: &Value) -> Vec<TerminalLite> {
+    net.get("terminals")
+        .and_then(|t| t.as_array())
+        .map(|arr| {
+            arr.iter()
+                .map(|t| TerminalLite {
+                    d: str_at(t, "designator").unwrap_or("").to_string(),
+                    p: str_at(t, "pin").unwrap_or("").to_string(),
+                    pn: str_at(t, "pin_name").unwrap_or("").to_string(),
+                    pt: str_at(t, "pin_type").unwrap_or("").to_string(),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Build the viewer payload from the extracted design bundle.
+pub fn build_indexes(vault_cache: Option<PathBuf>) -> Result<DesignIndexes, String> {
+    let cache = cache_dir(vault_cache)?;
+    let design_dir = find_design_dir(&cache)?;
+    build_indexes_kicad(&cache, &design_dir)
+}
+
+/// KiCad design-JSON → viewer payload.
+fn build_indexes_kicad(cache: &Path, design_dir: &Path) -> Result<DesignIndexes, String> {
+    let d = read_design_json(design_dir)?;
+
+    let design_rel = design_dir
+        .strip_prefix(cache)
+        .unwrap_or(&design_dir)
+        .to_string_lossy()
+        .replace('\\', "/");
+    let manifest: Option<Value> =
+        fs::read_to_string(design_dir.join("design_review_manifest.json"))
+            .ok()
+            .and_then(|t| serde_json::from_str(&t).ok());
+
+    // Sheet → SVG comes from the manifest (authoritative: name munging breaks on
+    // sheets like "User Input/Output" or a root whose title ≠ filename). Keyed by
+    // sheet_path, falling back to sheet_number.
+    let mut svg_by_path: HashMap<String, (String, String)> = HashMap::new(); // path -> (name, file)
+    let mut svg_by_num: HashMap<i64, (String, String)> = HashMap::new();
+    if let Some(arr) = manifest
+        .as_ref()
+        .and_then(|m| m.get("schematic_svgs"))
+        .and_then(|v| v.as_array())
+    {
+        for s in arr {
+            let (Some(file), Some(name)) = (str_at(s, "file"), str_at(s, "sheet_name")) else {
+                continue;
+            };
+            let entry = (name.to_string(), file.to_string());
+            if let Some(p) = str_at(s, "sheet_path") {
+                svg_by_path.insert(p.to_string(), entry.clone());
+            }
+            if let Some(n) = s.get("sheet_number").and_then(|n| n.as_i64()) {
+                svg_by_num.insert(n, entry);
+            }
+        }
+    }
+    // Last-resort fallback for manifest-less bundles: match SVG stems ("NN_name")
+    // against munged sheet names.
+    let mut svg_by_stem: HashMap<String, String> = HashMap::new();
+    if let Ok(rd) = fs::read_dir(design_dir.join("schematics")) {
+        for entry in rd.flatten() {
+            let p = entry.path();
+            if p.extension().and_then(|e| e.to_str()) != Some("svg") {
+                continue;
+            }
+            if let Some(stem) = p.file_stem().map(|s| s.to_string_lossy().into_owned()) {
+                svg_by_stem.insert(
+                    strip_leading_index(&stem).to_lowercase(),
+                    format!("schematics/{}", entry.file_name().to_string_lossy()),
+                );
+            }
+        }
+    }
+
+    // sheet_path_uuids -> sheet number, and the sheet list.
+    let mut uuidpath_to_num: HashMap<String, i64> = HashMap::new();
+    let mut sheets: Vec<SheetLite> = Vec::new();
+    if let Some(arr) = d.get("sheets").and_then(|s| s.as_array()) {
+        for s in arr {
+            let num = s.get("sheet_number").and_then(|n| n.as_i64()).unwrap_or(0);
+            if let Some(up) = str_at(s, "sheet_path_uuids") {
+                uuidpath_to_num.insert(up.to_string(), num);
+            }
+            let sheet_path = str_at(s, "sheet_path").unwrap_or("");
+            let derived_name = {
+                let last = sheet_path.trim_matches('/').rsplit('/').next().unwrap_or("");
+                if !last.is_empty() {
+                    last.to_string()
+                } else {
+                    str_at(s, "title")
+                        .filter(|t| !t.is_empty())
+                        .map(|t| t.to_string())
+                        .unwrap_or_else(|| {
+                            str_at(s, "filename").unwrap_or("").replace(".kicad_sch", "")
+                        })
+                }
+            };
+            let hit = svg_by_path
+                .get(sheet_path)
+                .or_else(|| svg_by_num.get(&num))
+                .cloned();
+            let (name, svg) = match hit {
+                Some((name, file)) => (name, Some(format!("{design_rel}/{file}"))),
+                None => {
+                    let key = derived_name.to_lowercase().replace(' ', "_");
+                    let svg = svg_by_stem.get(&key).map(|f| format!("{design_rel}/{f}"));
+                    (derived_name, svg)
+                }
+            };
+            sheets.push(SheetLite { num, name, svg });
+        }
+    }
+
+    // PCB copper layers from the manifest (best effort — schematic-only bundles pass).
+    let mut layers: Vec<LayerLite> = Vec::new();
+    if let Some(arr) = manifest
+        .as_ref()
+        .and_then(|m| m.get("pcb_svgs"))
+        .and_then(|v| v.as_array())
+    {
+        for l in arr {
+            if let (Some(name), Some(file)) = (str_at(l, "layer"), str_at(l, "file")) {
+                layers.push(LayerLite {
+                    name: name.to_string(),
+                    svg: format!("{design_rel}/{file}"),
+                    role: str_at(l, "role").map(|s| s.to_string()),
+                    side: str_at(l, "side").map(|s| s.to_string()),
+                    user_name: str_at(l, "user_name").map(|s| s.to_string()),
+                    color: str_at(l, "color").map(|s| s.to_string()),
+                });
+            }
+        }
+    }
+
+    // svg_to_net(s) / svg_to_component straight from prebuilt indexes.
+    let indexes = d.get("indexes").cloned().unwrap_or(Value::Null);
+    let svg_to_net = string_map(indexes.get("svg_to_net"));
+    let svg_to_nets = string_list_map(indexes.get("svg_to_nets"));
+    let svg_to_comp = string_map(indexes.get("svg_to_component"));
+
+    // Invert sheet_svg_to_nets: net name -> { sheet num : [element uuids] }.
+    let mut by_sheet: HashMap<String, HashMap<String, Vec<String>>> = HashMap::new();
+    if let Some(obj) = indexes.get("sheet_svg_to_nets").and_then(|v| v.as_object()) {
+        for (upath, mapping) in obj {
+            let Some(&num) = uuidpath_to_num.get(upath) else { continue };
+            if let Some(m) = mapping.as_object() {
+                for (uuid, netnames) in m {
+                    if let Some(names) = netnames.as_array() {
+                        for nn in names.iter().filter_map(|n| n.as_str()) {
+                            by_sheet
+                                .entry(nn.to_string())
+                                .or_default()
+                                .entry(num.to_string())
+                                .or_default()
+                                .push(uuid.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // elem_kind + per-net payloads from the typed graphical lists.
+    let net_classes = d.get("net_name_to_classes").cloned().unwrap_or(Value::Null);
+    let mut elem_kind: HashMap<String, String> = HashMap::new();
+    let mut nets: HashMap<String, NetLite> = HashMap::new();
+    if let Some(arr) = d.get("nets").and_then(|n| n.as_array()) {
+        for n in arr {
+            let Some(name) = str_at(n, "name") else { continue };
+            if let Some(g) = n.get("graphical").and_then(|g| g.as_object()) {
+                for kind in ["wires", "junctions", "labels", "power_ports", "ports", "sheet_entries"] {
+                    if let Some(list) = g.get(kind).and_then(|l| l.as_array()) {
+                        for u in list.iter().filter_map(|u| u.as_str()) {
+                            elem_kind.insert(u.to_string(), kind.to_string());
+                        }
+                    }
+                }
+            }
+            let class = net_classes
+                .get(name)
+                .and_then(|c| c.as_array())
+                .and_then(|a| a.first())
+                .and_then(|c| c.as_str())
+                .unwrap_or("Default")
+                .to_string();
+            let terminals = parse_terminals(n);
+            let sheet_nums: Vec<i64> = n
+                .get("source_sheets")
+                .and_then(|s| s.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|u| u.as_str())
+                        .filter_map(|u| uuidpath_to_num.get(u).copied())
+                        .collect()
+                })
+                .unwrap_or_default();
+            // Merge, don't overwrite, when a name recurs. The extractor emits one
+            // net entry per sheet for a local label reused across sheets that KiCad
+            // joins through a bus member on a hierarchical sheet pin (e.g. AN0, a
+            // member of AN[0..7]): one signal, separate entries because the
+            // netlister doesn't expand buses. Unioning their sheets/terminals/
+            // by_sheet makes the net card list every sheet it lives on — the old
+            // `insert` kept only the last entry and dropped the others' sheets.
+            let merged_by_sheet = by_sheet.remove(name).unwrap_or_default();
+            let entry = nets.entry(name.to_string()).or_insert_with(|| NetLite {
+                class: class.clone(),
+                terminals: Vec::new(),
+                sheets: Vec::new(),
+                by_sheet: HashMap::new(),
+            });
+            if entry.class == "Default" && class != "Default" {
+                entry.class = class;
+            }
+            entry.terminals.extend(terminals);
+            entry.sheets.extend(sheet_nums);
+            for (sheet, uuids) in merged_by_sheet {
+                entry.by_sheet.entry(sheet).or_default().extend(uuids);
+            }
+        }
+        // Normalise merged nets: stable sheet order, de-duped terminals.
+        for net in nets.values_mut() {
+            net.sheets.sort_unstable();
+            net.sheets.dedup();
+            net.terminals.sort_by(|a, b| (&a.d, &a.p).cmp(&(&b.d, &b.p)));
+            net.terminals.dedup_by(|a, b| a.d == b.d && a.p == b.p);
+        }
+    }
+
+    // Components — card payloads.
+    let component_to_nets = indexes.get("component_to_nets").cloned().unwrap_or(Value::Null);
+    let mut components: HashMap<String, CompLite> = HashMap::new();
+    if let Some(arr) = d.get("components").and_then(|c| c.as_array()) {
+        for c in arr {
+            let Some(designator) = str_at(c, "designator") else { continue };
+            let params = c.get("parameters");
+            let get_param = |k: &str| {
+                params
+                    .and_then(|p| p.get(k))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string()
+            };
+            let fp = str_at(c, "footprint")
+                .unwrap_or("")
+                .rsplit(':')
+                .next()
+                .unwrap_or("")
+                .to_string();
+            let desc: String = str_at(c, "description").unwrap_or("").chars().take(160).collect();
+            let sheet = c
+                .get("hierarchy")
+                .and_then(|h| h.get("sheet_path_uuids"))
+                .and_then(|v| v.as_str())
+                .and_then(|u| uuidpath_to_num.get(u).copied());
+            let dnp = get_param("kicad_dnp").eq_ignore_ascii_case("true");
+            let nets_of = component_to_nets
+                .get(designator)
+                .and_then(|v| v.as_array())
+                .map(|a| a.iter().filter_map(|v| v.as_str()).map(String::from).collect())
+                .unwrap_or_default();
+            components.insert(
+                designator.to_string(),
+                CompLite {
+                    value: str_at(c, "value").unwrap_or("").to_string(),
+                    mpn: get_param("MPN"),
+                    mfr: get_param("Manufacturer"),
+                    fp,
+                    desc,
+                    sheet,
+                    dnp,
+                    nets: nets_of,
+                    svg_id: str_at(c, "svg_id").unwrap_or("").to_string(),
+                },
+            );
+        }
+    }
+
+    // Structured geometry IR path (GPU renderer input), cache-relative like the SVGs.
+    let pcb_geometry = manifest
+        .as_ref()
+        .and_then(|m| m.get("pcb_geometry"))
+        .and_then(|v| v.as_str())
+        .map(|f| format!("{design_rel}/{f}"));
+
+    Ok(DesignIndexes {
+        sheets,
+        layers,
+        svg_to_net,
+        svg_to_nets,
+        svg_to_comp,
+        elem_kind,
+        nets,
+        components,
+        theme: d.get("theme").cloned().unwrap_or(Value::Null),
+        pcb_geometry,
+    })
+}
+
+fn strip_leading_index(stem: &str) -> &str {
+    // "23_can" -> "can"; "01_MAIN-BOARD" -> "MAIN-BOARD".
+    match stem.split_once('_') {
+        Some((head, rest)) if !head.is_empty() && head.bytes().all(|b| b.is_ascii_digit()) => rest,
+        _ => stem,
+    }
+}
+
+fn string_map(v: Option<&Value>) -> HashMap<String, String> {
+    v.and_then(|v| v.as_object())
+        .map(|o| {
+            o.iter()
+                .filter_map(|(k, val)| val.as_str().map(|s| (k.clone(), s.to_string())))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn string_list_map(v: Option<&Value>) -> HashMap<String, Vec<String>> {
+    v.and_then(|v| v.as_object())
+        .map(|o| {
+            o.iter()
+                .filter_map(|(k, val)| {
+                    val.as_array().map(|a| {
+                        (
+                            k.clone(),
+                            a.iter()
+                                .filter_map(|s| s.as_str().map(String::from))
+                                .collect(),
+                        )
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+// ---------------------------------------------------------------- BOM lines
+
+#[derive(Serialize)]
+pub struct BomLine {
+    pub item: i64,
+    pub qty: i64,
+    pub designators: Vec<String>,
+    pub value: String,
+    pub footprint: String,
+    pub mpn: String,
+    pub dnp: bool,
+}
+
+/// BOM table payload (WS7), read straight from the crunched grouped-json bundle so
+/// it works in both vault mode and the `PCBREVIEW_CACHE_DIR` dev override (which has
+/// no SQLite index).
+pub fn bom_lines(vault_cache: Option<PathBuf>) -> Result<Vec<BomLine>, String> {
+    let cache = cache_dir(vault_cache)?;
+    let bom_dir = cache.join("bom");
+    let path = fs::read_dir(&bom_dir)
+        .map_err(|_| "no BOM in crunch cache".to_string())?
+        .flatten()
+        .map(|e| e.path())
+        .find(|p| p.extension().and_then(|e| e.to_str()) == Some("json"))
+        .ok_or("no BOM JSON in crunch cache")?;
+    let text = fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    let v: Value = serde_json::from_str(&text).map_err(|e| format!("BOM parse: {e}"))?;
+    let lines = v
+        .get("lines")
+        .and_then(|l| l.as_array())
+        .ok_or("BOM JSON has no lines")?;
+    let field = |line: &Value, keys: &[&str]| -> String {
+        line.get("fields")
+            .and_then(|f| f.as_object())
+            .and_then(|f| {
+                keys.iter().find_map(|k| {
+                    f.get(*k).and_then(|v| v.as_str()).filter(|s| !s.is_empty())
+                })
+            })
+            .unwrap_or("")
+            .to_string()
+    };
+    Ok(lines
+        .iter()
+        .map(|l| BomLine {
+            item: l.get("item").and_then(|v| v.as_i64()).unwrap_or(0),
+            qty: l.get("quantity").and_then(|v| v.as_i64()).unwrap_or(0),
+            designators: l
+                .get("designators")
+                .and_then(|d| d.as_array())
+                .map(|a| {
+                    a.iter().filter_map(|v| v.as_str()).map(String::from).collect()
+                })
+                .unwrap_or_default(),
+            value: field(l, &["value", "Value"]),
+            footprint: field(l, &["footprint", "Footprint"])
+                .rsplit(':')
+                .next()
+                .unwrap_or("")
+                .to_string(),
+            mpn: field(l, &["manufacturer_part_number", "mpn", "MPN"]),
+            dnp: l.get("dnp").and_then(|v| v.as_bool()).unwrap_or(false),
+        })
+        .collect())
+}
+
+// ---------------------------------------------------------------- artifact serving
+
+/// Serve a sheet SVG (or other cached artifact) by its cache-relative path, with the
+/// metadata block stripped (70-90% of KiCad SVG bytes). Path-validated against the
+/// cache root so the frontend can never read outside the bundle.
+pub fn read_artifact(vault_cache: Option<PathBuf>, rel_path: &str) -> Result<String, String> {
+    let cache = cache_dir(vault_cache)?;
+    let cache = fs::canonicalize(&cache).map_err(|e| e.to_string())?;
+    // Dev-cache mode indexes paths as "/pcb/…" (empty design_rel); a leading slash
+    // would make join() jump to the drive root on Windows.
+    let target = cache.join(rel_path.trim_start_matches(['/', '\\']));
+    let target = fs::canonicalize(&target)
+        .map_err(|_| format!("artifact not found: {rel_path}"))?;
+    if !target.starts_with(&cache) {
+        return Err("artifact path escapes the cache directory".into());
+    }
+    let meta = fs::metadata(&target).map_err(|e| e.to_string())?;
+    if meta.len() > MAX_ARTIFACT_BYTES {
+        return Err(format!("artifact too large: {} bytes", meta.len()));
+    }
+    let text = fs::read_to_string(&target).map_err(|e| e.to_string())?;
+    Ok(strip_metadata(&text))
+}
+
+/// Remove `<metadata>…</metadata>` (KiCad embeds the full source there).
+fn strip_metadata(svg: &str) -> String {
+    let (Some(start), Some(end)) = (svg.find("<metadata"), svg.find("</metadata>")) else {
+        return svg.to_string();
+    };
+    if end < start {
+        return svg.to_string();
+    }
+    let mut out = String::with_capacity(svg.len());
+    out.push_str(&svg[..start]);
+    out.push_str(&svg[end + "</metadata>".len()..]);
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // BeagleConnect Freedom (public reference design): 11 sheets incl. a root whose
+    // title != filename and a "User Input/Output" sheet - the cases that force
+    // manifest-based SVG matching. Set SPINZERO_TEST_CACHE to a crunched bundle
+    // (.pcbcache or PCBREVIEW_CACHE_DIR-style dir); the test skips when unset.
+    fn freedom_fixture() -> Option<PathBuf> {
+        let p = PathBuf::from(std::env::var("SPINZERO_TEST_CACHE").ok()?);
+        p.join("design").join("schematics").is_dir().then_some(p)
+    }
+
+    #[test]
+    fn freedom_sheets_all_match_svgs() {
+        let Some(root) = freedom_fixture() else { return };
+        let ix = build_indexes(Some(root.clone())).expect("indexes build");
+        assert_eq!(ix.sheets.len(), 11, "11 schematic sheets");
+        for s in &ix.sheets {
+            assert!(s.svg.is_some(), "sheet {} '{}' matched an SVG", s.num, s.name);
+        }
+        assert!(ix.sheets.iter().any(|s| s.name == "User Input/Output"));
+        assert!(!ix.nets.is_empty() && !ix.components.is_empty());
+        assert!(ix.nets.values().any(|n| n.sheets.len() > 1), "cross-sheet nets exist");
+        let bom = bom_lines(Some(root)).expect("bom lines");
+        assert!(!bom.is_empty(), "BOM lines parsed");
+    }
+
+    #[test]
+    fn read_artifact_strips_metadata() {
+        let Some(root) = freedom_fixture() else { return };
+        let ix = build_indexes(Some(root.clone())).unwrap();
+        let rel = ix.sheets.iter().find_map(|s| s.svg.clone()).unwrap();
+        let svg = read_artifact(Some(root), &rel).expect("serve svg");
+        assert!(svg.contains("<svg"), "still an SVG");
+        assert!(!svg.contains("<metadata"), "metadata stripped");
+        assert!(svg.contains("data-uuid"), "hit-test anchors preserved");
+    }
+}

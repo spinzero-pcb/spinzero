@@ -1,0 +1,19 @@
+[package]
+name = "extract"
+version = "0.0.1"
+edition = "2021"
+description = "Projects KiCad designs into the review bundle (design model, lean SVGs, BOM, 3D placement)"
+license = "GPL-3.0-or-later"
+
+[lib]
+name = "extract"
+
+[[bin]]
+name = "pcb-extract"
+path = "src/bin/pcb_extract.rs"
+
+[dependencies]
+eda-parse-kicad = { path = "../eda-parse-kicad" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+regex = "1"

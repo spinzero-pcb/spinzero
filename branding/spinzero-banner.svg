@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="620" height="180" viewBox="0 0 620 180" role="img" aria-label="SpinZero">
+  <title>SpinZero</title>
+  <rect width="620" height="180" fill="#0B1210"/>
+  <!-- faint copper traces, matching the website background -->
+  <g stroke="#C87F42" stroke-width="2" fill="none" opacity="0.10">
+    <path d="M0 40 H120 L160 80 H240"/>
+    <path d="M0 148 H90 L150 96"/>
+    <path d="M620 44 H520 L470 92 H360"/>
+    <path d="M620 140 H540 L500 100"/>
+  </g>
+  <g fill="#C87F42" opacity="0.10">
+    <circle cx="240" cy="80" r="5"/><circle cx="150" cy="96" r="5"/>
+    <circle cx="500" cy="100" r="5"/>
+  </g>
+  <!-- lockup: plated-via mark + wordmark, vertically centred -->
+  <g>
+    <circle cx="92" cy="90" r="50" fill="#C87F42"/>
+    <circle cx="92" cy="90" r="35" fill="none" stroke="#EDF3EF" stroke-width="6.3"/>
+    <circle cx="92" cy="90" r="20" fill="#0B1210"/>
+  </g>
+  <text x="164" y="114" font-family="'IBM Plex Mono','Consolas','Menlo',monospace" font-size="70" font-weight="600" letter-spacing="-3"><tspan fill="#EDF3EF">spin</tspan><tspan fill="#C87F42">zero</tspan></text>
+</svg>

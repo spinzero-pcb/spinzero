@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="470" height="150" viewBox="0 0 470 150" role="img" aria-label="SpinZero logo">
+  <title>SpinZero</title>
+  <circle cx="72" cy="72" r="38" fill="#C87F42"/>
+  <circle cx="72" cy="72" r="26.5" fill="none" stroke="#16181D" stroke-width="4.7"/>
+  <circle cx="72" cy="72" r="15" fill="#16181D"/>
+  <text x="132" y="96" font-family="'IBM Plex Mono','Consolas','Menlo',monospace" font-size="60" font-weight="600" letter-spacing="-2"><tspan fill="#16181D">spin</tspan><tspan fill="#C87F42">zero</tspan></text>
+</svg>
