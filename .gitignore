@@ -19,6 +19,8 @@ public/dev-geometry.json
 
 *.log
 
+*.code-workspace
+
 docs/
 
 # --- Private working files: present locally, never in the public repo ---
