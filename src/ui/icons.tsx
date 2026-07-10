@@ -194,6 +194,26 @@ export function IconCheck(p: IconProps) {
   );
 }
 
+/** Eye (visible) */
+export function IconEye(p: IconProps) {
+  return (
+    <Svg {...p}>
+      <path d="M1.5 8s2.5-4 6.5-4 6.5 4 6.5 4-2.5 4-6.5 4-6.5-4-6.5-4z" />
+      <circle cx="8" cy="8" r="1.8" />
+    </Svg>
+  );
+}
+
+/** Eye with a slash (hidden) */
+export function IconEyeOff(p: IconProps) {
+  return (
+    <Svg {...p}>
+      <path d="M1.5 8s2.5-4 6.5-4c1.2 0 2.3.36 3.2.87M14.5 8s-2.5 4-6.5 4c-1.2 0-2.3-.36-3.2-.87" />
+      <path d="M3 13L13 3" />
+    </Svg>
+  );
+}
+
 /** Comment bubble */
 export function IconComment(p: IconProps) {
   return (

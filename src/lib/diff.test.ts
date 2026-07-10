@@ -4,6 +4,7 @@ import {
   groupChanges,
   orderedChanges,
   pcbAnchorToCommentAnchor,
+  pcbLayerUnion,
   tintRole,
   tintsA,
   tintsB,
@@ -173,6 +174,25 @@ describe("diff helpers", () => {
     it("returns null when there is no PCB anchor", () => {
       const c = ch({ id: "x", group: "net", kind: "added", anchors: { schematic: { sheet: 1, uuids: [] } } });
       expect(pcbAnchorToCommentAnchor(c)).toBeNull();
+    });
+  });
+
+  describe("pcbLayerUnion", () => {
+    const known = ["F.Cu", "In1.Cu", "B.Cu", "F.SilkS", "Edge.Cuts"];
+    it("unions the changes' layers in known-table order, adding Edge.Cuts for context", () => {
+      const changes = [
+        ch({ id: "a", group: "routing", kind: "added", anchors: { pcb: { layers: ["B.Cu"] } } }),
+        ch({ id: "b", group: "silk", kind: "modified", anchors: { pcb: { layers: ["F.SilkS"] } } }),
+        ch({ id: "c", group: "routing", kind: "removed", anchors: { pcb: { layers: ["B.Cu"] } } }),
+      ];
+      expect(pcbLayerUnion(changes, known)).toEqual(["B.Cu", "F.SilkS", "Edge.Cuts"]);
+    });
+    it("ignores layers the board doesn't have and returns [] when nothing lands", () => {
+      const changes = [
+        ch({ id: "a", group: "routing", kind: "added", anchors: { pcb: { layers: ["In9.Cu"] } } }),
+        ch({ id: "b", group: "net", kind: "added", anchors: { schematic: { sheet: 1, uuids: [] } } }),
+      ];
+      expect(pcbLayerUnion(changes, known)).toEqual([]);
     });
   });
 });

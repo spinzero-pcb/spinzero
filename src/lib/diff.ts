@@ -236,9 +236,10 @@ export function countByImpact(doc: DiffDoc): Record<ChangeImpact, number> {
   return out;
 }
 
-/** Does a change land on the schematic canvas? */
+/** Does a change land on the schematic canvas? (An empty-uuid anchor still lands —
+ *  e.g. a sheet add/remove navigates to the sheet with nothing to tint.) */
 export function hasSchematicAnchor(c: Change): boolean {
-  return !!c.anchors.schematic && c.anchors.schematic.uuids.length >= 0;
+  return !!c.anchors.schematic;
 }
 
 /** Does a change land on the PCB canvas? */
@@ -261,6 +262,22 @@ export function pcbAnchorToCommentAnchor(c: Change): CommentAnchor | null {
   return null;
 }
 
+/** The union of PCB layers the changes land on — the "relevant layers" the diff view
+ *  shows by default (overlay-all). Edge.Cuts rides along when the board has it so the
+ *  outline keeps framing the copper. Returns [] when no change names a layer (then the
+ *  caller leaves the user's layer view alone). Pure. */
+export function pcbLayerUnion(changes: Change[], knownLayers: string[]): string[] {
+  const known = new Set(knownLayers);
+  const union = new Set<string>();
+  for (const c of changes) {
+    for (const l of c.anchors.pcb?.layers ?? []) {
+      if (known.has(l)) union.add(l);
+    }
+  }
+  if (union.size > 0 && known.has("Edge.Cuts")) union.add("Edge.Cuts");
+  return knownLayers.filter((l) => union.has(l)); // known-table order, deterministic
+}
+
 /** The colour role a change paints with, per side (§4): removed → error red,
  *  added → ok green, modified/renamed/moved → warn amber. Returned as the CSS-var
  *  token family so components never hardcode a colour. */
@@ -272,12 +289,13 @@ export function tintRole(kind: ChangeKind): TintRole {
   return "warn"; // modified | renamed | moved
 }
 
-/** Should this change tint the A (older) side? Removed + modified objects exist on A. */
+/** Should this change tint the A (older) side? `side` states exactly which canvases
+ *  hold the object: removed → "a", added → "b", modified/renamed/moved → "both". */
 export function tintsA(c: Change): boolean {
-  return c.kind === "removed" || c.side === "a" || c.side === "both" || c.kind === "modified" || c.kind === "renamed" || c.kind === "moved";
+  return c.side !== "b";
 }
 
-/** Should this change tint the B (newer) side? Added + modified objects exist on B. */
+/** Should this change tint the B (newer) side? See tintsA. */
 export function tintsB(c: Change): boolean {
-  return c.kind === "added" || c.side === "b" || c.side === "both" || c.kind === "modified" || c.kind === "renamed" || c.kind === "moved";
+  return c.side !== "a";
 }

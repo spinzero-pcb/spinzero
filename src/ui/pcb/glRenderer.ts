@@ -121,18 +121,23 @@ export function netLabelRows(lab: Pick<NetLabel, "key" | "num" | "net">, acrossP
 /** RGB components in 0..1. */
 export type RGB = [number, number, number];
 
-/** Per-primitive "changed" flags for diff mode (visual-diff plan §4), one byte per IR
- *  primitive in IR order: 1 = this primitive is NOT present on the other side (removed
- *  when the geometry is the A side, added when it is B), 0 = unchanged. Computed by
- *  `glDiff.ts` from a content-hash set-diff of the two revisions' geometry IRs and
- *  baked into the GPU batches as a per-instance attribute at build time. */
+/** Per-primitive "changed" flags for diff mode (visual-diff plan §4), one value per IR
+ *  primitive in IR order: 0 = unchanged (present on both sides); non-zero = this
+ *  primitive is NOT present on the other side (removed when the geometry is the A side,
+ *  added when it is B), and the value encodes which semantic change owns it (see
+ *  glDiff.ts: 1 = orphan, k+2 = change k). Computed by `glDiff.ts` from a content-hash
+ *  set-diff of the two revisions' geometry IRs and baked into the GPU batches as a
+ *  per-instance attribute at build time; per-change show/hide is a cheap visibility-
+ *  mask texture update (`setDiffVisibility`), never a rebuild. */
 export interface DiffFlags {
-  seg: Uint8Array;
-  arc: Uint8Array;
-  vias: Uint8Array;
-  pads: Uint8Array;
-  zones: Uint8Array;
-  graphics: Uint8Array;
+  seg: Uint16Array;
+  arc: Uint16Array;
+  vias: Uint16Array;
+  pads: Uint16Array;
+  zones: Uint16Array;
+  graphics: Uint16Array;
+  /** Entries in the visibility mask (DIFF_OWNED_BASE + change count, min 2). */
+  maskSize: number;
 }
 
 /** Options for a single `render` call in diff mode. Default = the normal single-
@@ -146,6 +151,10 @@ export interface RenderOpts {
   diffPass?: 0 | 1 | 2;
   /** Recolour for pass 2 (removed = red from A's buffers, added = green from B's). */
   diffColor?: RGB;
+  /** Pass-2 tint mix: the fraction of the primitive's OWN layer colour kept in the
+   *  changed-copper tint (0 = flat diffColor, ~0.4 keeps the layer identity readable
+   *  while red/green still dominates). Default 0. */
+  diffMix?: number;
   /** Draw drill holes (default true; the changed-only overlay passes skip them). */
   holes?: boolean;
 }
@@ -204,17 +213,25 @@ vec4 hotColor(float net, float comp){
 }
 // Diff compare passes (visual-diff §4): 0 = off; 1 = base (unchanged only, painted a
 // flat neutral grey — fully greyed out, not hue-dimmed — so only the red/green changed
-// copper carries colour); 2 = changed-only (recoloured flat in uDiffColor).
+// copper carries colour); 2 = changed-only (tinted in uDiffColor, mixed with the
+// primitive's own layer colour by uDiffMix so the layer identity stays readable).
+// The flag attribute encodes WHICH change owns a changed primitive (glDiff.ts:
+// 0 unchanged, 1 orphan, k+2 = change k); uDiffVis gates each code per frame, so
+// hiding/soloing changes never rebuilds the batches. A hidden-changed primitive
+// draws as unchanged grey in pass 1 (it exists on this side — just not spotlit).
 uniform int uDiffPass;
 uniform vec3 uDiffColor;
 uniform vec3 uDiffBase;      // flat grey for the unchanged base (whitish/blackish)
+uniform float uDiffMix;      // pass-2 fraction of the layer colour kept in the tint
+uniform sampler2D uDiffVis;  // a > 0.5 at texel [flag] = this change is shown
 vec4 shade(vec3 baseColor, float layerAlpha, float coverage, float net, float comp, float flag){
-  if (uDiffPass == 1 && flag > 0.5) discard;   // base pass: changed prims are the overlay's job
+  bool changed = flag > 0.5 && texelFetch(uDiffVis, ivec2(int(flag + 0.5), 0), 0).a > 0.5;
+  if (uDiffPass == 1 && changed) discard;      // base pass: changed prims are the overlay's job
   if (uDiffPass == 2) {
-    if (flag < 0.5) discard;                   // changed-only pass: unchanged prims skipped
+    if (!changed) discard;                     // changed-only pass: everything else skipped
     float ac = layerAlpha * uObjAlpha * coverage;
     if (ac < 0.003) discard;
-    return vec4(uDiffColor, ac);
+    return vec4(mix(uDiffColor, baseColor, uDiffMix), ac);
   }
   vec3 col = baseColor;
   float a = layerAlpha * uObjAlpha;
@@ -738,6 +755,11 @@ export class PcbGlRenderer {
 
   /** Per-primitive changed flags for diff mode (baked into the batches); null = all 0. */
   private diffFlags: DiffFlags | null = null;
+  /** Per-change visibility mask texture (see DiffFlags/setDiffVisibility). */
+  private diffVis: WebGLTexture;
+  private diffVisSize: number;
+  /** Diff-mode copper stack fade (top layers more translucent); reapplied by setLayerState. */
+  private diffFade = false;
 
   constructor(gl: WebGL2RenderingContext, geom: PcbGeometry, diffFlags?: DiffFlags) {
     this.gl = gl;
@@ -776,6 +798,11 @@ export class PcbGlRenderer {
 
     this.netMask = this.makeMask(Math.max(1, geom.nets.length));
     this.compMask = this.makeMask(Math.max(1, geom.components.length));
+    // Diff visibility mask: one texel per flag code, default everything shown. A plain
+    // (non-diff) renderer keeps the tiny default texture — flags are all 0, never sampled.
+    this.diffVisSize = Math.max(2, diffFlags?.maskSize ?? 2);
+    this.diffVis = this.makeMask(this.diffVisSize);
+    this.setDiffVisibility(null);
 
     this.resolveColors();
 
@@ -789,7 +816,8 @@ export class PcbGlRenderer {
     const acc = new Accum();
     const clampLayer = (l: number) => (l >= 0 && l < MAX_LAYERS ? l : 0);
     const df = this.diffFlags;
-    const flagOf = (arr: Uint8Array | undefined, i: number) => (arr && arr[i] ? 1 : 0);
+    // The flag is the owner CODE (glDiff encoding), not a boolean — pass it through.
+    const flagOf = (arr: Uint16Array | undefined, i: number) => (arr ? arr[i] : 0);
 
     // tracks: straight segments
     const seg = geom.tracks.seg;
@@ -1046,18 +1074,43 @@ export class PcbGlRenderer {
   /** Recompute per-layer alpha + the active-layer index from the hidden set + active
    *  layer. The active layer is painted on top (two-pass; see render) at full opacity;
    *  other visible layers are NOT dimmed — they read through where the active layer has
-   *  no copper. With no active layer, copper sits at 75% for a natural board wash. */
-  setLayerState(hidden: Set<string>, active: string | null) {
+   *  no copper. With no active layer, copper sits at 75% for a natural board wash.
+   *  `diffFade` (diff mode, multi-layer overlay) fades the visible copper stack top →
+   *  bottom so upper layers read as translucent sheets and lower copper shows through. */
+  setLayerState(hidden: Set<string>, active: string | null, diffFade = this.diffFade) {
     const { geom } = this;
+    this.diffFade = diffFade;
     this.activeLayerIdx = -1;
     for (let i = 0; i < MAX_LAYERS; i++) this.layerAlpha[i] = 0;
+    const visCopper: number[] = []; // visible copper layers, table (front → back) order
     for (let i = 0; i < geom.layers.length && i < MAX_LAYERS; i++) {
       const l = geom.layers[i];
       if (l.name === active) this.activeLayerIdx = i;
       if (hidden.has(l.name)) continue;
       const copper = l.role === "copper" || l.name.endsWith(".Cu");
       this.layerAlpha[i] = !active && copper ? 0.75 : 1;
+      if (copper) visCopper.push(i);
     }
+    if (diffFade && visCopper.length > 1) {
+      // Top (front) copper most translucent, bottom opaque: 0.45 → 0.95 linear ramp.
+      for (let k = 0; k < visCopper.length; k++) {
+        this.layerAlpha[visCopper[k]] = 0.45 + (0.5 * k) / (visCopper.length - 1);
+      }
+    }
+  }
+
+  /** Upload the per-change visibility mask (glDiff.buildDiffVisibility): one 0/1 entry
+   *  per flag code. `null` = everything shown. Cheap (a tiny texSubImage2D) — this is
+   *  how show/hide/solo of individual changes works without touching the batches. */
+  setDiffVisibility(vis: Uint8Array | null) {
+    const gl = this.gl;
+    const buf = new Uint8Array(this.diffVisSize * 4);
+    for (let i = 0; i < this.diffVisSize; i++) {
+      const on = vis ? (vis[i] ?? 0) !== 0 : true;
+      buf[i * 4 + 3] = on ? 255 : 0; // the shader reads .a only
+    }
+    gl.bindTexture(gl.TEXTURE_2D, this.diffVis);
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, this.diffVisSize, 1, gl.RGBA, gl.UNSIGNED_BYTE, buf);
   }
 
   /** Set the highlighted nets/components and the colour to repaint each in (by IR index).
@@ -1354,12 +1407,15 @@ export class PcbGlRenderer {
   /** Live diff-pass state for the current render call (set by render(opts)). */
   private diffPass: 0 | 1 | 2 = 0;
   private diffColor: RGB = [1, 0, 0];
+  private diffMix = 0;
 
   private setCommonUniforms(prog: WebGLProgram, objAlpha: number) {
     const gl = this.gl;
     gl.uniform1i(gl.getUniformLocation(prog, "uDiffPass"), this.diffPass);
     gl.uniform3f(gl.getUniformLocation(prog, "uDiffColor"), this.diffColor[0], this.diffColor[1], this.diffColor[2]);
     gl.uniform3f(gl.getUniformLocation(prog, "uDiffBase"), this.diffBase[0], this.diffBase[1], this.diffBase[2]);
+    gl.uniform1f(gl.getUniformLocation(prog, "uDiffMix"), this.diffMix);
+    gl.uniform1i(gl.getUniformLocation(prog, "uDiffVis"), 2);
     gl.uniform3fv(gl.getUniformLocation(prog, "uLayerColor"), this.layerColors);
     gl.uniform1fv(gl.getUniformLocation(prog, "uLayerAlpha"), this.layerAlpha);
     gl.uniform1f(gl.getUniformLocation(prog, "uObjAlpha"), objAlpha);
@@ -1449,6 +1505,7 @@ export class PcbGlRenderer {
   render(cam: Camera, w: number, h: number, objState: ObjectState, opts?: RenderOpts) {
     const gl = this.gl;
     this.diffPass = opts?.diffPass ?? 0;
+    this.diffMix = opts?.diffMix ?? 0;
     if (opts?.diffColor) this.diffColor = opts.diffColor;
     gl.viewport(0, 0, w, h);
     if (opts?.clear !== false) {
@@ -1460,6 +1517,8 @@ export class PcbGlRenderer {
     gl.bindTexture(gl.TEXTURE_2D, this.netMask);
     gl.activeTexture(gl.TEXTURE1);
     gl.bindTexture(gl.TEXTURE_2D, this.compMask);
+    gl.activeTexture(gl.TEXTURE2);
+    gl.bindTexture(gl.TEXTURE_2D, this.diffVis);
 
     if (this.activeLayerIdx >= 0) {
       // Pass 1: every other layer underneath; pass 2: the active layer on top.
@@ -1524,6 +1583,7 @@ export class PcbGlRenderer {
     gl.deleteBuffer(this.quad);
     gl.deleteTexture(this.netMask);
     gl.deleteTexture(this.compMask);
+    gl.deleteTexture(this.diffVis);
     gl.deleteProgram(this.progLine);
     gl.deleteProgram(this.progPad);
     gl.deleteProgram(this.progVia);

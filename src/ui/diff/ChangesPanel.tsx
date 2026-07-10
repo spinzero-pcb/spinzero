@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useDiffStore } from "../../stores/diffStore";
 import {
+  countByImpact,
   filterChanges,
   groupChanges,
   orderedChanges,
@@ -13,7 +14,7 @@ import {
   type ChangeGroup,
 } from "../../lib/diff";
 import { isTypingTarget } from "../../lib/keymap";
-import { IconCheck, IconChevron } from "../icons";
+import { IconCheck, IconChevron, IconEye, IconEyeOff } from "../icons";
 
 /** The Changes panel (visual-diff §5): the left-rail tab shown only in diff mode. A tree
  *  grouped by change group with count badges, impact + free-text filters, a stepper
@@ -27,6 +28,9 @@ export function ChangesPanel() {
   const markSeen = useDiffStore((s) => s.markSeen);
   const markGroupSeen = useDiffStore((s) => s.markGroupSeen);
   const preparing = useDiffStore((s) => s.preparing);
+  const hiddenIds = useDiffStore((s) => s.hiddenChangeIds);
+  const toggleChangeHidden = useDiffStore((s) => s.toggleChangeHidden);
+  const showAllChanges = useDiffStore((s) => s.showAllChanges);
 
   const [impacts, setImpacts] = useState<Set<ChangeImpact>>(new Set());
   const [query, setQuery] = useState("");
@@ -41,6 +45,15 @@ export function ChangesPanel() {
   );
   const groups = useMemo(() => groupChanges(visible), [visible]);
   const ordered = useMemo(() => orderedChanges(visible), [visible]);
+  // Only offer chips that would show something: a bucket with zero changes is noise
+  // (the Cosmetic chip's bucket also covers doc-impact changes — see impactBucket).
+  const chips = useMemo(() => {
+    if (!doc) return IMPACT_FILTERS;
+    const counts = countByImpact(doc);
+    return IMPACT_FILTERS.filter(
+      (f) => counts[f.id] + (f.id === "cosmetic" ? counts.doc : 0) > 0,
+    );
+  }, [doc]);
   const focusIdx = ordered.findIndex((c) => c.id === focusedId);
 
   // Step within the *visible* (filtered) sequence — the same set the "Change N of M"
@@ -130,7 +143,7 @@ export function ChangesPanel() {
 
       {/* Filters */}
       <div className="changes-filters">
-        {IMPACT_FILTERS.map((f) => (
+        {chips.map((f) => (
           <button
             key={f.id}
             className={`filter-chip ${impacts.has(f.id) ? "active" : ""}`}
@@ -147,6 +160,19 @@ export function ChangesPanel() {
         value={query}
         onChange={(e) => setQuery(e.target.value)}
       />
+
+      {/* Board-overlay visibility: by default every change is tinted; clicking a row
+          solos it and the eye buttons build subsets. This bar is the way back. */}
+      {hiddenIds.size > 0 && (
+        <div className="changes-visbar">
+          <span>
+            Showing {Math.max(allChanges.length - hiddenIds.size, 0)} of {allChanges.length} on board
+          </span>
+          <button className="btn-ghost changes-visbar-btn" onClick={showAllChanges}>
+            Show all
+          </button>
+        </div>
+      )}
 
       {/* Tree */}
       <div className="changes-tree">
@@ -182,8 +208,10 @@ export function ChangesPanel() {
                       change={c}
                       focused={c.id === focusedId}
                       seen={seen.has(c.id)}
+                      hidden={hiddenIds.has(c.id)}
                       onFocus={() => focusChange(c.id)}
                       onToggleSeen={() => markSeen(c.id, !seen.has(c.id))}
+                      onToggleHidden={() => toggleChangeHidden(c.id)}
                       rowRef={(el) => {
                         if (el) rowRefs.current.set(c.id, el);
                         else rowRefs.current.delete(c.id);
@@ -203,22 +231,28 @@ function ChangeRow({
   change,
   focused,
   seen,
+  hidden,
   onFocus,
   onToggleSeen,
+  onToggleHidden,
   rowRef,
 }: {
   change: Change;
   focused: boolean;
   seen: boolean;
+  /** Hidden from the PCB overlay tint (the eye toggle), NOT filtered from the list. */
+  hidden: boolean;
   onFocus: () => void;
   onToggleSeen: () => void;
+  onToggleHidden: () => void;
   rowRef: (el: HTMLDivElement | null) => void;
 }) {
   const role = tintRole(change.kind); // err/ok/warn → drives the dot colour via CSS var
+  const onBoard = hasPcbAnchor(change); // only board-anchored changes can be eye-toggled
   return (
     <div
       ref={rowRef}
-      className={`change-row ${focused ? "focused" : ""} ${seen ? "seen" : ""}`}
+      className={`change-row ${focused ? "focused" : ""} ${seen ? "seen" : ""} ${hidden ? "board-hidden" : ""}`}
       onClick={onFocus}
       title={change.detail ? `${change.title}\n${change.detail}` : change.title}
     >
@@ -228,12 +262,24 @@ function ChangeRow({
         {change.detail && <div className="change-detail">{change.detail}</div>}
       </div>
       <div className="change-badges">
-        {hasSchematicAnchor(change) && hasPcbAnchor(change) && (
+        {hasSchematicAnchor(change) && onBoard && (
           <span className="change-both" title="On both canvases — press X to cross-probe">
             SCH·PCB
           </span>
         )}
       </div>
+      {onBoard && (
+        <button
+          className={`change-eye ${hidden ? "off" : ""}`}
+          title={hidden ? "Show this change on the board" : "Hide this change on the board"}
+          onClick={(e) => {
+            e.stopPropagation(); // eye builds subsets — it must not refocus/solo
+            onToggleHidden();
+          }}
+        >
+          {hidden ? <IconEyeOff size={12} /> : <IconEye size={12} />}
+        </button>
+      )}
       <button
         className={`change-seen ${seen ? "on" : ""}`}
         title={seen ? "Mark unseen" : "Mark seen"}

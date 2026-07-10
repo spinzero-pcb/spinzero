@@ -3,6 +3,7 @@ import { ipc } from "../lib/ipc";
 import {
   orderedChanges,
   pcbAnchorToCommentAnchor,
+  pcbLayerUnion,
   type DiffDoc,
   type DiffSide,
 } from "../lib/diff";
@@ -20,10 +21,9 @@ import type { ExtractionMeta } from "../lib/types";
  *  but the store only ever holds `sideBySide`, and no dead toggle is rendered. */
 export type DiffMode = "sideBySide";
 
-/** PCB compare mode (plan §4): combined onion-skin (default — removed red / added
- *  green over the dimmed common base), A/B flicker (~2 Hz, Space holds), and a
- *  draggable wipe divider (A left / B right). PCB side-by-side is deferred. */
-export type PcbDiffMode = "onion" | "flicker" | "wipe";
+/** localStorage key for the blink toggle — a remembered per-user preference (the
+ *  same tier as BottomPanel's height; not project state). */
+const BLINK_STORE_KEY = "diff.blink";
 
 interface DiffState {
   /** True while a comparison is active (diff mode) — view-global. */
@@ -36,8 +36,16 @@ interface DiffState {
   cacheKeyB: string | null;
   doc: DiffDoc | null;
   mode: DiffMode;
-  /** PCB compare mode (onion default); reset on every enter/exit. */
-  pcbMode: PcbDiffMode;
+  /** Blink the changed copper (added/removed pulse in opposite phases over the stable
+   *  grey base). A remembered user preference (localStorage), not per-session. */
+  blink: boolean;
+  /** Hide zone pours in the PCB compare (pours re-flow around edits and can wash the
+   *  view even with the semantic gate). Session-scoped; reset on enter. */
+  hideZones: boolean;
+  /** Changes hidden from the PCB overlay tint. Empty = show ALL changes (the default
+   *  overview). Focusing a change solos it (all others land here); the per-row eye
+   *  toggles individual members. Drives a GPU mask, so toggling is cheap. */
+  hiddenChangeIds: Set<string>;
   /** The change the stepper is currently on (null = none focused yet). */
   focusedChangeId: string | null;
   /** Reviewer's own progress — ephemeral per app session (plan §11). */
@@ -68,7 +76,12 @@ interface DiffState {
   markGroupSeen: (ids: string[], seen?: boolean) => void;
   /** Fetch an A-side sheet SVG (cache-relative path), memoised per session. */
   getSheetSvgA: (num: number, relPath: string) => Promise<string>;
-  setPcbMode: (m: PcbDiffMode) => void;
+  setBlink: (on: boolean) => void;
+  setHideZones: (on: boolean) => void;
+  /** Toggle one change in/out of the PCB overlay (the row's eye button). */
+  toggleChangeHidden: (id: string) => void;
+  /** Back to the overview: every change tinted, relevant-layer union restored. */
+  showAllChanges: () => void;
   /** Fetch + parse the A-side PCB geometry IR (same cache-relative path as B's —
    *  deterministic extraction), memoised per diff session. Null when A has no board. */
   getPcbGeometryA: (relPath: string | undefined) => Promise<PcbGeometry | null>;
@@ -108,6 +121,11 @@ export function normalizeOrder(
   return [older, newer];
 }
 
+/** Monotonic session token: enterDiff captures it and re-checks after every await, so a
+ *  prepare superseded mid-flight (exitDiff during a swap's prepare, or a newer enter)
+ *  never lands stale state. exitDiff bumps it to invalidate any in-flight prepare. */
+let diffSeq = 0;
+
 export const useDiffStore = create<DiffState>((set, get) => ({
   active: false,
   a: null,
@@ -116,7 +134,9 @@ export const useDiffStore = create<DiffState>((set, get) => ({
   cacheKeyB: null,
   doc: null,
   mode: "sideBySide",
-  pcbMode: "onion",
+  blink: localStorage.getItem(BLINK_STORE_KEY) === "1",
+  hideZones: false,
+  hiddenChangeIds: new Set(),
   focusedChangeId: null,
   seen: new Set(),
   preparing: false,
@@ -127,6 +147,7 @@ export const useDiffStore = create<DiffState>((set, get) => ({
 
   enterDiff: async (revA, revB, opts) => {
     if (get().preparing) return; // don't overlap a prepare
+    const token = ++diffSeq;
     const { extractions, activeExtraction, setActiveExtraction } = useProjectStore.getState();
     const [older, newer] =
       opts?.normalize === false ? [revA, revB] : normalizeOrder(revA, revB, extractions);
@@ -150,8 +171,10 @@ export const useDiffStore = create<DiffState>((set, get) => ({
       if (activeNow !== newer) {
         await setActiveExtraction(newer);
       }
+      if (token !== diffSeq) return; // superseded while pinning — drop this prepare
 
       const handle = await ipc.prepareDiff(older, newer);
+      if (token !== diffSeq) return; // superseded (exit or newer enter) — drop stale state
       set({
         active: true,
         a: handle.doc.a,
@@ -166,14 +189,17 @@ export const useDiffStore = create<DiffState>((set, get) => ({
         priorPcbView,
         sheetSvgA: new Map(),
         pcbGeomA: null,
-        pcbMode: "onion",
+        hideZones: false,
+        hiddenChangeIds: new Set(),
       });
       // The Changes tab auto-activates on enter; the panel appears only in diff mode.
       useReviewStore.getState().setLeftTab("review");
-      // Land on the first change so the user has an immediate anchor to step from.
-      const first = orderedChanges(handle.doc.changes)[0];
-      if (first) get().focusChange(first.id);
+      // Overview by default: EVERY change tinted, the PCB view isolated to the union
+      // of layers the changes land on. No change is focused (and no camera yank) until
+      // the user steps/clicks — then that change solos (see focusChange).
+      applyLayerUnion(handle.doc);
     } catch (e) {
+      if (token !== diffSeq) return; // superseded — whoever superseded us owns the state
       set({ preparing: false });
       // Un-pin: we may have switched the active revision to `newer` before the
       // prepare failed. Restore the previous pin (a failed swap goes back to the
@@ -194,6 +220,7 @@ export const useDiffStore = create<DiffState>((set, get) => ({
   exitDiff: () => {
     const { active, priorActive, priorPcbView } = get();
     if (!active) return;
+    diffSeq++; // invalidate any in-flight prepare (a swap's) so it can't land stale state
     // Drop ALL comparison state — exiting diff mode is just dropping this store.
     diffPaint.clearA();
     // Restore the PCB layer view the changed-layer isolation replaced.
@@ -211,11 +238,13 @@ export const useDiffStore = create<DiffState>((set, get) => ({
       doc: null,
       focusedChangeId: null,
       seen: new Set(),
+      preparing: false, // an in-flight swap prepare was invalidated above — unblock enters
       priorActive: null,
       priorPcbView: null,
       sheetSvgA: new Map(),
       pcbGeomA: null,
-      pcbMode: "onion",
+      hideZones: false,
+      hiddenChangeIds: new Set(),
     });
     // Restore the revision that was active before we pinned B (best-effort — a failed
     // restore just leaves B active, which is harmless and surfaces its own toast).
@@ -236,8 +265,12 @@ export const useDiffStore = create<DiffState>((set, get) => ({
   focusChange: (id) => {
     const { doc } = get();
     const change = doc?.changes.find((c) => c.id === id);
-    if (!change) return;
-    set({ focusedChangeId: id });
+    if (!change || !doc) return;
+    // Selecting a change SOLOS it on the PCB overlay: every other change drops out of
+    // the tint (a cheap GPU-mask update, not a rebuild). showAllChanges restores the
+    // overview; the per-row eye buttons build multi-change subsets from either state.
+    const others = new Set(doc.changes.filter((c) => c.id !== id).map((c) => c.id));
+    set({ focusedChangeId: id, hiddenChangeIds: others });
 
     const sch = change.anchors.schematic;
     const pcb = change.anchors.pcb;
@@ -281,7 +314,27 @@ export const useDiffStore = create<DiffState>((set, get) => ({
       return { seen: next };
     }),
 
-  setPcbMode: (m) => set({ pcbMode: m }),
+  setBlink: (on) => {
+    localStorage.setItem(BLINK_STORE_KEY, on ? "1" : "0");
+    set({ blink: on });
+  },
+
+  setHideZones: (on) => set({ hideZones: on }),
+
+  toggleChangeHidden: (id) =>
+    set((s) => {
+      const next = new Set(s.hiddenChangeIds);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return { hiddenChangeIds: next };
+    }),
+
+  showAllChanges: () => {
+    const { doc } = get();
+    set({ hiddenChangeIds: new Set() });
+    // Back to the overview layer set (the focused change may have isolated one layer).
+    if (doc) applyLayerUnion(doc);
+  },
 
   getPcbGeometryA: (relPath) => {
     const { pcbGeomA, cacheKeyA } = get();
@@ -329,6 +382,21 @@ function step(
   const clamped = Math.max(0, Math.min(order.length - 1, nextIdx));
   const target = order[clamped];
   if (target) get().focusChange(target.id);
+}
+
+/** Show the union of layers the changeset lands on ("relevant layers"), hiding the
+ *  rest — the overview view on enter / show-all. Leaves the user's layer view alone
+ *  when no change names a layer (schematic-only diffs). A single-layer union gets the
+ *  active-layer emphasis; a multi-layer union has no active layer (the diff-mode
+ *  copper-stack fade differentiates depth instead). Restored on exit (priorPcbView). */
+function applyLayerUnion(doc: DiffDoc) {
+  const pv = usePcbViewStore.getState();
+  const union = pcbLayerUnion(doc.changes, pv.known);
+  if (union.length === 0) return;
+  const keep = new Set(union);
+  pv.setHidden(pv.known.filter((l) => !keep.has(l)));
+  const copper = union.filter((l) => l.endsWith(".Cu"));
+  pv.setActive(copper.length === 1 ? copper[0] : null);
 }
 
 /** Isolate the layer(s) a PCB change lives on: make the first active and hide every

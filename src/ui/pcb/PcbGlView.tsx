@@ -16,9 +16,9 @@ import { IconClose, IconComment, IconCopy, IconFit, IconRuler, IconSheet, IconTr
 import type { CommentAnchor } from "../../lib/types";
 import type { PcbGeometry, PcbTextDef } from "../../lib/pcbGeometry";
 import { PcbGlRenderer, netLabelRows, type BBox, type Camera, type DiffFlags, type ObjectState, type RGB } from "./glRenderer";
-import { computeDiffFlags } from "./glDiff";
+import { buildDiffVisibility, computeDiffFlags } from "./glDiff";
 import { isTypingTarget } from "../../lib/keymap";
-import { useDiffStore, type PcbDiffMode } from "../../stores/diffStore";
+import { useDiffStore } from "../../stores/diffStore";
 import { resolveCssColor } from "./glColor";
 import { registerRenderProbe } from "../../lib/renderProbe";
 import { parseMarkup, type MarkupRun } from "./textMarkup";
@@ -44,6 +44,11 @@ import { PcbToolbar } from "./PcbToolbar";
  *  toolbar/keyboard) clamp to this range. */
 const MIN_SCALE = 0.05;
 const MAX_SCALE = 2000;
+
+/** Diff overlay: fraction of a changed primitive's OWN layer colour kept in the
+ *  red/green tint. High enough that F.Cu still reads as F.Cu on a multi-layer
+ *  compare, low enough that added-vs-removed stays unmistakable. */
+const DIFF_LAYER_MIX = 0.4;
 
 /** Draw one net-label row: the plain `text` centred at (0, cy) plus a KiCad-style
  *  overline over each `~{…}` run (feedback: nets like `~{project_rst}`). ctx.font /
@@ -296,9 +301,12 @@ export function PcbGlView({ visible }: { visible: boolean }) {
   const measureUnits = useMeasureStore((s) => s.units);
 
   // Visual diff (plan §4): while a comparison is active and BOTH sides carry a PCB
-  // geometry IR, the view renders one of the compare modes instead of the plain board.
+  // geometry IR, the view renders the compare overlay instead of the plain board.
   const diffActive = useDiffStore((s) => s.active);
-  const pcbDiffMode = useDiffStore((s) => s.pcbMode);
+  const diffBlink = useDiffStore((s) => s.blink);
+  const diffHideZones = useDiffStore((s) => s.hideZones);
+  const diffHiddenIds = useDiffStore((s) => s.hiddenChangeIds);
+  const diffFocusedId = useDiffStore((s) => s.focusedChangeId);
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const labelCanvasRef = useRef<HTMLCanvasElement>(null);
@@ -306,21 +314,25 @@ export function PcbGlView({ visible }: { visible: boolean }) {
   const rendererRef = useRef<PcbGlRenderer | null>(null);
   /** The A (older) side's renderer, sharing the same GL context; null outside diff mode. */
   const rendererARef = useRef<PcbGlRenderer | null>(null);
-  const glRef = useRef<WebGL2RenderingContext | null>(null);
   /** Prepared diff inputs (A geometry + both sides' changed flags); renderers rebuild
    *  with the flags baked in when this lands (diffEpoch bump re-runs the create effect). */
   const diffDataRef = useRef<{ geomA: PcbGeometry; flagsA: DiffFlags; flagsB: DiffFlags } | null>(null);
   const [diffEpoch, setDiffEpoch] = useState(0);
-  const diffModeRef = useRef<PcbDiffMode | null>(null);
-  diffModeRef.current = diffActive ? pcbDiffMode : null;
+  const diffOnRef = useRef(false);
+  diffOnRef.current = diffActive;
+  const blinkRef = useRef(false);
+  blinkRef.current = diffActive && diffBlink;
+  const hideZonesRef = useRef(false);
+  hideZonesRef.current = diffHideZones;
+  /** True while the last overlay frame drew the focused-change pulse frame — keeps the
+   *  dirty-driven render loop animating (the pulse is the only continuous animation). */
+  const diffPulse = useRef(false);
   /** The indexes the current renderer was built for — a rebuild for the SAME design
    *  (diff enter/exit) keeps the camera; a new design triggers the first fit. */
   const lastIndexesRef = useRef<typeof indexes | null>(null);
-  /** Flicker phase (true = showing A) + Space-held pause; wipe divider as a 0..1 fraction. */
-  const flickA = useRef(false);
-  const flickHold = useRef(false);
-  const wipeFrac = useRef(0.5);
-  const [wipePct, setWipePct] = useState(50); // divider position for the DOM handle
+  /** Blink phase (true = the removed/A overlay is showing) + Space-held pause. */
+  const blinkA = useRef(true);
+  const blinkHold = useRef(false);
   /** Diff tint colours, re-resolved with the theme (never hardcoded — CLAUDE.md). */
   const diffColors = useRef<{ removed: RGB; added: RGB }>({ removed: [1, 0.2, 0.2], added: [0.2, 1, 0.4] });
   const cam = useRef<Camera>({ x: 0, y: 0, scale: 1 });
@@ -815,6 +827,86 @@ export function PcbGlView({ visible }: { visible: boolean }) {
       ctx.restore();
     }
 
+    // --- visual diff: placement move vectors + focused-change pulse frame ---
+    // A vector shows WHERE a moved footprint came from (old centroid, red dot) and
+    // landed (new centroid, green dot) — drawn for EVERY visible placement move, so
+    // the overview reads at a glance (a solo naturally leaves just one). The pulsing
+    // accent frame marks the focused change's extent so a stepper landing is
+    // unmistakable against the compare tint.
+    diffPulse.current = false;
+    if (diffOnRef.current) {
+      const d = useDiffStore.getState();
+      const errCol = rootStyle.getPropertyValue("--err").trim() || "#e05252";
+      const okCol = rootStyle.getPropertyValue("--ok").trim() || "#4caf7d";
+      const sxOf = (x: number) => (x - c.x) * scale + cssW / 2;
+      const syOf = (y: number) => (y - c.y) * scale + cssH / 2;
+      const rA = rendererARef.current;
+      if (rA && d.doc) {
+        let vectors = 0;
+        for (const chg of d.doc.changes) {
+          if (vectors >= 100) break; // cap: a pathological changeset can't stall the frame
+          if (chg.kind !== "moved" || !chg.anchors.pcb?.comp) continue;
+          if (d.hiddenChangeIds.has(chg.id)) continue;
+          const bA = rA.compBBox(chg.anchors.pcb.comp);
+          const bB = r.compBBox(chg.anchors.pcb.comp);
+          if (!bA || !bB) continue;
+          const x0 = sxOf((bA.minx + bA.maxx) / 2);
+          const y0 = syOf((bA.miny + bA.maxy) / 2);
+          const x1 = sxOf((bB.minx + bB.maxx) / 2);
+          const y1 = syOf((bB.miny + bB.maxy) / 2);
+          // Off-screen or sub-4-px (rotation-only / tiny nudge at this zoom): skip —
+          // two smeared dots read worse than nothing.
+          if (Math.hypot(x1 - x0, y1 - y0) <= 4) continue;
+          if (Math.max(x0, x1) < 0 || Math.min(x0, x1) > cssW || Math.max(y0, y1) < 0 || Math.min(y0, y1) > cssH) continue;
+          ctx.save();
+          ctx.strokeStyle = accent;
+          ctx.lineWidth = 1.5;
+          ctx.setLineDash([5, 4]);
+          ctx.beginPath();
+          ctx.moveTo(x0, y0);
+          ctx.lineTo(x1, y1);
+          ctx.stroke();
+          ctx.setLineDash([]);
+          ctx.fillStyle = errCol;
+          ctx.beginPath();
+          ctx.arc(x0, y0, 3.5, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.fillStyle = okCol;
+          ctx.beginPath();
+          ctx.arc(x1, y1, 3.5, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.restore();
+          vectors++;
+        }
+      }
+      const chg = d.doc?.changes.find((cc) => cc.id === d.focusedChangeId);
+      const pcbA = chg?.anchors.pcb;
+      if (chg && pcbA) {
+        // Frame rect: the anchor's own bbox, else the comp/net extent on B.
+        let fb: BBox | null = null;
+        if (pcbA.bbox) {
+          const [bx, by, bw, bh] = pcbA.bbox;
+          fb = { minx: bx, miny: by, maxx: bx + bw, maxy: by + bh };
+        } else if (pcbA.comp) fb = r.compBBox(pcbA.comp);
+        else if (pcbA.net) fb = r.netBBox(pcbA.net);
+        if (fb) {
+          const pad = 6; // screen-px breathing room so the frame never sits on the copper
+          ctx.save();
+          ctx.globalAlpha = 0.45 + 0.35 * Math.sin(performance.now() / 250);
+          ctx.strokeStyle = accent;
+          ctx.lineWidth = 2;
+          ctx.strokeRect(
+            sxOf(fb.minx) - pad,
+            syOf(fb.miny) - pad,
+            (fb.maxx - fb.minx) * scale + 2 * pad,
+            (fb.maxy - fb.miny) * scale + 2 * pad,
+          );
+          ctx.restore();
+          diffPulse.current = true;
+        }
+      }
+    }
+
     // --- measure tool: ruler + readout, on top of everything (§7.6) ---
     if (measureActiveRef.current) {
       const cssVar = (name: string, fallback: string) =>
@@ -855,7 +947,10 @@ export function PcbGlView({ visible }: { visible: boolean }) {
       const geomB = await getPcbGeometry();
       const geomA = await useDiffStore.getState().getPcbGeometryA(indexes?.pcb_geometry);
       if (cancelled || !geomA || !geomB) return; // schematic-only side → plain render
-      const flags = computeDiffFlags(geomA, geomB);
+      // The semantic change list drives per-primitive OWNERSHIP (per-change show/solo)
+      // and gates zone tinting on a real zone row (refill jitter stays grey).
+      const changes = useDiffStore.getState().doc?.changes ?? [];
+      const flags = computeDiffFlags(geomA, geomB, changes);
       diffDataRef.current = { geomA, flagsA: flags.a, flagsB: flags.b };
       setDiffEpoch((e) => e + 1);
     })();
@@ -880,7 +975,6 @@ export function PcbGlView({ visible }: { visible: boolean }) {
     // that reads worst on thin tracks).
     const gl = canvas.getContext("webgl2", { antialias: true, premultipliedAlpha: true });
     if (!gl || gl.isContextLost()) return; // a lost context can't build GL resources yet
-    glRef.current = gl;
     let cancelled = false;
     let created: PcbGlRenderer | null = null;
     let createdA: PcbGlRenderer | null = null;
@@ -903,8 +997,18 @@ export function PcbGlView({ visible }: { visible: boolean }) {
       // Drop any measurement carried over from the previous board.
       mA.current = mB.current = mHover.current = null;
       const pv = usePcbViewStore.getState();
-      created.setLayerState(pv.hidden, pv.active);
-      createdA?.setLayerState(pv.hidden, pv.active);
+      // Diff mode fades the visible copper stack top→bottom so a multi-layer compare
+      // reads in depth; a plain rebuild keeps the normal opaque alphas.
+      created.setLayerState(pv.hidden, pv.active, !!diff);
+      createdA?.setLayerState(pv.hidden, pv.active, true);
+      // Fresh renderers start with everything visible — re-apply the current
+      // per-change visibility (a solo may already be active when we rebuild).
+      if (diff) {
+        const d = useDiffStore.getState();
+        const vis = d.doc ? buildDiffVisibility(d.doc.changes, d.hiddenChangeIds) : null;
+        created.setDiffVisibility(vis);
+        createdA?.setDiffVisibility(vis);
+      }
       syncSelection(created);
       renderPcbCommentChips(); // re-anchor chips to the fresh geometry
       // A NEW design refits; a diff-mode rebuild of the SAME board keeps the camera
@@ -971,25 +1075,27 @@ export function PcbGlView({ visible }: { visible: boolean }) {
     dirty.current = true;
   }, [diffActive, indexes?.theme]);
 
-  // Flicker mode: blink A/B at ~2 Hz; holding Space freezes the current side (plan §4).
+  // Blink: pulse the changed copper — removed (A) and added (B) overlays alternate
+  // phases every 500 ms over the stable grey base, so what pulses IN is new copper and
+  // what pulses OUT is old. Holding Space freezes the current phase.
   useEffect(() => {
-    if (!diffActive || pcbDiffMode !== "flicker") {
-      flickA.current = false;
+    if (!diffActive || !diffBlink) {
+      blinkA.current = true;
       return;
     }
     const t = setInterval(() => {
-      if (flickHold.current) return;
-      flickA.current = !flickA.current;
+      if (blinkHold.current) return;
+      blinkA.current = !blinkA.current;
       dirty.current = true;
     }, 500);
     const down = (e: KeyboardEvent) => {
       if (e.code === "Space" && !isTypingTarget(e)) {
         e.preventDefault();
-        flickHold.current = true;
+        blinkHold.current = true;
       }
     };
     const up = (e: KeyboardEvent) => {
-      if (e.code === "Space") flickHold.current = false;
+      if (e.code === "Space") blinkHold.current = false;
     };
     window.addEventListener("keydown", down);
     window.addEventListener("keyup", up);
@@ -998,12 +1104,24 @@ export function PcbGlView({ visible }: { visible: boolean }) {
       window.removeEventListener("keydown", down);
       window.removeEventListener("keyup", up);
     };
-  }, [diffActive, pcbDiffMode]);
+  }, [diffActive, diffBlink]);
 
-  // Mode switches need a redraw (the loop is dirty-driven).
+  // Per-change visibility (show-all / solo / eye toggles) → the renderers' GPU mask.
+  // A texture update, not a rebuild — stepping J/K through changes stays instant.
+  useEffect(() => {
+    if (!diffActive) return;
+    const doc = useDiffStore.getState().doc;
+    if (!doc) return;
+    const vis = buildDiffVisibility(doc.changes, diffHiddenIds);
+    rendererRef.current?.setDiffVisibility(vis);
+    rendererARef.current?.setDiffVisibility(vis);
+    dirty.current = true;
+  }, [diffActive, diffHiddenIds, diffEpoch]);
+
+  // Mode/focus switches need a redraw (the loop is dirty-driven).
   useEffect(() => {
     dirty.current = true;
-  }, [diffActive, pcbDiffMode]);
+  }, [diffActive, diffBlink, diffHideZones, diffFocusedId]);
 
   // ---- store → renderer sync ---------------------------------------------
   useEffect(() => {
@@ -1136,31 +1254,25 @@ export function PcbGlView({ visible }: { visible: boolean }) {
         if (dirty.current && w > 0 && h > 0) {
           r.setDpr(dpr);
           const rA = rendererARef.current;
-          const mode = diffModeRef.current;
-          const gl = glRef.current;
-          if (rA && mode && gl) {
+          if (rA && diffOnRef.current) {
             rA.setDpr(dpr);
             const { removed, added } = diffColors.current;
-            const obj = objRef.current;
-            if (mode === "onion") {
-              // Isolated-layer overlay: the unchanged common base as a flat grey (from B),
-              // then A's removed copper in red, then B's added copper in green on top.
-              r.render(cam.current, w, h, obj, { diffPass: 1 });
-              rA.render(cam.current, w, h, obj, { clear: false, diffPass: 2, diffColor: removed });
-              r.render(cam.current, w, h, obj, { clear: false, diffPass: 2, diffColor: added });
-            } else if (mode === "flicker") {
-              // A/B blink at the same camera — motion perception catches subtle moves.
-              (flickA.current ? rA : r).render(cam.current, w, h, obj);
-            } else {
-              // Wipe: A left of the divider, B right (scissor test; clear obeys it).
-              const split = Math.round(w * wipeFrac.current);
-              gl.enable(gl.SCISSOR_TEST);
-              gl.scissor(0, 0, Math.max(split, 0), h);
-              rA.render(cam.current, w, h, objRef.current);
-              gl.scissor(split, 0, Math.max(w - split, 0), h);
-              r.render(cam.current, w, h, objRef.current);
-              gl.disable(gl.SCISSOR_TEST);
-            }
+            const base = objRef.current;
+            // The banner's Zones toggle drops pours from the WHOLE compare (they
+            // re-flow around edits; sometimes even the gated tint is unwanted).
+            const obj = hideZonesRef.current
+              ? { objects: { ...base.objects, zones: false }, opacity: base.opacity }
+              : base;
+            // Overlay: the unchanged common base as flat grey (from B), then A's removed
+            // copper red-tinted and B's added copper green-tinted, each keeping a share
+            // of its own layer colour (DIFF_LAYER_MIX) so multi-layer compares stay
+            // layer-legible. With blink on, removed and added alternate phases.
+            r.render(cam.current, w, h, obj, { diffPass: 1 });
+            const blinkOn = blinkRef.current;
+            if (!blinkOn || blinkA.current)
+              rA.render(cam.current, w, h, obj, { clear: false, diffPass: 2, diffColor: removed, diffMix: DIFF_LAYER_MIX });
+            if (!blinkOn || !blinkA.current)
+              r.render(cam.current, w, h, obj, { clear: false, diffPass: 2, diffColor: added, diffMix: DIFF_LAYER_MIX });
           } else {
             r.render(cam.current, w, h, objRef.current);
           }
@@ -1173,7 +1285,9 @@ export function PcbGlView({ visible }: { visible: boolean }) {
             const sy = (cc.y - cam.current.y) * cam.current.scale + ch / 2;
             cc.el.style.transform = `translate(${sx + 2}px,${sy}px) translateY(-65%)`;
           }
-          dirty.current = false;
+          // The focused-change pulse frame is the one continuous animation; keep the
+          // dirty-driven loop hot only while it's actually on screen.
+          dirty.current = diffPulse.current;
         }
       }
       raf = requestAnimationFrame(loop);
@@ -1425,30 +1539,6 @@ export function PcbGlView({ visible }: { visible: boolean }) {
         />
         {/* Object-anchored comment chips (chips are pointer-interactive; layer is not). */}
         <div ref={commentLayerRef} className="pcb-comments" />
-        {/* Diff wipe mode: draggable vertical divider — A (older) left, B (newer) right. */}
-        {diffActive && pcbDiffMode === "wipe" && (
-          <div
-            className="pcb-wipe-divider"
-            style={{ left: `${wipePct}%` }}
-            onPointerDown={(e) => {
-              e.stopPropagation();
-              (e.currentTarget as Element).setPointerCapture(e.pointerId);
-            }}
-            onPointerMove={(e) => {
-              if (!(e.currentTarget as Element).hasPointerCapture(e.pointerId)) return;
-              const host = (e.currentTarget as HTMLElement).parentElement!;
-              const rect = host.getBoundingClientRect();
-              const f = Math.min(0.98, Math.max(0.02, (e.clientX - rect.left) / rect.width));
-              wipeFrac.current = f;
-              setWipePct(Math.round(f * 1000) / 10);
-              dirty.current = true;
-            }}
-            title="Drag to wipe between the older (left) and newer (right) revision"
-          >
-            <span className="pcb-wipe-tag pcb-wipe-tag-a">old</span>
-            <span className="pcb-wipe-tag pcb-wipe-tag-b">new</span>
-          </div>
-        )}
         {/* Floating tool bar (fit / zoom / measure / comment) — PCB-only, top-centre. */}
         <PcbToolbar onFit={fit} onZoomIn={() => zoomBy(1.4)} onZoomOut={() => zoomBy(1 / 1.4)} />
         {/* GL context loss: show an inline retry instead of a silently-blank board (bug 1). */}

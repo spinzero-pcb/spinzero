@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { computeDiffFlags } from "./glDiff";
+import { buildDiffVisibility, computeDiffFlags, DIFF_ORPHAN, DIFF_OWNED_BASE } from "./glDiff";
 import type { PcbGeometry } from "../../lib/pcbGeometry";
+import type { Change } from "../../lib/diff";
 
 /** Minimal two-layer board with one segment, one via, one pad. */
 function board(over?: Partial<PcbGeometry>): PcbGeometry {
@@ -75,5 +76,91 @@ describe("computeDiffFlags", () => {
     const f = computeDiffFlags(board(), b);
     expect([...f.a.pads]).toEqual([1]);
     expect([...f.b.pads]).toEqual([1]);
+  });
+});
+
+// ------------------------------------------------- change ownership + zone gating
+
+function change(over: Partial<Change> & Pick<Change, "id" | "group">): Change {
+  return {
+    kind: "modified",
+    impact: "electrical",
+    title: over.id,
+    anchors: {},
+    side: "both",
+    ...over,
+  };
+}
+
+describe("computeDiffFlags ownership", () => {
+  it("assigns routing primitives to their (layer, net) change; unmatched → orphan", () => {
+    const b = board();
+    b.tracks.seg = { xy: [0, 0, 12, 0], w: [0.25], layer: [0], net: [1] }; // rerouted
+    const changes = [
+      change({
+        id: "ch_0000",
+        group: "routing",
+        anchors: { pcb: { layers: ["F.Cu"], net: "/VBUS" } },
+      }),
+    ];
+    const f = computeDiffFlags(board(), b, changes);
+    expect([...f.a.seg]).toEqual([DIFF_OWNED_BASE]); // owned by change 0
+    expect([...f.b.seg]).toEqual([DIFF_OWNED_BASE]);
+    expect(f.a.maskSize).toBe(DIFF_OWNED_BASE + 1);
+  });
+
+  it("gates zone tinting on a semantic zone row (refill jitter stays unflagged)", () => {
+    const zoneA = { layer: 0, net: 1, filled: true, pts: [0, 0, 20, 0, 20, 20, 0, 20] };
+    const zoneB = { layer: 0, net: 1, filled: true, pts: [0, 0, 20.001, 0, 20, 20, 0, 20] };
+    const a = board({ zones: [zoneA] });
+    const b = board({ zones: [zoneB] });
+    // Geometrically different, but NO zone change row (area delta under threshold):
+    const gated = computeDiffFlags(a, b, []);
+    expect([...gated.a.zones]).toEqual([0]);
+    expect([...gated.b.zones]).toEqual([0]);
+    // With a semantic row, the pour tints and is owned by it:
+    const changes = [
+      change({ id: "ch_0000", group: "zone", anchors: { pcb: { layers: ["F.Cu"], net: "/VBUS" } } }),
+    ];
+    const owned = computeDiffFlags(a, b, changes);
+    expect([...owned.a.zones]).toEqual([DIFF_OWNED_BASE]);
+    expect([...owned.b.zones]).toEqual([DIFF_OWNED_BASE]);
+    // Without the change list at all (legacy/geometric mode), zones stay ungated:
+    const raw = computeDiffFlags(a, b);
+    expect([...raw.a.zones]).toEqual([DIFF_ORPHAN]);
+  });
+
+  it("pads follow their component's placement change over its field change", () => {
+    const b = board();
+    b.components = [{ ...b.components[0], x: 8 }];
+    b.pads = [{ ...b.pads[0], x: 8 }]; // moved with the footprint
+    const changes = [
+      change({ id: "ch_0000", group: "component", anchors: { pcb: { comp: "R1" } } }),
+      change({ id: "ch_0001", group: "placement", kind: "moved", anchors: { pcb: { comp: "R1" } } }),
+    ];
+    const f = computeDiffFlags(board(), b, changes);
+    expect([...f.a.pads]).toEqual([DIFF_OWNED_BASE + 1]); // the placement row wins
+    expect([...f.b.pads]).toEqual([DIFF_OWNED_BASE + 1]);
+  });
+});
+
+describe("buildDiffVisibility", () => {
+  const changes = [
+    change({ id: "ch_0000", group: "routing" }),
+    change({ id: "ch_0001", group: "zone" }),
+  ];
+
+  it("shows everything (orphans included) when nothing is hidden", () => {
+    const vis = buildDiffVisibility(changes, new Set());
+    expect(vis[DIFF_ORPHAN]).toBe(1);
+    expect(vis[DIFF_OWNED_BASE]).toBe(1);
+    expect(vis[DIFF_OWNED_BASE + 1]).toBe(1);
+  });
+
+  it("hides listed changes AND the orphan bucket while a subset is active", () => {
+    const vis = buildDiffVisibility(changes, new Set(["ch_0001"]));
+    expect(vis[DIFF_ORPHAN]).toBe(0); // soloing must also drop sub-threshold noise
+    expect(vis[DIFF_OWNED_BASE]).toBe(1);
+    expect(vis[DIFF_OWNED_BASE + 1]).toBe(0);
   });
 });

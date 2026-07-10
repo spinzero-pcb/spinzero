@@ -371,12 +371,12 @@ pub fn diff_bundles(
         .chain(&source_diff.changed)
         .map(|s| s.as_str())
         .collect();
-    let (sheets_pruned, pruned_sheet_files) = pruned_sheets(a, b, &changed_sources);
+    let sheets_pruned = pruned_sheets(a, b, &changed_sources);
 
     // --- semantic groups over the design.json indexes ---
     diff_components(a, b, &mut raw);
     diff_nets(a, b, &mut raw);
-    diff_sheets(a, b, &pruned_sheet_files, &mut raw);
+    diff_sheets(a, b, &mut raw);
     diff_docs(a, b, &mut raw);
 
     // --- PCB geometry groups, unless the whole board is source-identical ---
@@ -445,26 +445,22 @@ fn change_sort_key(c: &Change) -> (u8, &str, &str) {
 
 // ============================================================ pruning helpers
 
-/// Sheets whose `.kicad_sch` source file is byte-identical between A and B. Returns
-/// (sheet numbers to report as pruned, the set of pruned sheet numbers for the sheet
-/// diff to honour). A sheet on only one side is never pruned.
-fn pruned_sheets(
-    a: &Bundle,
-    b: &Bundle,
-    changed_sources: &HashSet<&str>,
-) -> (Vec<i64>, HashSet<i64>) {
+/// Sheets whose `.kicad_sch` source file is byte-identical between A and B — reported
+/// as `sheetsPruned` in the doc. Informational only: components/nets are diffed from
+/// the whole-design indexes, so this does not gate any schematic pass (only the PCB
+/// pass is source-gated, via `pcb_pass_needed`). A sheet on only one side is never
+/// pruned.
+fn pruned_sheets(a: &Bundle, b: &Bundle, changed_sources: &HashSet<&str>) -> Vec<i64> {
     let mut pruned = Vec::new();
-    let mut set = HashSet::new();
     for (num, file) in &a.sheet_files {
         // Only prune sheets present on BOTH sides referencing the SAME file whose
         // blob didn't change.
         let same_on_b = b.sheet_files.get(num).map(|f| f == file).unwrap_or(false);
         if same_on_b && !changed_sources.contains(file.as_str()) {
             pruned.push(*num);
-            set.insert(*num);
         }
     }
-    (pruned, set)
+    pruned
 }
 
 /// The PCB pass runs unless we can prove the board is source-identical. For KiCad the
@@ -921,7 +917,7 @@ fn net_anchors(bundle: &Bundle, name: &str) -> Anchors {
 
 // ================================================================ sheet diff
 
-fn diff_sheets(a: &Bundle, b: &Bundle, pruned: &HashSet<i64>, out: &mut Vec<Change>) {
+fn diff_sheets(a: &Bundle, b: &Bundle, out: &mut Vec<Change>) {
     // Sheet identity is by name (the plan's schematic pairing reuses `sheetMatches`,
     // which is name-based). A sheet number is not stable across an insertion.
     let names_a: BTreeMap<&str, i64> = a.indexes.sheets.iter().map(|s| (s.name.as_str(), s.num)).collect();
@@ -946,9 +942,6 @@ fn diff_sheets(a: &Bundle, b: &Bundle, pruned: &HashSet<i64>, out: &mut Vec<Chan
     }
     for (name, num) in &names_a {
         if !names_b.contains_key(name) {
-            // A removed sheet may be pruned (identical file that vanished can't happen —
-            // if it's gone the file is removed, i.e. changed_sources). Kept for safety.
-            let _ = pruned;
             out.push(Change {
                 id: String::new(),
                 group: Group::Sheet,

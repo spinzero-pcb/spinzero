@@ -3079,48 +3079,13 @@ button {
 .diff-banner-btn { display: inline-flex; align-items: center; gap: 4px; }
 .diff-banner-close { font-size: 14px; }
 
-/* PCB compare-mode toggle (overlay / flicker / wipe) in the diff banner. */
+/* PCB compare toggles (Blink / Zones) in the diff banner. */
 .diff-mode-toggle { display: inline-flex; align-items: center; gap: 2px; margin-right: var(--sp-2); }
 .diff-mode-toggle .diff-banner-btn.is-active {
   color: var(--accent);
   background: var(--bg-3);
   border-radius: var(--radius-1);
 }
-
-/* Diff wipe mode: the draggable divider over the GL canvas (A left / B right). */
-.pcb-wipe-divider {
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  width: 14px;
-  margin-left: -7px; /* centre the grab zone on the split */
-  cursor: ew-resize;
-  z-index: 5;
-  touch-action: none;
-}
-.pcb-wipe-divider::before {
-  content: "";
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  left: 50%;
-  width: 2px;
-  margin-left: -1px;
-  background: var(--accent);
-  opacity: 0.85;
-}
-.pcb-wipe-tag {
-  position: absolute;
-  top: 6px;
-  font-size: 10px;
-  padding: 1px 5px;
-  border-radius: var(--radius-1);
-  background: var(--bg-2);
-  border: 1px solid var(--border-1);
-  pointer-events: none;
-}
-.pcb-wipe-tag-a { right: 100%; margin-right: 4px; color: var(--diff-remove); }
-.pcb-wipe-tag-b { left: 100%; margin-left: 4px; color: var(--diff-add); }
 
 /* Push the canvases below the banner while diffing so it never overlaps the art. */
 .canvas-area.diffing .view-fill { top: 30px; }
@@ -3199,6 +3164,23 @@ button {
   color: var(--fg-0);
 }
 .changes-search:focus { outline: none; border-color: var(--accent); }
+
+/* Board-overlay visibility bar: shown while a solo / eye-subset hides changes. */
+.changes-visbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  margin: 0 var(--sp-3) var(--sp-2);
+  padding: 3px 8px;
+  font-size: 11px;
+  color: var(--fg-1);
+  background: var(--accent-dim);
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+}
+.changes-visbar-btn { font-size: 11px; color: var(--accent); padding: 0 4px; }
+.changes-visbar-btn:hover { text-decoration: underline; }
 
 .changes-tree { flex: 1; overflow-y: auto; padding-bottom: var(--sp-3); }
 .changes-group { border-bottom: 1px solid var(--border-0); }
@@ -3288,6 +3270,27 @@ button {
 }
 .change-seen:hover { color: var(--fg-2); }
 .change-seen.on { color: var(--ok); border-color: var(--ok); }
+
+/* Eye toggle: this change's tint on the board (visible by default, quiet until hover;
+   the crossed-off state stays visible so hidden rows are findable). */
+.change-eye {
+  flex: none;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  width: 18px;
+  height: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: transparent;
+  cursor: pointer;
+}
+.change-row:hover .change-eye { color: var(--fg-2); border-color: var(--border-1); }
+.change-eye:hover { color: var(--fg-0); }
+.change-eye.off { color: var(--fg-2); border-color: var(--border-1); opacity: 0.9; }
+.change-row.board-hidden .change-title,
+.change-row.board-hidden .change-detail { opacity: 0.55; }
 
 /* ---------- history graph: compare pick-mode ---------- */
 .compare-nudge { color: var(--accent); }

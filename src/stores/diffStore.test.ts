@@ -94,7 +94,7 @@ describe("diffStore enter/exit/step/seen", () => {
   });
   afterEach(() => clearMocks());
 
-  it("enterDiff normalizes order, loads the doc, and focuses the first change", async () => {
+  it("enterDiff normalizes order, loads the doc, and shows the overview (no auto-focus)", async () => {
     const calls: Array<{ cmd: string; args: unknown }> = [];
     mockIPC((cmd, args) => {
       calls.push({ cmd, args });
@@ -122,8 +122,9 @@ describe("diffStore enter/exit/step/seen", () => {
     expect(s.doc?.changes.length).toBe(3);
     // prepare_diff was called old → new.
     expect(calls).toContainEqual({ cmd: "prepare_diff", args: { revA: "rA", revB: "rB" } });
-    // The first ordered change (component group, lowest sheet) is auto-focused.
-    expect(s.focusedChangeId).toBe("ch_2"); // R7 removed on sheet 1 sorts before ch_0 (sheet 2)
+    // Overview by default: nothing focused, every change visible on the board.
+    expect(s.focusedChangeId).toBeNull();
+    expect(s.hiddenChangeIds.size).toBe(0);
     expect(useViewStore.getState().view).toBe("schematic");
   });
 
@@ -154,7 +155,10 @@ describe("diffStore enter/exit/step/seen", () => {
       throw new Error(cmd);
     });
     await useDiffStore.getState().enterDiff("rA", "rB");
+    // Nothing focused on enter; the first `next` lands on the first ordered change.
     // Ordered walk: ch_2 (comp, sheet1), ch_0 (comp, sheet2), ch_1 (routing).
+    expect(useDiffStore.getState().focusedChangeId).toBeNull();
+    useDiffStore.getState().next();
     expect(useDiffStore.getState().focusedChangeId).toBe("ch_2");
     useDiffStore.getState().next();
     expect(useDiffStore.getState().focusedChangeId).toBe("ch_0");
@@ -164,6 +168,22 @@ describe("diffStore enter/exit/step/seen", () => {
     expect(useDiffStore.getState().focusedChangeId).toBe("ch_1");
     useDiffStore.getState().prev();
     expect(useDiffStore.getState().focusedChangeId).toBe("ch_0");
+  });
+
+  it("focusChange solos the change; showAllChanges restores the overview", async () => {
+    mockIPC((cmd) => {
+      if (cmd === "prepare_diff")
+        return { doc: DOC, path: "p", cache_key_a: "keyA", cache_key_b: "keyB", label_a: "older", label_b: "newer" };
+      throw new Error(cmd);
+    });
+    await useDiffStore.getState().enterDiff("rA", "rB");
+    useDiffStore.getState().focusChange("ch_1");
+    expect(useDiffStore.getState().hiddenChangeIds).toEqual(new Set(["ch_0", "ch_2"]));
+    // The eye toggle builds subsets from either state.
+    useDiffStore.getState().toggleChangeHidden("ch_0");
+    expect(useDiffStore.getState().hiddenChangeIds).toEqual(new Set(["ch_2"]));
+    useDiffStore.getState().showAllChanges();
+    expect(useDiffStore.getState().hiddenChangeIds.size).toBe(0);
   });
 
   it("focusChange on a PCB-anchored change switches to the PCB view", async () => {
