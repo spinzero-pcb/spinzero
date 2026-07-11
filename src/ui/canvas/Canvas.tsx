@@ -232,6 +232,13 @@ export function Canvas() {
         }
       }
       if (!isFinite(minX)) return false;
+      frameWorldBox(minX, minY, maxX, maxY, viewW);
+      return true;
+    }
+    /** Land the shared camera on an explicit world-space bbox with the same padding/fit
+     *  rules as centerOnUuids — shared by the same-sheet uuid focus and camBridge's
+     *  A-island landing (a removed object framed from the A side). */
+    function frameWorldBox(minX: number, minY: number, maxX: number, maxY: number, viewW: number) {
       const r = stage.getBoundingClientRect();
       const usableW = r.width - gutter();
       const usableH = r.height - 2 * PAD;
@@ -247,7 +254,6 @@ export function Canvas() {
       need = Math.min(need, Math.max(vb.current[2], aspect * vb.current[3]));
       centerOn((minX + maxX) / 2, (minY + maxY) / 2, need);
       focusWorld.current = { x: (minX + maxX) / 2, y: (minY + maxY) / 2 };
-      return true;
     }
 
     // -------------------------------------------------------------- sheet load
@@ -1264,10 +1270,14 @@ export function Canvas() {
     // Visual diff (§4): load the change's sheet if needed, centre on its uuids, and
     // paint the diff tint. Read-only — no pushHistory / selection writes, so exiting
     // diff mode leaves the normal viewing state exactly as it was.
-    nav.revealDiff = (sheet, uuids, role, emph) =>
+    nav.revealDiff = (sheet, uuids, role, emph, aOnly) =>
       whenVisible(() => {
         const land = () => {
-          if (uuids.length && centerOnUuids(uuids, 110)) {
+          if (aOnly) {
+            // The object exists only on A (removed): this (B) side has no geometry to
+            // frame, so leave the camera to the A island (camBridge.centerWorld) and just
+            // dim the sheet. Don't fit — that would fight the A-side landing.
+          } else if (uuids.length && centerOnUuids(uuids, 110)) {
             /* framed the changed set */
           } else {
             fitSheet(); // added/removed sheet, or uuids not on this sheet → show context
@@ -1301,6 +1311,10 @@ export function Canvas() {
         tgt.current.s = ns;
       }
     };
+    // Absolute landing for the A island: frame a removed object's A-side bbox on the
+    // shared camera (this B side has no such geometry to centre on). Same world units.
+    camBridge.centerWorld = (box) =>
+      whenVisible(() => frameWorldBox(box.x, box.y, box.x + box.width, box.y + box.height, 110));
 
     // Debug-only render probe (Layer-2 E2E): tauri-pilot can't read the painted SVG
     // island, so expose the live render state for it to assert on via `eval`. No-op
@@ -1437,6 +1451,7 @@ export function Canvas() {
       nav.clearDiff = () => {};
       nav.getViewState = () => null;
       camBridge.drive = () => {};
+      camBridge.centerWorld = () => {};
     };
   }, [indexes, getSheetSvg, setSelectionStore, setHighlightStore, setCurrentSheet]);
 

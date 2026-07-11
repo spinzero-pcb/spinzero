@@ -59,8 +59,10 @@ export interface Navigator {
   /** Visual diff: load `sheet` (by design-JSON number) if needed, centre on the given
    *  element uuids, and paint a diff tint (`err`/`ok`/`warn` CSS-var role) with a pulse.
    *  Read-only; selection/history are untouched. `uuids` empty ⇒ just fit the sheet
-   *  (added/removed-sheet placeholder). No-op outside diff mode. */
-  revealDiff: (sheet: number, uuids: string[], role: "err" | "ok" | "warn", emph?: string) => void;
+   *  (added/removed-sheet placeholder). No-op outside diff mode. `aOnly` marks a change
+   *  that exists only on the older revision (a removed object): B still loads the sheet
+   *  and dims it, but leaves the camera for the A island to land (the object isn't here). */
+  revealDiff: (sheet: number, uuids: string[], role: "err" | "ok" | "warn", emph?: string, aOnly?: boolean) => void;
   /** Visual diff: clear any diff tint painted by `revealDiff` (on exit / refocus). */
   clearDiff: () => void;
 }
@@ -99,6 +101,10 @@ export interface CamBridge {
   sheet: number | null;
   /** Apply a pan delta (screen px) + zoom factor to the B Canvas camera. */
   drive: (dx: number, dy: number, zoomFactor: number, anchorX: number, anchorY: number) => void;
+  /** Absolutely centre the shared camera on a world-space (mm) bbox, framed with the same
+   *  padding/fit rules as a same-sheet focus. Registered by the B Canvas; used by the A
+   *  island to land a removed object that exists only on its side (B can't frame it). */
+  centerWorld: (box: { x: number; y: number; width: number; height: number }) => void;
   /** Monotonic counter bumped whenever the B sheet changes, so the A island reloads. */
   epoch: number;
 }
@@ -108,6 +114,7 @@ export const camBridge: CamBridge = {
   vb: [0, 0, 297, 210],
   sheet: null,
   drive: noop,
+  centerWorld: noop,
   epoch: 0,
 };
 
@@ -149,7 +156,9 @@ export const diffPaint: DiffPaint = {
     // emphB is the NEW text of a field edit — the B canvas colours it green so the
     // exact change (e.g. the value string) stands out inside the tinted symbol.
     const sch = change.anchors.schematic;
-    if (sch) nav.revealDiff(sch.sheet, sch.uuids, tintRole(change.kind), change.emphB);
+    // An A-only change (removed object) has no B-side geometry: let B load + dim the
+    // sheet, but the A island lands the camera (the object lives only over there).
+    if (sch) nav.revealDiff(sch.sheet, sch.uuids, tintRole(change.kind), change.emphB, change.side === "a");
     for (const fn of this.listeners) fn();
   },
   clearA() {
