@@ -48,6 +48,10 @@ export interface PcbAnchor {
 
 export interface ChangeAnchors {
   schematic?: SchematicAnchor;
+  /** A-side schematic anchor, present only when the changed object's uuids differ
+   *  between the revisions (re-annotated symbol, renamed net). The A island paints
+   *  this when present, else `schematic`. */
+  schematicA?: SchematicAnchor;
   pcb?: PcbAnchor;
 }
 
@@ -62,6 +66,11 @@ export interface Change {
   detail?: string;
   anchors: ChangeAnchors;
   side: ChangeSide;
+  /** Text to emphasize inside the A-side tint (the OLD value string of a field
+   *  modification) — rendered red on the older canvas. */
+  emphA?: string;
+  /** Text to emphasize inside the B-side tint (the NEW value string) — green. */
+  emphB?: string;
 }
 
 export interface DiffSide {

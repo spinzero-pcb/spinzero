@@ -80,6 +80,13 @@ pub struct Change {
     pub anchors: Anchors,
     /// Which canvas(es) can show this change.
     pub side: Side,
+    /// Text to emphasize inside the A-side tint (e.g. the OLD value string of a
+    /// field modification) — the renderer colours the matching text red.
+    #[serde(rename = "emphA", default, skip_serializing_if = "Option::is_none")]
+    pub emph_a: Option<String>,
+    /// Text to emphasize inside the B-side tint (the NEW value string) — green.
+    #[serde(rename = "emphB", default, skip_serializing_if = "Option::is_none")]
+    pub emph_b: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
@@ -130,6 +137,11 @@ pub enum Side {
 pub struct Anchors {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schematic: Option<SchematicAnchor>,
+    /// A-side schematic anchor, set only when the changed object's uuids DIFFER
+    /// between the two revisions (a re-annotated symbol, a renamed net's old wires).
+    /// The A island paints `schematic_a` when present, else `schematic`.
+    #[serde(rename = "schematicA", default, skip_serializing_if = "Option::is_none")]
+    pub schematic_a: Option<SchematicAnchor>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pcb: Option<PcbAnchor>,
 }
@@ -327,6 +339,11 @@ const POS_EPS_MM: f64 = 0.001;
 /// A component move under this distance (mm) isn't worth a placement change row.
 const MOVE_EPS_MM: f64 = 0.05;
 
+/// A schematic symbol whose placed bbox centre moved at least this far (mm, sheet
+/// units) gets a cosmetic "moved on schematic" row. Half the KiCad 1.27 mm grid, so
+/// any real one-step nudge registers while extractor rounding (1 µm) never does.
+const SCH_MOVE_EPS_MM: f64 = 0.6;
+
 /// An angle delta under this (deg) isn't a rotation.
 const ANGLE_EPS_DEG: f64 = 0.01;
 
@@ -374,8 +391,8 @@ pub fn diff_bundles(
     let sheets_pruned = pruned_sheets(a, b, &changed_sources);
 
     // --- semantic groups over the design.json indexes ---
-    diff_components(a, b, &mut raw);
-    diff_nets(a, b, &mut raw);
+    let comp_delta = diff_components(a, b, &mut raw);
+    diff_nets(a, b, &comp_delta, &mut raw);
     diff_sheets(a, b, &mut raw);
     diff_docs(a, b, &mut raw);
 
@@ -388,6 +405,11 @@ pub fn diff_bundles(
             diff_graphics_and_text(ga, gb, &mut raw);
         }
     }
+
+    // --- graphical-edit fallback: a sheet whose .kicad_sch source changed but whose
+    // edit produced no semantic row above (a nudged power symbol, redrawn wires,
+    // moved text) still deserves one line — otherwise the edit is invisible.
+    graphical_edit_fallback(a, b, &changed_sources, &mut raw);
 
     finalize(a, b, raw, sheets_pruned)
 }
@@ -456,11 +478,22 @@ fn pruned_sheets(a: &Bundle, b: &Bundle, changed_sources: &HashSet<&str>) -> Vec
         // Only prune sheets present on BOTH sides referencing the SAME file whose
         // blob didn't change.
         let same_on_b = b.sheet_files.get(num).map(|f| f == file).unwrap_or(false);
-        if same_on_b && !changed_sources.contains(file.as_str()) {
+        if same_on_b && !source_changed(changed_sources, file) {
             pruned.push(*num);
         }
     }
     pruned
+}
+
+/// Is `file` (a design.json sheet filename, design-folder-relative) among the changed
+/// source paths? The source-hash delta keys are prefixed with the design folder
+/// ("MC-02/MC-02.kicad_sch") while design.json carries the bare name — match by
+/// exact equality OR path suffix, never by containment.
+fn source_changed(changed_sources: &HashSet<&str>, file: &str) -> bool {
+    changed_sources.contains(file)
+        || changed_sources
+            .iter()
+            .any(|c| c.ends_with(file) && c[..c.len() - file.len()].ends_with('/'))
 }
 
 /// The PCB pass runs unless we can prove the board is source-identical. For KiCad the
@@ -474,10 +507,82 @@ fn pcb_pass_needed(a: &Bundle, b: &Bundle, changed_sources: &HashSet<&str>) -> b
     }
 }
 
+/// One cosmetic row per changed-source sheet (present on both sides, same file) that
+/// no schematic-anchored change explains. Multi-instance sheets share one file — the
+/// row lands on the lowest sheet number so a hierarchy doesn't repeat itself.
+fn graphical_edit_fallback(
+    a: &Bundle,
+    b: &Bundle,
+    changed_sources: &HashSet<&str>,
+    raw: &mut Vec<Change>,
+) {
+    let anchored: HashSet<i64> = raw
+        .iter()
+        .flat_map(|c| {
+            c.anchors
+                .schematic
+                .iter()
+                .chain(c.anchors.schematic_a.iter())
+                .map(|s| s.sheet)
+        })
+        .collect();
+    let mut by_file: BTreeMap<&str, Vec<i64>> = BTreeMap::new();
+    for (num, file) in &a.sheet_files {
+        let same_on_b = b.sheet_files.get(num).map(|f| f == file).unwrap_or(false);
+        if same_on_b && source_changed(changed_sources, file) {
+            by_file.entry(file.as_str()).or_default().push(*num);
+        }
+    }
+    for (_file, mut nums) in by_file {
+        nums.sort_unstable();
+        if nums.iter().any(|n| anchored.contains(n)) {
+            continue; // a semantic change already lands on this file's sheet(s)
+        }
+        let num = nums[0];
+        let name = b
+            .indexes
+            .sheets
+            .iter()
+            .find(|s| s.num == num)
+            .map(|s| s.name.clone())
+            .unwrap_or_else(|| num.to_string());
+        raw.push(Change {
+            id: String::new(),
+            emph_a: None,
+            emph_b: None,
+            group: Group::Sheet,
+            kind: Kind::Modified,
+            impact: Impact::Cosmetic,
+            title: format!("Sheet '{name}' has graphical edits"),
+            detail: "drawing changed (moved symbols, wires or text); no electrical difference detected".into(),
+            anchors: Anchors {
+                schematic: Some(SchematicAnchor { sheet: num, uuids: Vec::new() }),
+                schematic_a: None,
+                pcb: None,
+            },
+            side: Side::Both,
+        });
+    }
+}
+
 // ============================================================ component diff
 
+/// What the component pass learned, fed to the net pass so a component-level event
+/// (add/remove/re-annotate) doesn't ALSO surface as net-membership noise: one user
+/// action should read as one change row.
+#[derive(Default)]
+pub struct CompDelta {
+    /// Re-annotation pairs, old (A) refdes → new (B) refdes.
+    pub renamed: Vec<(String, String)>,
+    /// Genuinely added refdes (present only on B).
+    pub added: HashSet<String>,
+    /// Genuinely removed refdes (present only on A).
+    pub removed: HashSet<String>,
+}
+
 /// Component field comparison + re-annotation rename folding (plan §2).
-fn diff_components(a: &Bundle, b: &Bundle, out: &mut Vec<Change>) {
+fn diff_components(a: &Bundle, b: &Bundle, out: &mut Vec<Change>) -> CompDelta {
+    let mut delta = CompDelta::default();
     let ca = &a.indexes.components;
     let cb = &b.indexes.components;
 
@@ -511,9 +616,15 @@ fn diff_components(a: &Bundle, b: &Bundle, out: &mut Vec<Change>) {
         if let Some(rb) = best {
             consumed_b.insert(rb);
             folded_a.insert(*ra);
-            let anchors = comp_anchors(b, rb);
+            delta.renamed.push((ra.to_string(), rb.clone()));
+            // A re-annotated symbol usually keeps its uuid, but a delete-and-replace
+            // does not — carry the A-side anchor so the older canvas can tint too.
+            let mut anchors = comp_anchors(b, rb);
+            set_schematic_a(&mut anchors, comp_anchors(a, ra));
             out.push(Change {
                 id: String::new(),
+                emph_a: None,
+                emph_b: None,
                 group: Group::Component,
                 kind: Kind::Renamed,
                 impact: Impact::Cosmetic,
@@ -530,9 +641,12 @@ fn diff_components(a: &Bundle, b: &Bundle, out: &mut Vec<Change>) {
         if consumed_b.contains(rb) {
             continue;
         }
+        delta.added.insert(rb.to_string());
         let c = &cb[*rb];
         out.push(Change {
             id: String::new(),
+            emph_a: None,
+            emph_b: None,
             group: Group::Component,
             kind: Kind::Added,
             impact: Impact::Electrical,
@@ -550,9 +664,12 @@ fn diff_components(a: &Bundle, b: &Bundle, out: &mut Vec<Change>) {
         if folded_a.contains(*ra) {
             continue;
         }
+        delta.removed.insert(ra.to_string());
         let c = &ca[*ra];
         out.push(Change {
             id: String::new(),
+            emph_a: None,
+            emph_b: None,
             group: Group::Component,
             kind: Kind::Removed,
             impact: Impact::Electrical,
@@ -579,13 +696,50 @@ fn diff_components(a: &Bundle, b: &Bundle, out: &mut Vec<Change>) {
             fields.push(("MPN", &x.mpn, &y.mpn));
         }
         let dnp_flip = x.dnp != y.dnp;
+
+        // Schematic symbol move (bbox-centre delta on the sheet) — its own cosmetic
+        // row, independent of field edits and of PCB placement (diff_placement).
+        if let (Some(ba), Some(bb)) = (x.bbox, y.bbox) {
+            let dx = (bb[0] + bb[2] / 2.0) - (ba[0] + ba[2] / 2.0);
+            let dy = (bb[1] + bb[3] / 2.0) - (ba[1] + ba[3] / 2.0);
+            let dist = dx.hypot(dy);
+            let same_sheet = x.sheet == y.sheet;
+            if dist >= SCH_MOVE_EPS_MM || !same_sheet {
+                let title = if same_sheet {
+                    format!("{r} moved on schematic ({dist:.1} mm)")
+                } else {
+                    format!("{r} moved to another sheet")
+                };
+                let mut anchors = comp_anchors(b, r);
+                set_schematic_a(&mut anchors, comp_anchors(a, r));
+                out.push(Change {
+                    id: String::new(),
+                    emph_a: None,
+                    emph_b: None,
+                    group: Group::Component,
+                    kind: Kind::Moved,
+                    impact: Impact::Cosmetic,
+                    title,
+                    detail: String::new(),
+                    anchors,
+                    side: Side::Both,
+                });
+            }
+        }
+
         if fields.is_empty() && !dnp_flip {
             continue;
         }
         // The headline uses the first (most electrical) field; the rest go to detail.
+        // The first field's old/new strings ride along as per-side emphasis so the
+        // canvases can colour exactly the changed text (old red on A, new green on B).
         let (title, detail, impact);
+        let mut emph: (Option<String>, Option<String>) = (None, None);
         if let Some((label, old, new)) = fields.first().copied() {
             title = format!("{r} {label} {} → {}", disp(old), disp(new));
+            if !old.is_empty() && !new.is_empty() {
+                emph = (Some(old.to_string()), Some(new.to_string()));
+            }
             let mut extra: Vec<String> = fields
                 .iter()
                 .skip(1)
@@ -604,16 +758,31 @@ fn diff_components(a: &Bundle, b: &Bundle, out: &mut Vec<Change>) {
             detail = String::new();
             impact = Impact::Electrical;
         }
+        let mut anchors = comp_anchors(b, r);
+        set_schematic_a(&mut anchors, comp_anchors(a, r));
         out.push(Change {
             id: String::new(),
+            emph_a: emph.0,
+            emph_b: emph.1,
             group: Group::Component,
             kind: Kind::Modified,
             impact,
             title,
             detail,
-            anchors: comp_anchors(b, r),
+            anchors,
             side: Side::Both,
         });
+    }
+    delta
+}
+
+/// Attach `a_side`'s schematic anchor as the change's A-side anchor when it differs
+/// from the (B-side) `schematic` — identical anchors need no duplicate.
+fn set_schematic_a(anchors: &mut Anchors, a_side: Anchors) {
+    if let Some(sa) = a_side.schematic {
+        if anchors.schematic.as_ref() != Some(&sa) {
+            anchors.schematic_a = Some(sa);
+        }
     }
 }
 
@@ -678,9 +847,19 @@ fn comp_anchors(bundle: &Bundle, refdes: &str) -> Anchors {
 
 /// Net membership diff with name-rename folding (Jaccard on the terminal set) and
 /// per-pin membership-move changes (plan §2).
-fn diff_nets(a: &Bundle, b: &Bundle, out: &mut Vec<Change>) {
+///
+/// `comps` is the component pass's verdict: A-side designators are canonicalized
+/// through its rename map (so a re-annotated C69→C169 is the SAME terminal, not
+/// churn on every net it touches), and pins that appeared/vanished with an added/
+/// removed component are excluded from membership rows — the component row already
+/// tells that story.
+fn diff_nets(a: &Bundle, b: &Bundle, comps: &CompDelta, out: &mut Vec<Change>) {
     let na = &a.indexes.nets;
     let nb = &b.indexes.nets;
+
+    // A-side designator → its B-side name (identity when not re-annotated).
+    let rename: HashMap<&str, &str> =
+        comps.renamed.iter().map(|(x, y)| (x.as_str(), y.as_str())).collect();
 
     let mut only_a: Vec<&String> = na.keys().filter(|k| !nb.contains_key(*k)).collect();
     let mut only_b: Vec<&String> = nb.keys().filter(|k| !na.contains_key(*k)).collect();
@@ -692,7 +871,7 @@ fn diff_nets(a: &Bundle, b: &Bundle, out: &mut Vec<Change>) {
     // the next, greedily but deterministically (sorted candidate order breaks ties).
     let mut candidates: Vec<(String, &String, &String)> = Vec::new(); // (jac-key, a, b)
     for ra in &only_a {
-        let ta = terminal_set(&na[*ra]);
+        let ta = terminal_set_mapped(&na[*ra], &rename);
         for rb in &only_b {
             let tb = terminal_set(&nb[*rb]);
             let j = jaccard(&ta, &tb);
@@ -711,16 +890,19 @@ fn diff_nets(a: &Bundle, b: &Bundle, out: &mut Vec<Change>) {
         }
         consumed_a.insert(ra);
         consumed_b.insert(rb);
-        let ta = terminal_set(&na[*ra]);
-        let n_pins = ta.len();
+        let n_pins = terminal_set_mapped(&na[*ra], &rename).len();
+        let mut anchors = net_anchors(b, rb);
+        set_schematic_a(&mut anchors, net_anchors(a, ra));
         out.push(Change {
             id: String::new(),
+            emph_a: None,
+            emph_b: None,
             group: Group::Net,
             kind: Kind::Renamed,
             impact: Impact::Electrical,
             title: format!("net {ra} → {rb}"),
             detail: format!("same {n_pins} pin{}", plural(n_pins)),
-            anchors: net_anchors(b, rb),
+            anchors,
             side: Side::Both,
         });
     }
@@ -734,6 +916,8 @@ fn diff_nets(a: &Bundle, b: &Bundle, out: &mut Vec<Change>) {
         let cnt = n.terminals.len();
         out.push(Change {
             id: String::new(),
+            emph_a: None,
+            emph_b: None,
             group: Group::Net,
             kind: Kind::Added,
             impact: Impact::Electrical,
@@ -751,6 +935,8 @@ fn diff_nets(a: &Bundle, b: &Bundle, out: &mut Vec<Change>) {
         let cnt = n.terminals.len();
         out.push(Change {
             id: String::new(),
+            emph_a: None,
+            emph_b: None,
             group: Group::Net,
             kind: Kind::Removed,
             impact: Impact::Electrical,
@@ -771,8 +957,9 @@ fn diff_nets(a: &Bundle, b: &Bundle, out: &mut Vec<Change>) {
     // Build terminal -> net maps once (only for nets present on both sides, so a pin
     // that appears/disappears with an add/remove net isn't double-reported).
     let common_set: HashSet<&String> = common.iter().copied().collect();
-    let a_of = terminal_owner_map(na, &common_set);
-    let b_of = terminal_owner_map(nb, &common_set);
+    let no_rename: HashMap<&str, &str> = HashMap::new();
+    let a_of = terminal_owner_map(na, &common_set, &rename);
+    let b_of = terminal_owner_map(nb, &common_set, &no_rename);
 
     let mut moved: Vec<(String, String, String)> = Vec::new(); // (terminal, from, to)
     let mut moved_terms: HashSet<String> = HashSet::new();
@@ -787,14 +974,18 @@ fn diff_nets(a: &Bundle, b: &Bundle, out: &mut Vec<Change>) {
     moved.sort();
     for (term, from, to) in moved {
         let (d, p) = split_terminal(&term);
+        let mut anchors = net_anchors(b, &to);
+        set_schematic_a(&mut anchors, net_anchors(a, &from));
         out.push(Change {
             id: String::new(),
+            emph_a: None,
+            emph_b: None,
             group: Group::Net,
             kind: Kind::Modified,
             impact: Impact::Electrical,
             title: format!("{d}.{p} moved from {from} to {to}"),
             detail: String::new(),
-            anchors: net_anchors(b, &to),
+            anchors,
             side: Side::Both,
         });
     }
@@ -805,16 +996,25 @@ fn diff_nets(a: &Bundle, b: &Bundle, out: &mut Vec<Change>) {
     // when a net has added/removed pins that are NOT already covered by a move — else
     // a single U1.4 hop would spam both its from- and to-nets with a redundant row.
     for r in common {
-        let ta = terminal_set(&na[r.as_str()]);
+        let ta = terminal_set_mapped(&na[r.as_str()], &rename);
         let tb = terminal_set(&nb[r.as_str()]);
         if ta == tb {
             continue;
         }
-        // Count only pins whose change isn't a move already reported.
-        let added = tb.difference(&ta).filter(|t| !moved_terms.contains(*t)).count();
-        let removed = ta.difference(&tb).filter(|t| !moved_terms.contains(*t)).count();
+        // Count only pins whose change isn't already told elsewhere: a reported
+        // per-pin move, or a pin that exists on one side only because its component
+        // was added/removed (the component row carries that change).
+        let comp_of = |t: &String| split_terminal(t).0.to_string();
+        let added = tb
+            .difference(&ta)
+            .filter(|t| !moved_terms.contains(*t) && !comps.added.contains(&comp_of(t)))
+            .count();
+        let removed = ta
+            .difference(&tb)
+            .filter(|t| !moved_terms.contains(*t) && !comps.removed.contains(&comp_of(t)))
+            .count();
         if added == 0 && removed == 0 {
-            continue; // every delta pin is a reported move — the move row is enough
+            continue; // every delta pin is already reported by a move/component row
         }
         let mut bits = Vec::new();
         if added > 0 {
@@ -825,12 +1025,18 @@ fn diff_nets(a: &Bundle, b: &Bundle, out: &mut Vec<Change>) {
         }
         out.push(Change {
             id: String::new(),
+            emph_a: None,
+            emph_b: None,
             group: Group::Net,
             kind: Kind::Modified,
             impact: Impact::Electrical,
             title: format!("net {r} membership changed ({})", bits.join(" ")),
             detail: format!("{} pin{} now", tb.len(), plural(tb.len())),
-            anchors: net_anchors(b, r),
+            anchors: {
+                let mut anchors = net_anchors(b, r);
+                set_schematic_a(&mut anchors, net_anchors(a, r));
+                anchors
+            },
             side: Side::Both,
         });
     }
@@ -839,6 +1045,21 @@ fn diff_nets(a: &Bundle, b: &Bundle, out: &mut Vec<Change>) {
 /// The terminal set of a net as sorted `designator.pin` strings.
 fn terminal_set(n: &crate::design::NetLite) -> BTreeSet<String> {
     n.terminals.iter().map(|t| format!("{}\u{0}{}", t.d, t.p)).collect()
+}
+
+/// Like [`terminal_set`], with each designator canonicalized through `rename`
+/// (A-side names → B-side names), so a re-annotated part keeps its identity.
+fn terminal_set_mapped(
+    n: &crate::design::NetLite,
+    rename: &HashMap<&str, &str>,
+) -> BTreeSet<String> {
+    n.terminals
+        .iter()
+        .map(|t| {
+            let d = rename.get(t.d.as_str()).copied().unwrap_or(t.d.as_str());
+            format!("{}\u{0}{}", d, t.p)
+        })
+        .collect()
 }
 
 fn split_terminal(t: &str) -> (&str, &str) {
@@ -851,6 +1072,7 @@ fn split_terminal(t: &str) -> (&str, &str) {
 fn terminal_owner_map<'a>(
     nets: &'a HashMap<String, crate::design::NetLite>,
     restrict: &HashSet<&String>,
+    rename: &HashMap<&str, &str>,
 ) -> BTreeMap<String, String> {
     let mut owners: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for (name, net) in nets {
@@ -858,8 +1080,9 @@ fn terminal_owner_map<'a>(
             continue;
         }
         for t in &net.terminals {
+            let d = rename.get(t.d.as_str()).copied().unwrap_or(t.d.as_str());
             owners
-                .entry(format!("{}\u{0}{}", t.d, t.p))
+                .entry(format!("{}\u{0}{}", d, t.p))
                 .or_default()
                 .push(name.clone());
         }
@@ -927,6 +1150,8 @@ fn diff_sheets(a: &Bundle, b: &Bundle, out: &mut Vec<Change>) {
         if !names_a.contains_key(name) {
             out.push(Change {
                 id: String::new(),
+                emph_a: None,
+                emph_b: None,
                 group: Group::Sheet,
                 kind: Kind::Added,
                 impact: Impact::Doc,
@@ -934,6 +1159,7 @@ fn diff_sheets(a: &Bundle, b: &Bundle, out: &mut Vec<Change>) {
                 detail: String::new(),
                 anchors: Anchors {
                     schematic: Some(SchematicAnchor { sheet: *num, uuids: Vec::new() }),
+                    schematic_a: None,
                     pcb: None,
                 },
                 side: Side::B,
@@ -944,6 +1170,8 @@ fn diff_sheets(a: &Bundle, b: &Bundle, out: &mut Vec<Change>) {
         if !names_b.contains_key(name) {
             out.push(Change {
                 id: String::new(),
+                emph_a: None,
+                emph_b: None,
                 group: Group::Sheet,
                 kind: Kind::Removed,
                 impact: Impact::Doc,
@@ -951,6 +1179,7 @@ fn diff_sheets(a: &Bundle, b: &Bundle, out: &mut Vec<Change>) {
                 detail: String::new(),
                 anchors: Anchors {
                     schematic: Some(SchematicAnchor { sheet: *num, uuids: Vec::new() }),
+                    schematic_a: None,
                     pcb: None,
                 },
                 side: Side::A,
@@ -980,6 +1209,8 @@ fn diff_docs(a: &Bundle, b: &Bundle, out: &mut Vec<Change>) {
         if old != new {
             out.push(Change {
                 id: String::new(),
+                emph_a: None,
+                emph_b: None,
                 group: Group::Doc,
                 kind: Kind::Modified,
                 impact: Impact::Doc,
@@ -1098,6 +1329,8 @@ fn diff_placement(a: &Geometry, b: &Geometry, out: &mut Vec<Change>) {
         let layers = side_b.into_iter().collect();
         out.push(Change {
             id: String::new(),
+            emph_a: None,
+            emph_b: None,
             group: Group::Placement,
             kind: Kind::Moved,
             impact: Impact::Placement,
@@ -1105,6 +1338,7 @@ fn diff_placement(a: &Geometry, b: &Geometry, out: &mut Vec<Change>) {
             detail: String::new(),
             anchors: Anchors {
                 schematic: None,
+                schematic_a: None,
                 pcb: Some(PcbAnchor {
                     bbox: cb.bbox,
                     layers,
@@ -1185,6 +1419,8 @@ fn diff_routing(a: &Geometry, b: &Geometry, out: &mut Vec<Change>) {
         }
         out.push(Change {
             id: String::new(),
+            emph_a: None,
+            emph_b: None,
             group: Group::Routing,
             kind,
             impact: Impact::Electrical,
@@ -1192,6 +1428,7 @@ fn diff_routing(a: &Geometry, b: &Geometry, out: &mut Vec<Change>) {
             detail: String::new(),
             anchors: Anchors {
                 schematic: None,
+                schematic_a: None,
                 pcb: Some(PcbAnchor {
                     bbox: None,
                     layers: vec![layer],
@@ -1307,6 +1544,8 @@ fn diff_zones(a: &Geometry, b: &Geometry, out: &mut Vec<Change>) {
         };
         out.push(Change {
             id: String::new(),
+            emph_a: None,
+            emph_b: None,
             group: Group::Zone,
             kind,
             impact: Impact::Placement,
@@ -1314,6 +1553,7 @@ fn diff_zones(a: &Geometry, b: &Geometry, out: &mut Vec<Change>) {
             detail: String::new(),
             anchors: Anchors {
                 schematic: None,
+                schematic_a: None,
                 pcb: Some(PcbAnchor {
                     bbox: None,
                     layers: vec![layer],
@@ -1402,6 +1642,8 @@ fn diff_graphics_and_text(a: &Geometry, b: &Geometry, out: &mut Vec<Change>) {
     for (old, new, layer, at) in edits {
         out.push(Change {
             id: String::new(),
+            emph_a: None,
+            emph_b: None,
             group: Group::Text,
             kind: Kind::Modified,
             impact: Impact::Cosmetic,
@@ -1447,6 +1689,8 @@ fn diff_graphics_and_text(a: &Geometry, b: &Geometry, out: &mut Vec<Change>) {
         };
         out.push(Change {
             id: String::new(),
+            emph_a: None,
+            emph_b: None,
             group,
             kind: Kind::Modified,
             impact,
@@ -1454,6 +1698,7 @@ fn diff_graphics_and_text(a: &Geometry, b: &Geometry, out: &mut Vec<Change>) {
             detail: String::new(),
             anchors: Anchors {
                 schematic: None,
+                schematic_a: None,
                 pcb: Some(PcbAnchor { bbox: None, layers: vec![layer], comp: None, net: None }),
             },
             side: Side::Both,
@@ -1485,6 +1730,8 @@ fn push_text_addremove(out: &mut Vec<Change>, g: &Geometry, idxs: &[usize], kind
     for (layer, text, at) in items {
         out.push(Change {
             id: String::new(),
+            emph_a: None,
+            emph_b: None,
             group: Group::Text,
             kind,
             impact: Impact::Cosmetic,
@@ -1499,6 +1746,7 @@ fn push_text_addremove(out: &mut Vec<Change>, g: &Geometry, idxs: &[usize], kind
 fn pcb_point_anchor(layer: &str, at: [f64; 2]) -> Anchors {
     Anchors {
         schematic: None,
+        schematic_a: None,
         pcb: Some(PcbAnchor {
             // A small landing box around the text/point.
             bbox: Some([at[0] - 5.0, at[1] - 5.0, 10.0, 10.0]),
@@ -1561,7 +1809,13 @@ pub fn diff_cache_root(project_dir: &Path) -> PathBuf {
 /// Cache key for a `(cache_key_a, cache_key_b)` pair — blake3 of the two, order
 /// preserved (A is base, B is target; a swap is a different diff).
 pub fn diff_key(cache_key_a: &str, cache_key_b: &str) -> String {
+    // Engine revision: bump whenever the changeset a given bundle pair produces
+    // changes shape (new rows, anchors, fields) — the key only hashes the inputs,
+    // so without this a cached diff.json would keep serving the old shape.
+    const DIFF_ENGINE_VERSION: &str = "3";
     let mut h = blake3::Hasher::new();
+    h.update(DIFF_ENGINE_VERSION.as_bytes());
+    h.update(b" ");
     h.update(cache_key_a.as_bytes());
     h.update(b"\0");
     h.update(cache_key_b.as_bytes());

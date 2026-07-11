@@ -1,7 +1,7 @@
 import { useEffect, useRef } from "react";
 import { useDesignStore } from "../../stores/designStore";
 import { useDiffStore } from "../../stores/diffStore";
-import { camBridge, diffPaint } from "./navigator";
+import { camBridge, diffPaint, emphasizeDiffText } from "./navigator";
 import { tintsA } from "../../lib/diff";
 
 const SVG_NS = "http://www.w3.org/2000/svg";
@@ -49,8 +49,11 @@ export function DiffSchematicA() {
       if (!svg) return;
       svg.querySelectorAll(".hl-diff, .hl-diff-scrim").forEach((n) => n.remove());
       const change = diffPaint.focused;
-      if (!change || !change.anchors.schematic || !tintsA(change)) return;
-      const uuids = change.anchors.schematic.uuids;
+      // Prefer the A-side anchor when the engine carried one (the object's uuids
+      // differ between revisions — a re-annotated symbol, a renamed net's old wires).
+      const sch = change?.anchors.schematicA ?? change?.anchors.schematic;
+      if (!change || !sch || !tintsA(change)) return;
+      const uuids = sch.uuids;
       const vb = camBridge.vb;
       const scrim = document.createElementNS(SVG_NS, "rect");
       scrim.setAttribute("class", "hl-diff-scrim");
@@ -70,6 +73,9 @@ export function DiffSchematicA() {
         if (!src) continue;
         ov.appendChild(src.cloneNode(true));
       }
+      // A side shows the OLD state: colour the pre-edit text (e.g. the old value
+      // string) red inside the cloned overlay so the exact edit stands out.
+      emphasizeDiffText(ov, change.emphA, "hl-diff-emph-err");
       svg.appendChild(ov);
     }
 

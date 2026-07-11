@@ -10,7 +10,7 @@ import {
 import { sheetMatches, type Selection, type SheetRef } from "../../lib/design";
 import { isTypingTarget } from "../../lib/keymap";
 import { useViewStore } from "../../stores/viewStore";
-import { camBridge, canvasRestore, nav, type ChipComment } from "./navigator";
+import { camBridge, canvasRestore, emphasizeDiffText, nav, type ChipComment } from "./navigator";
 import { useDiffStore } from "../../stores/diffStore";
 import { relabelInstances } from "./relabel";
 import { useReviewStore } from "../../stores/reviewStore";
@@ -374,7 +374,7 @@ export function Canvas() {
      *  the change's role (err/ok/warn CSS vars) and scrim the rest, so the focused change
      *  reads against a dimmed sheet (§4). Kept in its own class so the normal
      *  clearPaint/renderHighlights cycle never wipes it; cleared explicitly via clearDiff. */
-    function paintDiff(uuids: string[], role: "err" | "ok" | "warn") {
+    function paintDiff(uuids: string[], role: "err" | "ok" | "warn", emph?: string) {
       clearDiffPaint();
       const svg = curSvg.current;
       if (!svg) return;
@@ -394,6 +394,9 @@ export function Canvas() {
         if (!src) continue;
         ov.appendChild(src.cloneNode(true));
       }
+      // B side shows the NEW state: colour the changed text (e.g. the value string)
+      // green inside the cloned overlay so the exact edit stands out.
+      emphasizeDiffText(ov, emph, "hl-diff-emph-ok");
       svg.appendChild(ov);
     }
     function clearDiffPaint() {
@@ -1250,7 +1253,7 @@ export function Canvas() {
     // Visual diff (§4): load the change's sheet if needed, centre on its uuids, and
     // paint the diff tint. Read-only — no pushHistory / selection writes, so exiting
     // diff mode leaves the normal viewing state exactly as it was.
-    nav.revealDiff = (sheet, uuids, role) =>
+    nav.revealDiff = (sheet, uuids, role, emph) =>
       whenVisible(() => {
         const land = () => {
           if (uuids.length && centerOnUuids(uuids, 110)) {
@@ -1258,7 +1261,7 @@ export function Canvas() {
           } else {
             fitSheet(); // added/removed sheet, or uuids not on this sheet → show context
           }
-          paintDiff(uuids, role);
+          paintDiff(uuids, role, emph);
         };
         if (sheet !== curSheet.current && idx.sheets.some((s) => s.num === sheet)) {
           void (async () => {

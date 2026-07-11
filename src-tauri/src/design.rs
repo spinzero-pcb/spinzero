@@ -106,6 +106,10 @@ pub struct CompLite {
     pub dnp: bool,
     pub nets: Vec<String>,
     pub svg_id: String,
+    /// Placed schematic bounding box `[x, y, w, h]` on its sheet (design.json `bbox`),
+    /// when the library symbol has geometry. Lets the diff engine see symbol moves.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bbox: Option<[f64; 4]>,
 }
 
 #[derive(Serialize)]
@@ -469,6 +473,10 @@ fn build_indexes_kicad(cache: &Path, design_dir: &Path) -> Result<DesignIndexes,
                 .and_then(|v| v.as_array())
                 .map(|a| a.iter().filter_map(|v| v.as_str()).map(String::from).collect())
                 .unwrap_or_default();
+            let bbox = c.get("bbox").and_then(|b| {
+                let f = |k: &str| b.get(k).and_then(|v| v.as_f64());
+                Some([f("x")?, f("y")?, f("w")?, f("h")?])
+            });
             components.insert(
                 designator.to_string(),
                 CompLite {
@@ -481,6 +489,7 @@ fn build_indexes_kicad(cache: &Path, design_dir: &Path) -> Result<DesignIndexes,
                     dnp,
                     nets: nets_of,
                     svg_id: str_at(c, "svg_id").unwrap_or("").to_string(),
+                    bbox,
                 },
             );
         }

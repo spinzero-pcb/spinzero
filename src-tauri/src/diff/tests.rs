@@ -36,6 +36,7 @@ fn comp(value: &str, fp: &str, dnp: bool) -> CompLite {
         dnp,
         nets: Vec::new(),
         svg_id: String::new(),
+        bbox: None,
     }
 }
 
@@ -50,6 +51,7 @@ fn comp_full(value: &str, fp: &str, mpn: &str, sheet: i64, svg_id: &str) -> Comp
         dnp: false,
         nets: Vec::new(),
         svg_id: svg_id.into(),
+        bbox: None,
     }
 }
 
@@ -642,4 +644,133 @@ fn pcb_text_edit_folds_to_modify() {
     assert_eq!(t.len(), 1, "one text modify, not add+remove: {t:?}");
     assert_eq!(t[0].kind, Kind::Modified);
     assert!(t[0].title.contains("REV A") && t[0].title.contains("REV B"), "{}", t[0].title);
+}
+
+// ----------------------------------------------- one-action-one-row + schematic moves
+
+#[test]
+fn removed_component_does_not_spam_net_membership() {
+    // Removing C1 must read as ONE change (the component row); the nets it sat on
+    // must not add "membership changed" rows for the same action.
+    let mut a = empty_indexes();
+    a.components.insert("R1".into(), comp("10k", "R_0402", false));
+    a.components.insert("C1".into(), comp("100n", "C_0402", false));
+    a.nets.insert("/N".into(), net(vec![term("R1", "1"), term("C1", "1")]));
+    let mut b = empty_indexes();
+    b.components.insert("R1".into(), comp("10k", "R_0402", false));
+    b.nets.insert("/N".into(), net(vec![term("R1", "1")]));
+
+    let doc = diff_bundles(&bundle(a), &bundle(b), &no_source_diff());
+    let comps: Vec<_> = doc.changes.iter().filter(|c| c.group == Group::Component).collect();
+    assert_eq!(comps.len(), 1, "one component row: {:?}", doc.changes);
+    assert_eq!(comps[0].kind, Kind::Removed);
+    assert!(
+        !doc.changes.iter().any(|c| c.group == Group::Net),
+        "no net rows for a component removal: {:?}",
+        doc.changes
+    );
+}
+
+#[test]
+fn reannotation_suppresses_net_churn_and_anchors_both_sides() {
+    // C1 -> C2 re-annotation: one renamed row carrying BOTH sides' anchors (the
+    // symbol uuid changed), and zero net rows (C2.1 is C1.1 canonicalized).
+    let mut a = empty_indexes();
+    a.components.insert("C1".into(), comp_full("100n", "C_0402", "", 1, "u_old"));
+    a.nets.insert("/N".into(), net(vec![term("C1", "1")]));
+    let mut b = empty_indexes();
+    b.components.insert("C2".into(), comp_full("100n", "C_0402", "", 1, "u_new"));
+    b.nets.insert("/N".into(), net(vec![term("C2", "1")]));
+
+    let doc = diff_bundles(&bundle(a), &bundle(b), &no_source_diff());
+    assert_eq!(doc.changes.len(), 1, "exactly the rename row: {:?}", doc.changes);
+    let c = &doc.changes[0];
+    assert_eq!(c.kind, Kind::Renamed);
+    let sch = c.anchors.schematic.as_ref().expect("B anchor");
+    assert_eq!(sch.uuids, vec!["u_new".to_string()]);
+    let sch_a = c.anchors.schematic_a.as_ref().expect("A anchor for the old uuid");
+    assert_eq!(sch_a.uuids, vec!["u_old".to_string()]);
+}
+
+#[test]
+fn schematic_symbol_move_emits_cosmetic_row() {
+    let mk = |x: f64| {
+        let mut c = comp("100n", "C_0402", false);
+        c.bbox = Some([x, 5.0, 2.0, 2.0]);
+        c
+    };
+    let mut a = empty_indexes();
+    a.components.insert("C1".into(), mk(10.0));
+    let mut b = empty_indexes();
+    b.components.insert("C1".into(), mk(22.7));
+
+    let doc = diff_bundles(&bundle(a), &bundle(b), &no_source_diff());
+    assert_eq!(doc.changes.len(), 1, "{:?}", doc.changes);
+    let c = &doc.changes[0];
+    assert_eq!((c.group, c.kind, c.impact), (Group::Component, Kind::Moved, Impact::Cosmetic));
+    assert!(c.title.contains("moved on schematic"), "{}", c.title);
+
+    // Sub-grid jitter must NOT emit a row.
+    let mut a = empty_indexes();
+    a.components.insert("C1".into(), mk(10.0));
+    let mut b = empty_indexes();
+    b.components.insert("C1".into(), mk(10.3));
+    let doc = diff_bundles(&bundle(a), &bundle(b), &no_source_diff());
+    assert!(doc.changes.is_empty(), "0.3 mm is jitter: {:?}", doc.changes);
+}
+
+#[test]
+fn graphical_only_sheet_edit_falls_back_to_one_row() {
+    // Source changed (a nudged GND symbol), semantics identical: one cosmetic
+    // sheet row, so the edit isn't invisible.
+    let make = || {
+        let mut ix = empty_indexes();
+        ix.components.insert("R1".into(), comp_full("10k", "R_0402", "", 1, "u_r1"));
+        ix.nets.insert("/N".into(), net(vec![term("R1", "1")]));
+        ix.sheets = vec![sheet(1, "root")];
+        ix
+    };
+    let mut ba = bundle(make());
+    ba.sheet_files.insert(1, "root.kicad_sch".into());
+    let mut bb = bundle(make());
+    bb.sheet_files.insert(1, "root.kicad_sch".into());
+
+    // The source-hash delta carries design-folder-prefixed paths; sheet_files carries
+    // the bare design.json filename — the fallback must match across that difference.
+    let doc = diff_bundles(&ba, &bb, &changed(&["PROJ/root.kicad_sch"]));
+    assert_eq!(doc.changes.len(), 1, "{:?}", doc.changes);
+    let c = &doc.changes[0];
+    assert_eq!((c.group, c.kind, c.impact), (Group::Sheet, Kind::Modified, Impact::Cosmetic));
+    assert!(c.title.contains("graphical edits"), "{}", c.title);
+    assert_eq!(c.anchors.schematic.as_ref().map(|s| s.sheet), Some(1));
+
+    // But when a semantic change explains the source delta, no fallback row rides along.
+    let mut ba = bundle(make());
+    ba.sheet_files.insert(1, "root.kicad_sch".into());
+    let mut ix = make();
+    ix.components.get_mut("R1").unwrap().value = "22k".into();
+    let mut bb = bundle(ix);
+    bb.sheet_files.insert(1, "root.kicad_sch".into());
+    let doc = diff_bundles(&ba, &bb, &changed(&["root.kicad_sch"]));
+    assert!(
+        !doc.changes.iter().any(|c| c.group == Group::Sheet),
+        "no fallback next to the value row: {:?}",
+        doc.changes
+    );
+}
+
+#[test]
+fn value_change_carries_per_side_emphasis() {
+    let mut a = empty_indexes();
+    a.components.insert("C134".into(), comp_full("1nF", "C_0402", "", 1, "u1"));
+    let mut b = empty_indexes();
+    b.components.insert("C134".into(), comp_full("10nF", "C_0402", "", 1, "u1"));
+
+    let doc = diff_bundles(&bundle(a), &bundle(b), &no_source_diff());
+    assert_eq!(doc.changes.len(), 1, "{:?}", doc.changes);
+    let c = &doc.changes[0];
+    assert_eq!(c.emph_a.as_deref(), Some("1nF"));
+    assert_eq!(c.emph_b.as_deref(), Some("10nF"));
+    // Same symbol uuid on both sides: no duplicate A anchor.
+    assert!(c.anchors.schematic_a.is_none());
 }

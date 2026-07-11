@@ -60,7 +60,7 @@ export interface Navigator {
    *  element uuids, and paint a diff tint (`err`/`ok`/`warn` CSS-var role) with a pulse.
    *  Read-only; selection/history are untouched. `uuids` empty ⇒ just fit the sheet
    *  (added/removed-sheet placeholder). No-op outside diff mode. */
-  revealDiff: (sheet: number, uuids: string[], role: "err" | "ok" | "warn") => void;
+  revealDiff: (sheet: number, uuids: string[], role: "err" | "ok" | "warn", emph?: string) => void;
   /** Visual diff: clear any diff tint painted by `revealDiff` (on exit / refocus). */
   clearDiff: () => void;
 }
@@ -128,14 +128,28 @@ export interface DiffPaint {
   subscribe: (fn: () => void) => () => void;
 }
 
+/** Tag every text node inside a cloned diff overlay whose content equals `emph`
+ *  (the changed field string, e.g. a value) with `cls`, so CSS can colour exactly
+ *  the edited text red (A, old) / green (B, new). Whitespace-insensitive match;
+ *  no-op when `emph` is absent or nothing matches (the plain tint still shows). */
+export function emphasizeDiffText(overlay: SVGElement, emph: string | undefined, cls: string) {
+  const want = emph?.trim();
+  if (!want) return;
+  for (const t of overlay.querySelectorAll("text")) {
+    if (t.textContent?.trim() === want) t.classList.add(cls);
+  }
+}
+
 export const diffPaint: DiffPaint = {
   focused: null,
   listeners: new Set(),
   focus(change) {
     this.focused = change;
     // Drive the B Canvas (schematic side only; PCB focus goes through pcbNav.reveal).
+    // emphB is the NEW text of a field edit — the B canvas colours it green so the
+    // exact change (e.g. the value string) stands out inside the tinted symbol.
     const sch = change.anchors.schematic;
-    if (sch) nav.revealDiff(sch.sheet, sch.uuids, tintRole(change.kind));
+    if (sch) nav.revealDiff(sch.sheet, sch.uuids, tintRole(change.kind), change.emphB);
     for (const fn of this.listeners) fn();
   },
   clearA() {

@@ -59,6 +59,21 @@ pub fn find_checkpoint(project_dir: &Path, id: &str) -> Option<Revision> {
     list_checkpoints(project_dir).into_iter().find(|r| r.id == id)
 }
 
+/// Rename a local checkpoint: append a `label` event to this machine's checkpoint log
+/// (LWW on the fold, same as the synced store). A label written to the synced
+/// revisions log would fold onto nothing for an unpublished checkpoint — its create
+/// event lives here, so its label must too.
+pub fn set_label_local(
+    project_dir: &Path,
+    user: &str,
+    id: &str,
+    label: Option<String>,
+) -> Result<(), String> {
+    let root = checkpoints_root(project_dir);
+    let log = checkpoints_log(&root);
+    rawstore::mutate_event_in(&root, CHECKPOINTS_PREFIX, &log, user, id, "label", label, None, None, None)
+}
+
 pub fn latest_checkpoint(project_dir: &Path) -> Option<Revision> {
     list_checkpoints(project_dir).into_iter().next()
 }
@@ -289,6 +304,28 @@ mod tests {
         publish(&proj, &cp1.id, "a", &GitInfo::default(), None).unwrap();
         let r3 = publish(&proj, &cp3.id, "a", &GitInfo::default(), None).unwrap();
         assert!(r3.parents.contains(&cp1.id), "publish parent skips unpublished cp2 to cp1");
+        let _ = fs::remove_dir_all(&proj);
+        let _ = fs::remove_dir_all(checkpoints_root(&proj));
+    }
+
+    #[test]
+    fn set_label_local_folds_onto_checkpoint() {
+        // Renaming a LOCAL checkpoint must fold in the checkpoint store — a label
+        // event in the synced revisions log lands on nothing for an unpublished row.
+        let proj = temp_project("label");
+        let src = proj.join("src");
+        fs::create_dir_all(&src).unwrap();
+        fs::write(src.join("a.kicad_sch"), b"v1").unwrap();
+        let cp = snapshot_local(&proj, &src, &hashes(&src), "alice", &GitInfo::default(), None).unwrap();
+
+        set_label_local(&proj, "alice", &cp.id, Some("bringup".into())).unwrap();
+        let folded = find_checkpoint(&proj, &cp.id).expect("checkpoint still present");
+        assert_eq!(folded.label.as_deref(), Some("bringup"));
+        // LWW: a later relabel wins; clearing works too.
+        set_label_local(&proj, "alice", &cp.id, Some("bringup v2".into())).unwrap();
+        assert_eq!(find_checkpoint(&proj, &cp.id).unwrap().label.as_deref(), Some("bringup v2"));
+        set_label_local(&proj, "alice", &cp.id, None).unwrap();
+        assert_eq!(find_checkpoint(&proj, &cp.id).unwrap().label, None);
         let _ = fs::remove_dir_all(&proj);
         let _ = fs::remove_dir_all(checkpoints_root(&proj));
     }

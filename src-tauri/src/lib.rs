@@ -576,7 +576,18 @@ fn label_extraction(
     label: Option<String>,
 ) -> Result<(), String> {
     let handle = current_project(&state)?;
-    rawstore::set_label(&handle.project_dir, &project::author_slug(), &id, label)
+    let user = project::author_slug();
+    // Route the label to the store that holds the row's create event: a label folded
+    // in the synced log lands on nothing for an unpublished local checkpoint (its
+    // create lives in the machine-local checkpoint log), so renaming silently no-oped.
+    if rawstore::find_revision(&handle.project_dir, &id).is_some() {
+        return rawstore::set_label(&handle.project_dir, &user, &id, label);
+    }
+    if checkpoints::find_checkpoint(&handle.project_dir, &id).is_some() {
+        log::info!("labeling local checkpoint {id}");
+        return checkpoints::set_label_local(&handle.project_dir, &user, &id, label);
+    }
+    Err(format!("unknown revision {id}"))
 }
 
 // ------------------------------------------------------------ version control
