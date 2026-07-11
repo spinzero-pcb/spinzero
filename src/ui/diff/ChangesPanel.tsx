@@ -89,6 +89,14 @@ export function ChangesPanel() {
     return () => window.removeEventListener("keydown", onKey);
   });
 
+  // On entering diff mode, auto-focus the first change so the canvas opens ON a change
+  // (centred + tinted) instead of a blank whole-sheet fit, and keeps it active (batch 2).
+  // Guarded on focusedId == null so it fires once per comparison; the user's own
+  // stepping/clicking owns focus after that.
+  useEffect(() => {
+    if (focusedId == null && ordered.length > 0) focusChange(ordered[0].id);
+  }, [focusedId, ordered, focusChange]);
+
   // Keep the focused row scrolled into view as the stepper advances.
   const rowRefs = useRef<Map<string, HTMLDivElement>>(new Map());
   useEffect(() => {

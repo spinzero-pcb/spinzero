@@ -183,9 +183,14 @@ export function Canvas() {
     }
 
     // -------------------------------------------------------------- camera
+    // Width reserved on the right for the floating properties card. In diff mode the
+    // card is never shown (focusing a change is read-only — nothing gets selected) and
+    // the schematic is a half-width B pane, so reserving the full gutter there shrinks
+    // the landing until a change reads as "zoomed out to fit". Drop it while diffing.
+    const gutter = () => (useDiffStore.getState().active ? 0 : CARD_GUTTER);
     function fitSheet() {
       const r = stage.getBoundingClientRect();
-      const usableW = r.width - CARD_GUTTER;
+      const usableW = r.width - gutter();
       const s = Math.min(usableW / vb.current[2], (r.height - 2 * PAD) / vb.current[3]);
       tgt.current.s = s;
       tgt.current.x = PAD;
@@ -193,7 +198,7 @@ export function Canvas() {
     }
     function centerOn(ux: number, uy: number, viewW: number) {
       const r = stage.getBoundingClientRect();
-      const usableW = r.width - CARD_GUTTER;
+      const usableW = r.width - gutter();
       const s = Math.min(60, Math.max(0.2, usableW / viewW));
       tgt.current.s = s;
       tgt.current.x = usableW / 2 - (ux - vb.current[0]) * s;
@@ -228,7 +233,7 @@ export function Canvas() {
       }
       if (!isFinite(minX)) return false;
       const r = stage.getBoundingClientRect();
-      const usableW = r.width - CARD_GUTTER;
+      const usableW = r.width - gutter();
       const usableH = r.height - 2 * PAD;
       const aspect = usableW / usableH; // px aspect, to weigh the Y span as an X-width
       const PADDING = 1.3; // breathing room so the framed set isn't flush to the edges
@@ -823,7 +828,7 @@ export function Canvas() {
       // stays put so closing the overview returns exactly where you were.
       if (e.deltaY > 0 && !overviewRef.current) {
         const fitS = Math.min(
-          (r.width - CARD_GUTTER) / vb.current[2],
+          (r.width - gutter()) / vb.current[2],
           (r.height - 2 * PAD) / vb.current[3],
         );
         if (ns < fitS * 0.5) {
@@ -1170,7 +1175,7 @@ export function Canvas() {
     nav.fitView = fitSheet;
     nav.zoomBy = (factor) => {
       const r = stage.getBoundingClientRect();
-      const mx = (r.width - CARD_GUTTER) / 2;
+      const mx = (r.width - gutter()) / 2;
       const my = r.height / 2;
       const ns = Math.min(60, Math.max(0.2, tgt.current.s * factor));
       const ratio = ns / tgt.current.s;

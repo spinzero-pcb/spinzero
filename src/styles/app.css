@@ -3100,7 +3100,9 @@ button {
 .diff-arrow { color: var(--fg-2); }
 .diff-preparing { color: var(--accent); font-style: italic; }
 .diff-banner-btn { display: inline-flex; align-items: center; gap: 4px; }
-.diff-banner-close { font-size: 14px; }
+/* Exit-comparison ✕ — red so it stands out as the way out of diff mode (batch 2). */
+.diff-banner-close { font-size: 14px; color: var(--err); }
+.diff-banner-close:hover { color: var(--err); background: var(--err-dim); }
 
 /* PCB compare toggles (Blink / Zones) in the diff banner. */
 .diff-mode-toggle { display: inline-flex; align-items: center; gap: 2px; margin-right: var(--sp-2); }
@@ -3127,7 +3129,10 @@ button {
   cursor: grab;
 }
 .diff-a-stage:active { cursor: grabbing; }
-.diff-a-world { position: absolute; transform-origin: 0 0; will-change: transform; }
+/* No will-change here — same reason as .canvas-world (B side): pinning the raster
+   scale makes Chromium GPU-upscale the SVG instead of re-rastering, so zoomed text
+   goes fuzzy and the A side reads "dull" next to the crisp B side (batch 2). */
+.diff-a-world { position: absolute; transform-origin: 0 0; }
 .diff-a-island svg { display: block; }
 .diff-a-placeholder {
   position: absolute;
