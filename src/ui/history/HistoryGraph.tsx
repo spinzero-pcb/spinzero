@@ -3,7 +3,7 @@ import { useHistoryStore } from "../../stores/historyStore";
 import { useProjectStore } from "../../stores/projectStore";
 import { useDiffStore } from "../../stores/diffStore";
 import { ContextMenu, type MenuItem } from "../ContextMenu";
-import { IconCopy, IconGear, IconHistory, IconPin, IconRefresh, IconSparkle, IconTrash } from "../icons";
+import { IconClose, IconCompare, IconCopy, IconEdit, IconEye, IconRefresh, IconSparkle, IconTag, IconTrash } from "../icons";
 import { formatLocalTime } from "../../lib/time";
 import { layoutDag } from "./layout";
 import type { ExtractionMeta } from "../../lib/types";
@@ -140,23 +140,25 @@ export function HistoryGraph() {
     const localOnly = r.is_checkpoint && !r.published;
     const parent = parentOf(r);
     const items: MenuItem[] = [
-      { label: "Open this version", icon: <IconHistory size={14} />, onClick: () => openVersion(r.id) },
+      { label: "Open this version", icon: <IconEye size={14} />, onClick: () => openVersion(r.id) },
       { separator: true },
       // Compare (visual-diff §3). "Compare with…" enters pick mode; "Compare with
-      // previous" uses the parent pointer and is disabled for a root (no parent).
-      { label: "Compare with…", icon: <IconHistory size={14} />, badge: "Beta", onClick: () => { setEditing(null); setTagging(null); setCompareFrom(r.id); } },
+      // previous" uses the parent pointer and is disabled for a root (no parent). Both
+      // are Beta while the visual-diff surface is still stabilising.
+      { label: "Compare with…", icon: <IconCompare size={14} />, badge: "Beta", onClick: () => { setEditing(null); setTagging(null); setCompareFrom(r.id); } },
       {
         label: "Compare with previous",
-        icon: <IconHistory size={14} />,
+        icon: <IconCompare size={14} />,
+        badge: "Beta",
         disabled: !parent,
         onClick: () => parent && startCompare(parent, r.id),
       },
       { separator: true },
-      { label: "Rename…", icon: <IconGear size={14} />, onClick: () => { setTagging(null); setDraft(r.label ?? ""); setEditing(r.id); } },
-      { label: "Add tag…", icon: <IconPin size={14} />, onClick: () => { setEditing(null); setTagDraft(""); setTagging(r.id); } },
+      { label: "Rename…", icon: <IconEdit size={14} />, onClick: () => { setTagging(null); setDraft(r.label ?? ""); setEditing(r.id); } },
+      { label: "Add tag…", icon: <IconTag size={14} />, onClick: () => { setEditing(null); setTagDraft(""); setTagging(r.id); } },
     ];
     for (const t of r.tags) {
-      items.push({ label: `Remove tag “${t}”`, icon: <IconTrash size={14} />, onClick: () => void removeTag(t) });
+      items.push({ label: `Remove tag “${t}”`, icon: <IconClose size={14} />, onClick: () => void removeTag(t) });
     }
     if (localOnly) {
       items.push({ separator: true });
@@ -203,7 +205,7 @@ export function HistoryGraph() {
               title={`Compare the two branch heads (${tips[0].id.slice(0, 8)} vs ${tips[1].id.slice(0, 8)})`}
               onClick={() => startCompare(tips[1].id, tips[0].id)}
             >
-              <IconHistory size={13} /> Compare tips
+              <IconCompare size={13} /> Compare tips
             </button>
           )}
           <span style={{ flex: 1 }} />

@@ -16,7 +16,7 @@ import { relabelInstances } from "./relabel";
 import { useReviewStore } from "../../stores/reviewStore";
 import { Overview } from "./Overview";
 import { ContextMenu, type MenuItem } from "../ContextMenu";
-import { IconBoard, IconComment, IconCopy, IconFit, IconTrash } from "../icons";
+import { IconBoard, IconClose, IconComment, IconCopy, IconFit, IconTrash } from "../icons";
 import { registerRenderProbe } from "../../lib/renderProbe";
 import { ipc } from "../../lib/ipc";
 
@@ -1028,6 +1028,12 @@ export function Canvas() {
             clearAll(); // transient selection
           },
         });
+      }
+      // In comparison mode, expose the same exit the banner's × does — a right-click on
+      // the canvas is where users reach for it (batch1).
+      if (useDiffStore.getState().active) {
+        items.push({ separator: true });
+        items.push({ label: "Exit comparison", icon: <IconClose size={14} />, onClick: () => useDiffStore.getState().exitDiff() });
       }
       setCtxMenu({ x: e.clientX, y: e.clientY, items });
     };

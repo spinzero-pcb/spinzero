@@ -3161,7 +3161,7 @@ button {
 /* The exact edited text inside a modified change: old value red (A), new green (B). */
 .canvas-island .hl-diff .hl-diff-emph-err, .canvas-island .hl-diff .hl-diff-emph-err tspan { fill: var(--err) !important; stroke: none !important; font-weight: 700; }
 .canvas-island .hl-diff .hl-diff-emph-ok, .canvas-island .hl-diff .hl-diff-emph-ok tspan { fill: var(--ok) !important; stroke: none !important; font-weight: 700; }
-.hl-diff-pulse { animation: diff-pulse 1.1s ease-in-out 2; }
+.hl-diff-pulse { animation: diff-pulse 1.1s ease-in-out infinite; }
 @keyframes diff-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
 
 /* ---------- Changes panel (left rail, diff mode only) ---------- */

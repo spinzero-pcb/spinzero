@@ -282,3 +282,33 @@ export function IconClose(p: IconProps) {
     </Svg>
   );
 }
+
+/** Edit / rename — a pencil (nib at bottom-left, eraser ferrule near the tip). */
+export function IconEdit(p: IconProps) {
+  return (
+    <Svg {...p}>
+      <path d="M2.5 13.5l1-3 7.5-7.5 2 2-7.5 7.5-3 1z" />
+      <path d="M9.5 4.5l2 2" />
+    </Svg>
+  );
+}
+
+/** Compare — a framed A│B split view (the side-by-side diff). */
+export function IconCompare(p: IconProps) {
+  return (
+    <Svg {...p}>
+      <rect x="2" y="3" width="12" height="10" rx="1" />
+      <path d="M8 3v10" />
+    </Svg>
+  );
+}
+
+/** Tag / label — a pointed tag with a punch hole. */
+export function IconTag(p: IconProps) {
+  return (
+    <Svg {...p}>
+      <path d="M2.5 2.5h5.2l5.8 5.8-5.2 5.2-5.8-5.8z" />
+      <circle cx="5" cy="5" r="1" />
+    </Svg>
+  );
+}
