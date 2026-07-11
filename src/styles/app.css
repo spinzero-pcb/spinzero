@@ -1964,6 +1964,18 @@ button {
   color: var(--fg-1);
 }
 .ctx-label { flex: 1; }
+/* Trailing feature-status pill on a menu row (e.g. "Beta" on Compare). */
+.ctx-badge {
+  margin-left: var(--sp-2);
+  padding: 0 5px;
+  border-radius: var(--radius-1);
+  background: var(--accent-dim);
+  color: var(--accent);
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
 .ctx-arrow { margin-left: auto; color: var(--fg-2); font-size: var(--fs-0); }
 /* Selected choice in a submenu (e.g. the current severity): tinted row + trailing check. */
 .ctx-item.active { background: var(--accent-dim); color: var(--fg-0); }
@@ -3070,6 +3082,17 @@ button {
   color: var(--fg-1);
 }
 .diff-banner-label { color: var(--fg-2); text-transform: uppercase; letter-spacing: 0.04em; font-size: 10px; }
+/* Beta tag on the diff banner — visual diff is still a beta feature. */
+.diff-banner-beta {
+  padding: 0 5px;
+  border-radius: var(--radius-1);
+  background: var(--accent-dim);
+  color: var(--accent);
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
 .diff-side { display: inline-flex; align-items: center; gap: 6px; }
 .diff-side-name { color: var(--fg-0); font-weight: 500; }
 .diff-side-a .diff-side-name { color: var(--diff-remove); }

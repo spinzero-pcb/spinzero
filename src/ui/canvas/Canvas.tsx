@@ -1367,8 +1367,13 @@ export function Canvas() {
     };
 
     // -------------------------------------------------------------- boot
+    // Open the root sheet by default (KiCad's top-level page, the lowest sheet
+    // number). The design JSON lists sheets root-first, so sheets[0] is the root;
+    // the min-num scan is a guard in case that order ever changes.
     const start =
-      idx.sheets.find((s) => /\bcan\b/i.test(s.name))?.num ?? idx.sheets[0]?.num ?? 1;
+      idx.sheets.reduce<number | null>((lo, s) => (lo == null || s.num < lo ? s.num : lo), null) ??
+      idx.sheets[0]?.num ??
+      1;
     (async () => {
       try {
         // D1 reload restore: selection and viewport survive a re-crunch; the sheet

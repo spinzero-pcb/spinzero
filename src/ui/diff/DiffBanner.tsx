@@ -28,6 +28,7 @@ export function DiffBanner() {
   return (
     <div className="diff-banner" role="region" aria-label="Comparing revisions">
       <span className="diff-banner-label">Comparing</span>
+      <span className="diff-banner-beta" title="Visual diff is a beta feature">Beta</span>
       <span className="diff-side diff-side-a" title={`${a.label} (${a.rev})`}>
         <span className="diff-side-name">{a.label}</span>
         <span className="mono dim">{shortId(a.rev)}</span>

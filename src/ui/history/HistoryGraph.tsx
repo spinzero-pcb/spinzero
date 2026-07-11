@@ -144,7 +144,7 @@ export function HistoryGraph() {
       { separator: true },
       // Compare (visual-diff §3). "Compare with…" enters pick mode; "Compare with
       // previous" uses the parent pointer and is disabled for a root (no parent).
-      { label: "Compare with…", icon: <IconHistory size={14} />, onClick: () => { setEditing(null); setTagging(null); setCompareFrom(r.id); } },
+      { label: "Compare with…", icon: <IconHistory size={14} />, badge: "Beta", onClick: () => { setEditing(null); setTagging(null); setCompareFrom(r.id); } },
       {
         label: "Compare with previous",
         icon: <IconHistory size={14} />,
