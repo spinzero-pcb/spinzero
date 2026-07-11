@@ -79,8 +79,19 @@ fn bundle(indexes: DesignIndexes) -> Bundle {
         indexes,
         sheet_files: HashMap::new(),
         geometry: None,
+        sch_geometry: None,
         pcb_file: None,
     }
+}
+
+/// A schematic-geometry element `(uuid, kind, [x,y,w,h], sig)`.
+fn sch_elem(uuid: &str, kind: &str, bbox: [f64; 4], sig: &str) -> SchElem {
+    SchElem { uuid: uuid.into(), kind: kind.into(), bbox, sig: sig.into() }
+}
+
+/// A one-file schematic geometry with the given elements.
+fn sch_geom(file: &str, elems: Vec<SchElem>) -> SchGeometry {
+    SchGeometry { sheets: vec![SchSheetGeom { file: file.into(), elements: elems }] }
 }
 
 fn no_source_diff() -> RevisionDiff {
@@ -783,6 +794,93 @@ fn graphical_only_sheet_edit_falls_back_to_one_row() {
         "no fallback next to the value row: {:?}",
         doc.changes
     );
+}
+
+#[test]
+fn moved_power_symbol_splits_into_one_anchored_row() {
+    // A nudged GND power symbol (no semantic row — power symbols aren't components).
+    // With per-element geometry it becomes ONE cosmetic row anchored to its uuid, and
+    // the clubbed fallback row is suppressed.
+    let make_ix = || {
+        let mut ix = empty_indexes();
+        ix.sheets = vec![sheet(1, "power")];
+        ix
+    };
+    let mut ba = bundle(make_ix());
+    ba.sheet_files.insert(1, "power.kicad_sch".into());
+    ba.sch_geometry =
+        Some(sch_geom("power.kicad_sch", vec![sch_elem("gnd1", "power", [100.0, 100.0, 2.0, 2.0], "power:GND|u1|a0|m")]));
+    let mut bb = bundle(make_ix());
+    bb.sheet_files.insert(1, "power.kicad_sch".into());
+    bb.sch_geometry =
+        Some(sch_geom("power.kicad_sch", vec![sch_elem("gnd1", "power", [120.0, 130.0, 2.0, 2.0], "power:GND|u1|a0|m")]));
+
+    let doc = diff_bundles(&ba, &bb, &changed(&["power.kicad_sch"]));
+    assert_eq!(doc.changes.len(), 1, "{:?}", doc.changes);
+    let c = &doc.changes[0];
+    assert_eq!((c.group, c.kind, c.impact), (Group::Sheet, Kind::Moved, Impact::Cosmetic));
+    assert!(c.title.contains("power symbol moved"), "{}", c.title);
+    assert_eq!(c.anchors.schematic.as_ref().unwrap().uuids, vec!["gnd1".to_string()]);
+    assert!(!c.title.contains("graphical edits"), "no clubbed fallback row: {}", c.title);
+}
+
+#[test]
+fn colocated_edits_cluster_but_distant_ones_split() {
+    let make_ix = || {
+        let mut ix = empty_indexes();
+        ix.sheets = vec![sheet(1, "root")];
+        ix
+    };
+    // A dragged symbol + its stretched wire (co-located) plus a far-away moved note.
+    let a = vec![
+        sch_elem("s1", "symbol", [50.0, 50.0, 4.0, 4.0], "Device:R|u1|a0|m"),
+        sch_elem("w1", "wire", [54.0, 52.0, 3.0, 0.0], "wire|w0"),
+        sch_elem("n1", "text", [200.0, 200.0, 0.0, 0.0], "text|hi"),
+    ];
+    let b = vec![
+        sch_elem("s1", "symbol", [60.0, 50.0, 4.0, 4.0], "Device:R|u1|a0|m"),
+        sch_elem("w1", "wire", [64.0, 52.0, 3.0, 0.0], "wire|w0"),
+        sch_elem("n1", "text", [200.0, 250.0, 0.0, 0.0], "text|hi"),
+    ];
+    let mut ba = bundle(make_ix());
+    ba.sheet_files.insert(1, "root.kicad_sch".into());
+    ba.sch_geometry = Some(sch_geom("root.kicad_sch", a));
+    let mut bb = bundle(make_ix());
+    bb.sheet_files.insert(1, "root.kicad_sch".into());
+    bb.sch_geometry = Some(sch_geom("root.kicad_sch", b));
+
+    let doc = diff_bundles(&ba, &bb, &changed(&["root.kicad_sch"]));
+    // The symbol+wire cluster is one row; the distant note is another → two rows.
+    assert_eq!(doc.changes.len(), 2, "{:?}", doc.changes);
+    let sym_row = doc.changes.iter().find(|c| c.title.contains("symbol")).expect("symbol row");
+    let mut u = sym_row.anchors.schematic.as_ref().unwrap().uuids.clone();
+    u.sort();
+    assert_eq!(u, vec!["s1".to_string(), "w1".to_string()], "drag clusters the wire in");
+    assert!(doc.changes.iter().any(|c| c.title.contains("note moved")), "distant note is its own row");
+}
+
+#[test]
+fn removed_schematic_element_anchors_a_side() {
+    // A wire present only on A (deleted): a Side::A removed row anchored to its uuid, so
+    // the A-island landing (frontend) can frame it.
+    let make_ix = || {
+        let mut ix = empty_indexes();
+        ix.sheets = vec![sheet(1, "root")];
+        ix
+    };
+    let mut ba = bundle(make_ix());
+    ba.sheet_files.insert(1, "root.kicad_sch".into());
+    ba.sch_geometry =
+        Some(sch_geom("root.kicad_sch", vec![sch_elem("w9", "wire", [10.0, 10.0, 5.0, 0.0], "wire|w0")]));
+    let mut bb = bundle(make_ix());
+    bb.sheet_files.insert(1, "root.kicad_sch".into());
+    bb.sch_geometry = Some(sch_geom("root.kicad_sch", vec![]));
+
+    let doc = diff_bundles(&ba, &bb, &changed(&["root.kicad_sch"]));
+    assert_eq!(doc.changes.len(), 1, "{:?}", doc.changes);
+    let c = &doc.changes[0];
+    assert_eq!((c.group, c.kind, c.side), (Group::Sheet, Kind::Removed, Side::A));
+    assert_eq!(c.anchors.schematic.as_ref().unwrap().uuids, vec!["w9".to_string()]);
 }
 
 #[test]

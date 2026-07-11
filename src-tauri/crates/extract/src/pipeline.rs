@@ -42,6 +42,10 @@ struct Manifest {
     /// input). Absent for schematic-only bundles or older extractions.
     #[serde(skip_serializing_if = "Option::is_none")]
     pcb_geometry: Option<String>,
+    /// Cache-relative path of the per-element schematic geometry (the diff engine's
+    /// input for splitting + anchoring graphical edits). Absent for older extractions.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    schematic_geometry: Option<String>,
 }
 
 /// Resolve the root schematic path for a project argument (`.kicad_pro` or a
@@ -367,6 +371,27 @@ pub fn run_design(project: &Path, out_dir: &Path, emit: &mut dyn FnMut(Msg)) -> 
         });
     }
 
+    // Per-element schematic geometry (the diff engine's input for splitting +
+    // anchoring graphical edits). Best-effort: a write failure logs and leaves the
+    // manifest key absent, so the diff falls back to its one-row-per-sheet behaviour.
+    let schematic_geometry = {
+        let geom = crate::sch_geom::build_sch_geometry(&refs);
+        let rel = "schematics/geometry.json";
+        match serde_json::to_string(&geom)
+            .map_err(|e| e.to_string())
+            .and_then(|json| std::fs::write(sch_dir.join("geometry.json"), json).map_err(|e| e.to_string()))
+        {
+            Ok(()) => {
+                emit(Msg::Artifact(rel.to_string()));
+                Some(rel.to_string())
+            }
+            Err(e) => {
+                emit(Msg::Progress(format!("schematic geometry skipped: {e}")));
+                None
+            }
+        }
+    };
+
     // Board artifacts (3D model refs + geometry IR + lean PCB SVGs), when a board sits
     // next to the project. Absent or unreadable boards just leave these empty.
     let (pcb_svgs, pcb_geometry) = if pcb_path.exists() {
@@ -387,6 +412,7 @@ pub fn run_design(project: &Path, out_dir: &Path, emit: &mut dyn FnMut(Msg)) -> 
         schematic_svgs,
         pcb_svgs,
         pcb_geometry,
+        schematic_geometry,
     };
     let manifest_path = out_dir.join("design_review_manifest.json");
     std::fs::write(

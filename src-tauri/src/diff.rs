@@ -312,6 +312,38 @@ pub struct GeomText {
     pub y: f64,
 }
 
+// ======================================= schematic geometry (deserialize side)
+//
+// Deserialize mirror of `crate::extract::sch_geom` — per-element schematic geometry
+// keyed by uuid, so the diff can split + anchor graphical edits (a nudged power
+// symbol, a redrawn wire) that carry no semantic row. Absent for older caches, which
+// keep the one-row-per-sheet `graphical_edit_fallback`.
+
+#[derive(Deserialize, Default, Clone)]
+pub struct SchGeometry {
+    #[serde(default)]
+    pub sheets: Vec<SchSheetGeom>,
+}
+
+#[derive(Deserialize, Default, Clone)]
+pub struct SchSheetGeom {
+    #[serde(default)]
+    pub file: String,
+    #[serde(default)]
+    pub elements: Vec<SchElem>,
+}
+
+#[derive(Deserialize, Clone)]
+pub struct SchElem {
+    pub uuid: String,
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub bbox: [f64; 4],
+    #[serde(default)]
+    pub sig: String,
+}
+
 // ================================================================= input bundle
 
 /// One side of the comparison, already materialized. The command layer builds this
@@ -326,6 +358,9 @@ pub struct Bundle {
     /// The parsed PCB geometry IR, when the bundle has a board. `None` for
     /// schematic-only bundles.
     pub geometry: Option<Geometry>,
+    /// Per-element schematic geometry (uuid → position + signature), when the
+    /// extraction emitted it. `None` for older caches → the graphical-edit fallback.
+    pub sch_geometry: Option<SchGeometry>,
     /// The `.kicad_pcb` source file name, for PCB-pass pruning.
     pub pcb_file: Option<String>,
 }
@@ -406,9 +441,16 @@ pub fn diff_bundles(
         }
     }
 
+    // --- schematic graphical edits, split + anchored (needs the per-element geometry
+    // artifact). Emits one row per distinct edit — a moved power symbol, a redrawn
+    // wire — each anchored to its uuid so clicking it lands the camera. Runs before the
+    // fallback so its anchored sheets suppress the clubbed one-row-per-sheet row.
+    diff_sch_graphics(a, b, &changed_sources, &mut raw);
+
     // --- graphical-edit fallback: a sheet whose .kicad_sch source changed but whose
     // edit produced no semantic row above (a nudged power symbol, redrawn wires,
-    // moved text) still deserves one line — otherwise the edit is invisible.
+    // moved text) still deserves one line — otherwise the edit is invisible. Covers
+    // legacy caches (no geometry artifact) and edits the geometry model doesn't carry.
     graphical_edit_fallback(a, b, &changed_sources, &mut raw);
 
     finalize(a, b, raw, sheets_pruned)
@@ -504,6 +546,277 @@ fn pcb_pass_needed(a: &Bundle, b: &Bundle, changed_sources: &HashSet<&str>) -> b
     match (a.pcb_file.as_deref(), b.pcb_file.as_deref()) {
         (Some(pa), Some(pb)) if pa == pb => changed_sources.contains(pa),
         _ => true,
+    }
+}
+
+/// Two schematic bboxes count as "moved" when their centres part by more than half a
+/// grid step (the component-move threshold) or their size changes by as much — sub-grid
+/// jitter and extractor rounding never trip it.
+fn sch_bbox_moved(a: &[f64; 4], b: &[f64; 4]) -> bool {
+    let ca = (a[0] + a[2] / 2.0, a[1] + a[3] / 2.0);
+    let cb = (b[0] + b[2] / 2.0, b[1] + b[3] / 2.0);
+    (ca.0 - cb.0).hypot(ca.1 - cb.1) > SCH_MOVE_EPS_MM
+        || (a[2] - b[2]).abs() > SCH_MOVE_EPS_MM
+        || (a[3] - b[3]).abs() > SCH_MOVE_EPS_MM
+}
+
+/// True when box `a`, inflated by `eps` on every side, overlaps box `b` — the
+/// clustering proximity test (`[x, y, w, h]`).
+fn sch_boxes_close(a: &[f64; 4], b: &[f64; 4], eps: f64) -> bool {
+    let (ax0, ay0, ax1, ay1) = (a[0] - eps, a[1] - eps, a[0] + a[2] + eps, a[1] + a[3] + eps);
+    let (bx0, by0, bx1, by1) = (b[0], b[1], b[0] + b[2], b[1] + b[3]);
+    ax0 <= bx1 && bx0 <= ax1 && ay0 <= by1 && by0 <= ay1
+}
+
+fn sch_box_union(a: [f64; 4], b: [f64; 4]) -> [f64; 4] {
+    let x0 = a[0].min(b[0]);
+    let y0 = a[1].min(b[1]);
+    let x1 = (a[0] + a[2]).max(b[0] + b[2]);
+    let y1 = (a[1] + a[3]).max(b[1] + b[3]);
+    [x0, y0, x1 - x0, y1 - y0]
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum ElemChange {
+    Added,
+    Removed,
+    Moved,
+    Edited,
+}
+
+/// One changed schematic element in a cluster: which side(s) carry its uuid, the kind
+/// tag (for the row's noun), the nature of the change, and its extent (for clustering).
+struct ChangedElem {
+    uuid: String,
+    kind: String,
+    change: ElemChange,
+    on_a: bool,
+    on_b: bool,
+    bbox: [f64; 4],
+}
+
+/// A human noun for a schematic element kind (for the change title).
+fn sch_kind_noun(kind: &str) -> &'static str {
+    match kind {
+        "power" => "power symbol",
+        "symbol" => "symbol",
+        "label" | "global_label" | "hier_label" => "label",
+        "text" => "note",
+        "graphic" => "graphic",
+        "netclass_flag" => "net-class flag",
+        "wire" => "wire",
+        "bus" => "bus",
+        "bus_entry" => "bus entry",
+        "junction" => "junction",
+        _ => "element",
+    }
+}
+
+/// The dominant element in a cluster (highest priority present), whose noun titles the
+/// row — a symbol drag that also stretched its wires reads as "power symbol", not "wire".
+fn sch_cluster_noun(members: &[ChangedElem]) -> &'static str {
+    const PRIORITY: [&str; 11] = [
+        "power", "symbol", "hier_label", "global_label", "label", "text", "graphic",
+        "netclass_flag", "bus", "wire", "junction",
+    ];
+    for k in PRIORITY {
+        if members.iter().any(|m| m.kind == k) {
+            return sch_kind_noun(k);
+        }
+    }
+    "element"
+}
+
+/// One grid step (mm): edits closer than this on a sheet cluster into a single row
+/// (a dragged symbol + its stretched wires), while edits further apart stay separate.
+const SCH_CLUSTER_EPS_MM: f64 = 2.54;
+
+/// Split each sheet's graphical edits into one anchored change per distinct edit, using
+/// the per-element schematic geometry (a nudged power symbol, a redrawn wire — none of
+/// which carry a semantic row). Requires the geometry on BOTH sides; a no-op otherwise,
+/// so older caches keep the clubbed `graphical_edit_fallback` row. Elements already
+/// carried by a semantic anchor (a component move, a net rewire) are skipped so nothing
+/// double-reports. Each row anchors to its element uuids, so clicking it lands the camera.
+fn diff_sch_graphics(
+    a: &Bundle,
+    b: &Bundle,
+    changed_sources: &HashSet<&str>,
+    raw: &mut Vec<Change>,
+) {
+    let (Some(ga), Some(gb)) = (a.sch_geometry.as_ref(), b.sch_geometry.as_ref()) else {
+        return;
+    };
+
+    // uuids already explained by a semantic row (component/net anchor) — skip them so a
+    // real component's move stays its single row. Owned (not borrowing `raw`) so this
+    // pass can push its own rows afterwards.
+    let suppressed: HashSet<String> = raw
+        .iter()
+        .flat_map(|c| c.anchors.schematic.iter().chain(c.anchors.schematic_a.iter()))
+        .flat_map(|s| s.uuids.iter().cloned())
+        .collect();
+
+    // file → sheet numbers (present on both sides, same file, source changed) — same
+    // gating as the fallback; the row lands on the lowest number.
+    let mut by_file: BTreeMap<&str, Vec<i64>> = BTreeMap::new();
+    for (num, file) in &a.sheet_files {
+        let same_on_b = b.sheet_files.get(num).map(|f| f == file).unwrap_or(false);
+        if same_on_b && source_changed(changed_sources, file) {
+            by_file.entry(file.as_str()).or_default().push(*num);
+        }
+    }
+
+    for (file, mut nums) in by_file {
+        nums.sort_unstable();
+        let sheet_num = nums[0];
+        let (Some(sa), Some(sb)) = (
+            ga.sheets.iter().find(|s| s.file == file),
+            gb.sheets.iter().find(|s| s.file == file),
+        ) else {
+            continue; // no geometry for this file on a side → leave it to the fallback
+        };
+        let ia: HashMap<&str, &SchElem> =
+            sa.elements.iter().map(|e| (e.uuid.as_str(), e)).collect();
+        let ib: HashMap<&str, &SchElem> =
+            sb.elements.iter().map(|e| (e.uuid.as_str(), e)).collect();
+
+        // Collect changed elements. A-order first (removed / moved / edited), then the
+        // B-only additions — both source lists are already sorted, so this is deterministic.
+        let mut changed: Vec<ChangedElem> = Vec::new();
+        for e in &sa.elements {
+            if suppressed.contains(e.uuid.as_str()) {
+                continue;
+            }
+            match ib.get(e.uuid.as_str()) {
+                None => changed.push(ChangedElem {
+                    uuid: e.uuid.clone(),
+                    kind: e.kind.clone(),
+                    change: ElemChange::Removed,
+                    on_a: true,
+                    on_b: false,
+                    bbox: e.bbox,
+                }),
+                Some(be) => {
+                    let (chg, moved_or_edited) = if e.sig != be.sig {
+                        (ElemChange::Edited, true)
+                    } else if sch_bbox_moved(&e.bbox, &be.bbox) {
+                        (ElemChange::Moved, true)
+                    } else {
+                        (ElemChange::Moved, false)
+                    };
+                    if moved_or_edited {
+                        changed.push(ChangedElem {
+                            uuid: e.uuid.clone(),
+                            kind: e.kind.clone(),
+                            change: chg,
+                            on_a: true,
+                            on_b: true,
+                            bbox: be.bbox, // frame the new position
+                        });
+                    }
+                }
+            }
+        }
+        for e in &sb.elements {
+            if suppressed.contains(e.uuid.as_str()) || ia.contains_key(e.uuid.as_str()) {
+                continue;
+            }
+            changed.push(ChangedElem {
+                uuid: e.uuid.clone(),
+                kind: e.kind.clone(),
+                change: ElemChange::Added,
+                on_a: false,
+                on_b: true,
+                bbox: e.bbox,
+            });
+        }
+        if changed.is_empty() {
+            continue;
+        }
+
+        // Deterministic order for clustering: top-left first, uuid to break ties. bboxes
+        // are µm-rounded, so integer keys give a total order (f64 has none).
+        let key = |v: f64| (v * 1e4) as i64;
+        changed.sort_by(|x, y| {
+            (key(x.bbox[1]), key(x.bbox[0]), &x.uuid).cmp(&(key(y.bbox[1]), key(y.bbox[0]), &y.uuid))
+        });
+
+        // Greedy single-pass clustering: an edit joins the first cluster its box (inflated
+        // by a grid step) overlaps, else opens a new one.
+        let mut clusters: Vec<([f64; 4], Vec<ChangedElem>)> = Vec::new();
+        for el in changed {
+            match clusters.iter_mut().find(|(bx, _)| sch_boxes_close(bx, &el.bbox, SCH_CLUSTER_EPS_MM)) {
+                Some((bx, members)) => {
+                    *bx = sch_box_union(*bx, el.bbox);
+                    members.push(el);
+                }
+                None => clusters.push((el.bbox, vec![el])),
+            }
+        }
+
+        let name = b
+            .indexes
+            .sheets
+            .iter()
+            .find(|s| s.num == sheet_num)
+            .map(|s| s.name.clone())
+            .unwrap_or_else(|| sheet_num.to_string());
+
+        for (_bbox, members) in clusters {
+            let b_uuids: Vec<String> =
+                members.iter().filter(|m| m.on_b).map(|m| m.uuid.clone()).collect();
+            let a_uuids: Vec<String> =
+                members.iter().filter(|m| m.on_a).map(|m| m.uuid.clone()).collect();
+            let side = if b_uuids.is_empty() {
+                Side::A
+            } else if a_uuids.is_empty() {
+                Side::B
+            } else {
+                Side::Both
+            };
+            // Cluster verb: added/removed when uniform, else "edited" if any signature
+            // changed, else "moved".
+            let all = |c: ElemChange| members.iter().all(|m| m.change == c);
+            let (kind, verb) = if all(ElemChange::Added) {
+                (Kind::Added, "added")
+            } else if all(ElemChange::Removed) {
+                (Kind::Removed, "removed")
+            } else if members.iter().any(|m| m.change == ElemChange::Edited) {
+                (Kind::Modified, "edited")
+            } else {
+                (Kind::Moved, "moved")
+            };
+            let noun = sch_cluster_noun(&members);
+            let more = members.len().saturating_sub(1);
+            let detail = if more > 0 {
+                format!("graphical edit on sheet '{name}' ({} elements); no electrical difference detected", members.len())
+            } else {
+                format!("graphical edit on sheet '{name}'; no electrical difference detected")
+            };
+            // Anchor on the side that carries the uuids (B when present, else the A-only
+            // removed set); add the A anchor for a two-sided cluster whose A uuids differ.
+            let primary = if b_uuids.is_empty() { a_uuids.clone() } else { b_uuids.clone() };
+            let mut anchors = Anchors {
+                schematic: Some(SchematicAnchor { sheet: sheet_num, uuids: primary }),
+                schematic_a: None,
+                pcb: None,
+            };
+            if side == Side::Both && a_uuids != b_uuids {
+                anchors.schematic_a = Some(SchematicAnchor { sheet: sheet_num, uuids: a_uuids });
+            }
+            raw.push(Change {
+                id: String::new(),
+                emph_a: None,
+                emph_b: None,
+                group: Group::Sheet,
+                kind,
+                impact: Impact::Cosmetic,
+                title: format!("Sheet '{name}': {noun} {verb}"),
+                detail,
+                anchors,
+                side,
+            });
+        }
     }
 }
 

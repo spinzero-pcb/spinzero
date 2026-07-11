@@ -763,12 +763,18 @@ fn load_diff_bundle(
             .map(Some)?,
         None => None,
     };
+    // Schematic geometry is best-effort: a parse failure (or an older cache without the
+    // artifact) simply leaves the diff engine on its one-row-per-sheet fallback.
+    let sch_geometry = extras
+        .sch_geometry_json
+        .and_then(|text| serde_json::from_str::<diff::SchGeometry>(&text).ok());
     Ok(diff::Bundle {
         rev: rev.id.clone(),
         label,
         indexes,
         sheet_files: extras.sheet_files,
         geometry,
+        sch_geometry,
         pcb_file: pcb_source_file(&rev.source_hashes),
     })
 }

@@ -202,6 +202,9 @@ pub struct DiffBundleExtras {
     pub sheet_files: HashMap<i64, String>,
     /// Raw contents of `pcb/geometry.json`, if the bundle has a board.
     pub geometry_json: Option<String>,
+    /// Raw contents of `schematics/geometry.json` (per-element schematic geometry),
+    /// when the extraction emitted it. `None` for older caches → the diff falls back.
+    pub sch_geometry_json: Option<String>,
 }
 
 /// Load a bundle's diff extras from its cache dir. Best-effort on the geometry (a
@@ -221,15 +224,21 @@ pub fn load_diff_extras(cache: &Path) -> Result<DiffBundleExtras, String> {
         }
     }
 
-    // Geometry path comes from the manifest (same as build_indexes), read raw so the
-    // diff engine can deserialize its own mirror without loading the whole viewer IR.
-    let geometry_json = fs::read_to_string(design_dir.join("design_review_manifest.json"))
+    // Geometry paths come from the manifest (same as build_indexes), read raw so the
+    // diff engine can deserialize its own mirrors without loading the whole viewer IR.
+    let manifest: Option<Value> = fs::read_to_string(design_dir.join("design_review_manifest.json"))
         .ok()
-        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
-        .and_then(|m| m.get("pcb_geometry").and_then(|v| v.as_str()).map(|s| s.to_string()))
-        .and_then(|rel| fs::read_to_string(design_dir.join(rel)).ok());
+        .and_then(|t| serde_json::from_str::<Value>(&t).ok());
+    let read_rel = |key: &str| {
+        manifest
+            .as_ref()
+            .and_then(|m| m.get(key).and_then(|v| v.as_str()).map(|s| s.to_string()))
+            .and_then(|rel| fs::read_to_string(design_dir.join(rel)).ok())
+    };
+    let geometry_json = read_rel("pcb_geometry");
+    let sch_geometry_json = read_rel("schematic_geometry");
 
-    Ok(DiffBundleExtras { sheet_files, geometry_json })
+    Ok(DiffBundleExtras { sheet_files, geometry_json, sch_geometry_json })
 }
 
 /// KiCad design-JSON → viewer payload.
