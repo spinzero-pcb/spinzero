@@ -972,10 +972,24 @@ fn diff_nets(a: &Bundle, b: &Bundle, comps: &CompDelta, out: &mut Vec<Change>) {
         }
     }
     moved.sort();
+    // Reverse rename (B refdes → A refdes) so a moved pin's A-side anchor lands on the
+    // same part under its OLD designator (a re-annotated C69 → C169).
+    let rev_rename: HashMap<&str, &str> =
+        comps.renamed.iter().map(|(x, y)| (y.as_str(), x.as_str())).collect();
     for (term, from, to) in moved {
         let (d, p) = split_terminal(&term);
-        let mut anchors = net_anchors(b, &to);
-        set_schematic_a(&mut anchors, net_anchors(a, &from));
+        // Anchor to the COMPONENT whose pin moved — clicking should focus the pin on its
+        // own symbol (its home sheet), not jump to the from/to net geometry, which lands
+        // on whatever sheet those nets bottom out on (often the root page) (batch 3).
+        let a_d = rev_rename.get(d).copied().unwrap_or(d);
+        let mut anchors = comp_anchors(b, d);
+        set_schematic_a(&mut anchors, comp_anchors(a, a_d));
+        // Fall back to the net landing if the part carries no schematic anchor (unplaced
+        // in design.json), so the change never becomes unclickable.
+        if anchors.schematic.is_none() {
+            anchors = net_anchors(b, &to);
+            set_schematic_a(&mut anchors, net_anchors(a, &from));
+        }
         out.push(Change {
             id: String::new(),
             emph_a: None,

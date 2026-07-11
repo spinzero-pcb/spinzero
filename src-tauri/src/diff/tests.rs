@@ -221,6 +221,32 @@ fn pin_membership_move_between_two_nets() {
     assert_eq!(m.impact, Impact::Electrical);
 }
 
+#[test]
+fn pin_move_anchors_to_component_not_net() {
+    // C1.2 leaves /GND and joins /P5V. C1 is a placed part (sheet 3, svg_id "u_c1"), so
+    // the move must anchor to the COMPONENT's symbol (batch 3): clicking focuses the pin
+    // on C1's home sheet, not the /GND or /P5V net geometry (which would land on whatever
+    // sheet those rails bottom out on, often the root page).
+    let mut a = empty_indexes();
+    a.components.insert("C1".into(), comp_full("100n", "C_0402", "", 3, "u_c1"));
+    a.nets.insert("/GND".into(), net(vec![term("C1", "1"), term("C1", "2")]));
+    a.nets.insert("/P5V".into(), net(vec![term("R1", "1")]));
+    let mut b = empty_indexes();
+    b.components.insert("C1".into(), comp_full("100n", "C_0402", "", 3, "u_c1"));
+    b.nets.insert("/GND".into(), net(vec![term("C1", "1")]));
+    b.nets.insert("/P5V".into(), net(vec![term("R1", "1"), term("C1", "2")]));
+
+    let doc = diff_bundles(&bundle(a), &bundle(b), &no_source_diff());
+    let m = doc
+        .changes
+        .iter()
+        .find(|c| c.title.contains("C1.2") && c.title.contains("moved"))
+        .expect("pin-move change");
+    let sch = m.anchors.schematic.as_ref().expect("schematic anchor");
+    assert_eq!(sch.sheet, 3, "lands on C1's home sheet, not the net's lowest sheet");
+    assert_eq!(sch.uuids, vec!["u_c1".to_string()], "anchors to the component symbol");
+}
+
 // -------------------------------------------------- geometry-backed fixtures
 
 fn geom_with_comp(refdes: &str, x: f64, y: f64, angle: f64, layer: i32) -> Geometry {
