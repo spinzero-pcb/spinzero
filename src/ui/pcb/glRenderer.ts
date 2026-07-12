@@ -155,9 +155,13 @@ export interface RenderOpts {
    *  changed-copper tint (0 = flat diffColor, 1 = the primitive's true layer colour —
    *  the compare's layer-legible mode). Default 0. */
   diffMix?: number;
-  /** Pass-2 fill style: true draws the changed copper with a screen-space checkerboard
-   *  (the REMOVED side's "was here" texture); false/omitted draws solid (added). */
+  /** Pass-2 fill style: true draws the changed copper with a screen-space ±45°
+   *  crosshatch (the REMOVED side's "was here" texture); false/omitted draws solid
+   *  (added). */
   diffHatch?: boolean;
+  /** Pass-2 alpha multiplier (default 1). The added pass draws slightly sheer (<1) so
+   *  the removed crosshatch painted on top stands out against it. */
+  diffAlpha?: number;
   /** Draw drill holes (default true; the changed-only overlay passes skip them). */
   holes?: boolean;
 }
@@ -218,8 +222,8 @@ vec4 hotColor(float net, float comp){
 // flat neutral grey — fully greyed out, not hue-dimmed — so only the changed copper
 // carries colour); 2 = changed-only. Changed copper draws in its TRUE layer colour
 // (uDiffMix = 1) so "which layer" reads instantly on a multi-layer compare; old vs
-// new is a fill-style contrast instead of a hue: the removed (A) pass checkers
-// (uDiffHatch = square size in device px) while the added (B) pass draws solid.
+// new is a fill-style contrast instead of a hue: the removed (A) pass crosshatches
+// (uDiffHatch = period in device px) while the added (B) pass draws solid.
 // The flag attribute encodes WHICH change owns a changed primitive (glDiff.ts:
 // 0 unchanged, 1 orphan, k+2 = change k); uDiffVis gates each code per frame, so
 // hiding/soloing changes never rebuilds the batches. A hidden-changed primitive
@@ -228,22 +232,25 @@ uniform int uDiffPass;
 uniform vec3 uDiffColor;
 uniform vec3 uDiffBase;      // flat grey for the unchanged base (whitish/blackish)
 uniform float uDiffMix;      // pass-2 fraction of the layer colour kept in the tint
-uniform float uDiffHatch;    // pass-2 checker square size in device px (0 = solid fill)
+uniform float uDiffHatch;    // pass-2 crosshatch period in device px (0 = solid fill)
+uniform float uDiffAlpha;    // pass-2 alpha multiplier (added draws slightly sheer)
 uniform sampler2D uDiffVis;  // a > 0.5 at texel [flag] = this change is shown
 vec4 shade(vec3 baseColor, float layerAlpha, float coverage, float net, float comp, float flag){
   bool changed = flag > 0.5 && texelFetch(uDiffVis, ivec2(int(flag + 0.5), 0), 0).a > 0.5;
   if (uDiffPass == 1 && changed) discard;      // base pass: changed prims are the overlay's job
   if (uDiffPass == 2) {
     if (!changed) discard;                     // changed-only pass: everything else skipped
-    float ac = layerAlpha * uObjAlpha * coverage;
+    float ac = layerAlpha * uObjAlpha * coverage * uDiffAlpha;
     if (uDiffHatch > 0.5) {
-      // Removed-side texture: screen-space CHECKERBOARD. (45° stripes were tried and
-      // degenerated into parallel lines on diagonal tracks; a checker reads as texture
-      // at any track angle — thin tracks become dashes, pours become a weave.) The off
-      // squares keep a faint ghost so the shape reads as ONE primitive, and so the
-      // ADDED copper drawn underneath shows through where the two overlap.
-      vec2 cb = floor(gl_FragCoord.xy / uDiffHatch);
-      if (mod(cb.x + cb.y, 2.0) < 0.5) ac *= 0.15;
+      // Removed-side texture: ±45° CROSSHATCH — thin see-through lines cut through
+      // solid copper in both diagonal directions. Reads as a weave at any track angle
+      // (one stripe set may run parallel to a diagonal track, the other still crosses
+      // it), and zoomed out it averages to a uniformly dimmer solid instead of the
+      // blotchy on/off of a checkerboard. The cuts keep a faint ghost so the shape
+      // reads as ONE primitive and the ADDED copper underneath shows through.
+      float d1 = abs(fract((gl_FragCoord.x + gl_FragCoord.y) / uDiffHatch) - 0.5);
+      float d2 = abs(fract((gl_FragCoord.x - gl_FragCoord.y) / uDiffHatch) - 0.5);
+      if (min(d1, d2) < 0.11) ac *= 0.25;
     }
     if (ac < 0.003) discard;
     return vec4(mix(uDiffColor, baseColor, uDiffMix), ac);
@@ -1423,8 +1430,9 @@ export class PcbGlRenderer {
   private diffPass: 0 | 1 | 2 = 0;
   private diffColor: RGB = [1, 0, 0];
   private diffMix = 0;
-  /** Hatch stripe period in device px for the current pass (0 = solid). */
+  /** Crosshatch period in device px for the current pass (0 = solid). */
   private diffHatchPx = 0;
+  private diffAlpha = 1;
 
   private setCommonUniforms(prog: WebGLProgram, objAlpha: number) {
     const gl = this.gl;
@@ -1433,6 +1441,7 @@ export class PcbGlRenderer {
     gl.uniform3f(gl.getUniformLocation(prog, "uDiffBase"), this.diffBase[0], this.diffBase[1], this.diffBase[2]);
     gl.uniform1f(gl.getUniformLocation(prog, "uDiffMix"), this.diffMix);
     gl.uniform1f(gl.getUniformLocation(prog, "uDiffHatch"), this.diffHatchPx);
+    gl.uniform1f(gl.getUniformLocation(prog, "uDiffAlpha"), this.diffAlpha);
     gl.uniform1i(gl.getUniformLocation(prog, "uDiffVis"), 2);
     gl.uniform3fv(gl.getUniformLocation(prog, "uLayerColor"), this.layerColors);
     gl.uniform1fv(gl.getUniformLocation(prog, "uLayerAlpha"), this.layerAlpha);
@@ -1524,9 +1533,10 @@ export class PcbGlRenderer {
     const gl = this.gl;
     this.diffPass = opts?.diffPass ?? 0;
     this.diffMix = opts?.diffMix ?? 0;
-    // ~5 css px checker squares: coarse enough that a thin track reads as dashed,
-    // fine enough that pads/zones read as textured rather than blocky.
-    this.diffHatchPx = opts?.diffHatch ? 5 * this.dpr : 0;
+    // ~7 css px crosshatch period: coarse enough that a thin track reads as dashed,
+    // fine enough that pads/zones read as a weave rather than banding.
+    this.diffHatchPx = opts?.diffHatch ? 7 * this.dpr : 0;
+    this.diffAlpha = opts?.diffAlpha ?? 1;
     if (opts?.diffColor) this.diffColor = opts.diffColor;
     gl.viewport(0, 0, w, h);
     if (opts?.clear !== false) {

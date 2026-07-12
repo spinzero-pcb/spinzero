@@ -48,10 +48,14 @@ const MAX_SCALE = 2000;
 
 /** Diff overlay encoding: colour = LAYER, texture = old vs new. Changed copper keeps
  *  its TRUE layer colour (mix 1.0) so "which layer changed" reads instantly over the
- *  grey base; removed (A) copper is checkered, added (B) is solid (glRenderer
+ *  grey base; removed (A) copper is crosshatched, added (B) is solid (glRenderer
  *  diffHatch). Red/green tints were tried and dropped — per-layer tint blends were
- *  illegible; 45° stripes likewise (they read as parallel lines on diagonal tracks). */
+ *  illegible; 45° single-direction stripes likewise (parallel lines on diagonal
+ *  tracks); a checkerboard likewise (blotchy when zoomed out). */
 const DIFF_LAYER_MIX = 1.0;
+/** Added-copper alpha: slightly sheer so the removed crosshatch painted on top of a
+ *  same-spot restyle (thickened track) stands out against it. */
+const DIFF_ADDED_ALPHA = 0.75;
 
 /** Draw one net-label row: the plain `text` centred at (0, cy) plus a KiCad-style
  *  overline over each `~{…}` run (feedback: nets like `~{project_rst}`). ctx.font /
@@ -325,9 +329,9 @@ export function PcbGlView({ visible }: { visible: boolean }) {
     flagsA: DiffFlags;
     flagsB: DiffFlags;
   } | null>(null);
-  /** Memoised focused-change extent (world mm), keyed by change id + the diff-data
-   *  object identity so it recomputes when the flags rebuild. */
-  const extentMemo = useRef<{ id: string; data: object; box: BBox | null } | null>(null);
+  /** Memoised per-change extents (world mm), keyed by change id; dropped whole when
+   *  the diff-data object identity changes (flags rebuilt). */
+  const extentMemo = useRef<{ data: object; boxes: Map<string, BBox | null> } | null>(null);
   const [diffEpoch, setDiffEpoch] = useState(0);
   const diffOnRef = useRef(false);
   diffOnRef.current = diffActive;
@@ -490,8 +494,13 @@ export function PcbGlView({ visible }: { visible: boolean }) {
   const extentForChange = (id: string): BBox | null => {
     const data = diffDataRef.current;
     if (!data) return null;
-    const m = extentMemo.current;
-    if (m && m.id === id && m.data === data) return m.box;
+    let m = extentMemo.current;
+    if (!m || m.data !== data) {
+      m = { data, boxes: new Map() };
+      extentMemo.current = m;
+    }
+    const cached = m.boxes.get(id);
+    if (cached !== undefined) return cached;
     const doc = useDiffStore.getState().doc;
     const k = doc?.changes.findIndex((c) => c.id === id) ?? -1;
     let box: BBox | null = null;
@@ -502,7 +511,7 @@ export function PcbGlView({ visible }: { visible: boolean }) {
         changeExtent(data.geomB, data.flagsB, code),
       );
     }
-    extentMemo.current = { id, data, box };
+    m.boxes.set(id, box);
     return box;
   };
 
@@ -936,34 +945,52 @@ export function PcbGlView({ visible }: { visible: boolean }) {
           vectors++;
         }
       }
-      const chg = d.doc?.changes.find((cc) => cc.id === d.focusedChangeId);
-      const pcbA = chg?.anchors.pcb;
-      if (chg && pcbA) {
-        // Frame rect: the change's OWN extent (just the changed primitives — a rerouted
-        // stretch, not the whole net); until the flags land, the anchor's bbox, else
-        // the comp/net extent on B.
-        let fb: BBox | null = extentForChange(chg.id);
-        if (!fb) {
-          if (pcbA.bbox) {
-            const [bx, by, bw, bh] = pcbA.bbox;
-            fb = { minx: bx, miny: by, maxx: bx + bw, maxy: by + bh };
-          } else if (pcbA.comp) fb = r.compBBox(pcbA.comp);
-          else if (pcbA.net) fb = r.netBBox(pcbA.net);
-        }
-        if (fb) {
+      // Accent frames: the focused change pulses; while a shift-click subset is active,
+      // every OTHER visible change gets a steady frame too, so everything selected is
+      // findable at a glance (feedback: "whatever is selected needs the blue box").
+      if (d.doc) {
+        const subsetActive = d.hiddenChangeIds.size > 0;
+        let framed = 0;
+        for (const chg of d.doc.changes) {
+          if (framed >= 40) break; // cap: a huge subset can't stall the frame
+          const pcbA = chg.anchors.pcb;
+          if (!pcbA || d.hiddenChangeIds.has(chg.id)) continue;
+          const isFocused = chg.id === d.focusedChangeId;
+          if (!isFocused && !subsetActive) continue; // overview: only the focused frames
+          // Frame rect: the change's OWN extent (just the changed primitives — a
+          // rerouted stretch, not the whole net); until the flags land, the anchor's
+          // bbox, else the comp/net extent on B.
+          let fb: BBox | null = extentForChange(chg.id);
+          if (!fb) {
+            if (pcbA.bbox) {
+              const [bx, by, bw, bh] = pcbA.bbox;
+              fb = { minx: bx, miny: by, maxx: bx + bw, maxy: by + bh };
+            } else if (pcbA.comp) fb = r.compBBox(pcbA.comp);
+            else if (pcbA.net) fb = r.netBBox(pcbA.net);
+          }
+          if (!fb) continue;
           const pad = 6; // screen-px breathing room so the frame never sits on the copper
+          const fx = sxOf(fb.minx) - pad;
+          const fy = syOf(fb.miny) - pad;
+          const fw = (fb.maxx - fb.minx) * scale + 2 * pad;
+          const fh = (fb.maxy - fb.miny) * scale + 2 * pad;
           ctx.save();
-          ctx.globalAlpha = 0.45 + 0.35 * Math.sin(performance.now() / 250);
+          // Faint fill so the whole selected region reads highlighted, not just an edge.
+          ctx.globalAlpha = 0.08;
+          ctx.fillStyle = accent;
+          ctx.fillRect(fx, fy, fw, fh);
+          if (isFocused) {
+            ctx.globalAlpha = 0.45 + 0.35 * Math.sin(performance.now() / 250);
+            ctx.lineWidth = 2;
+            diffPulse.current = true; // keep the rAF loop ticking for the pulse
+          } else {
+            ctx.globalAlpha = 0.55;
+            ctx.lineWidth = 1.5;
+          }
           ctx.strokeStyle = accent;
-          ctx.lineWidth = 2;
-          ctx.strokeRect(
-            sxOf(fb.minx) - pad,
-            syOf(fb.miny) - pad,
-            (fb.maxx - fb.minx) * scale + 2 * pad,
-            (fb.maxy - fb.miny) * scale + 2 * pad,
-          );
+          ctx.strokeRect(fx, fy, fw, fh);
           ctx.restore();
-          diffPulse.current = true;
+          framed++;
         }
       }
     }
@@ -1320,16 +1347,16 @@ export function PcbGlView({ visible }: { visible: boolean }) {
               ? { objects: { ...base.objects, zones: false }, opacity: base.opacity }
               : base;
             // Overlay: the unchanged common base as flat grey (from B), then the changed
-            // copper in its TRUE layer colour — B's added copper solid FIRST, A's removed
-            // copper checkered ON TOP (colour = layer, texture = old/new; DIFF_LAYER_MIX).
-            // Removed paints last because a same-spot restyle (e.g. a thickened track)
-            // otherwise buries the old copper under the new; the checker's ghost squares
-            // let the added copper show through where the two overlap. With blink on,
-            // removed and added alternate phases instead.
+            // copper in its TRUE layer colour — B's added copper solid-but-sheer FIRST,
+            // A's removed copper crosshatched ON TOP (colour = layer, texture = old/new;
+            // DIFF_LAYER_MIX). Removed paints last because a same-spot restyle (e.g. a
+            // thickened track) otherwise buries the old copper under the new; the sheer
+            // added pass + the crosshatch cuts keep both readable where they overlap.
+            // With blink on, removed and added alternate phases instead.
             r.render(cam.current, w, h, obj, { diffPass: 1 });
             const blinkOn = blinkRef.current;
             if (!blinkOn || !blinkA.current)
-              r.render(cam.current, w, h, obj, { clear: false, diffPass: 2, diffMix: DIFF_LAYER_MIX });
+              r.render(cam.current, w, h, obj, { clear: false, diffPass: 2, diffMix: DIFF_LAYER_MIX, diffAlpha: DIFF_ADDED_ALPHA });
             if (!blinkOn || blinkA.current)
               rA.render(cam.current, w, h, obj, { clear: false, diffPass: 2, diffMix: DIFF_LAYER_MIX, diffHatch: true });
           } else {
