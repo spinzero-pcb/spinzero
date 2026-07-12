@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { buildDiffVisibility, computeDiffFlags, DIFF_ORPHAN, DIFF_OWNED_BASE } from "./glDiff";
+import {
+  buildDiffVisibility,
+  changeExtent,
+  computeDiffFlags,
+  DIFF_ORPHAN,
+  DIFF_OWNED_BASE,
+  unionExtent,
+} from "./glDiff";
 import type { PcbGeometry } from "../../lib/pcbGeometry";
 import type { Change } from "../../lib/diff";
 
@@ -162,5 +169,45 @@ describe("buildDiffVisibility", () => {
     expect(vis[DIFF_ORPHAN]).toBe(0); // soloing must also drop sub-threshold noise
     expect(vis[DIFF_OWNED_BASE]).toBe(1);
     expect(vis[DIFF_OWNED_BASE + 1]).toBe(0);
+  });
+});
+
+describe("changeExtent", () => {
+  it("covers ONLY the change's owned primitives, width-inflated — not the whole net", () => {
+    const b = board();
+    // Rerouted stretch: the F.Cu /VBUS segment moved; the via + pad on the same net
+    // are untouched and must not stretch the extent.
+    b.tracks.seg = { xy: [2, 1, 6, 1], w: [0.5], layer: [0], net: [1] };
+    const changes = [
+      change({ id: "ch_0000", group: "routing", anchors: { pcb: { layers: ["F.Cu"], net: "/VBUS" } } }),
+    ];
+    const f = computeDiffFlags(board(), b, changes);
+    const ext = changeExtent(b, f.b, DIFF_OWNED_BASE);
+    expect(ext).toEqual({ minx: 1.75, miny: 0.75, maxx: 6.25, maxy: 1.25 });
+  });
+
+  it("returns null when the change owns nothing on this side", () => {
+    const f = computeDiffFlags(board(), board(), [change({ id: "ch_0000", group: "routing" })]);
+    expect(changeExtent(board(), f.a, DIFF_OWNED_BASE)).toBeNull();
+  });
+
+  it("pads inflate by the rotation-safe half-diagonal; unionExtent merges sides", () => {
+    const b = board();
+    b.components = [{ ...b.components[0], x: 8 }];
+    b.pads = [{ ...b.pads[0], x: 8 }];
+    const changes = [
+      change({ id: "ch_0000", group: "placement", kind: "moved", anchors: { pcb: { comp: "R1" } } }),
+    ];
+    const f = computeDiffFlags(board(), b, changes);
+    const extA = changeExtent(board(), f.a, DIFF_OWNED_BASE); // pad at old x=5
+    const extB = changeExtent(b, f.b, DIFF_OWNED_BASE); // pad at new x=8
+    const half = Math.hypot(1, 0.5) / 2;
+    expect(extA?.minx).toBeCloseTo(5 - half);
+    expect(extB?.maxx).toBeCloseTo(8 + half);
+    const both = unionExtent(extA, extB);
+    expect(both?.minx).toBeCloseTo(5 - half); // old + new spot both framed
+    expect(both?.maxx).toBeCloseTo(8 + half);
+    expect(unionExtent(extA, null)).toEqual(extA);
+    expect(unionExtent(null, null)).toBeNull();
   });
 });

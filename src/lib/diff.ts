@@ -3,10 +3,8 @@
 // (same discipline as design.ts ↔ design.rs): a rename on either side must be paired.
 //
 // The document is emitted by the pure Rust engine; the frontend only renders and
-// steps it. The small pure helpers below (grouping / ordering / filtering, and the
-// bbox→anchor adapter) are unit-tested in diff.test.ts.
-
-import type { CommentAnchor } from "./types";
+// steps it. The small pure helpers below (grouping / ordering / filtering / layer
+// union) are unit-tested in diff.test.ts.
 
 // ----------------------------------------------------------------- the diff document
 
@@ -209,21 +207,6 @@ export function hasSchematicAnchor(c: Change): boolean {
 /** Does a change land on the PCB canvas? */
 export function hasPcbAnchor(c: Change): boolean {
   return !!c.anchors.pcb;
-}
-
-/** Adapt a change's PCB anchor to a `CommentAnchor` that `pcbNav.reveal` understands
- *  (§7): prefer a net, else a component, else the bbox centre as a region so the
- *  camera still lands. Returns null when the change has no PCB anchor. Pure. */
-export function pcbAnchorToCommentAnchor(c: Change): CommentAnchor | null {
-  const pcb = c.anchors.pcb;
-  if (!pcb) return null;
-  if (pcb.net) return { type: "net", ref: pcb.net };
-  if (pcb.comp) return { type: "component", ref: pcb.comp };
-  if (pcb.bbox) {
-    const [x, y, w, h] = pcb.bbox;
-    return { type: "region", ref: c.id, rect: { x, y, w, h } };
-  }
-  return null;
 }
 
 /** The union of PCB layers the changes land on — the "relevant layers" the diff view

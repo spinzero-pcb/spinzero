@@ -185,9 +185,21 @@ export interface PcbNavigator {
   setComments: (comments: ChipComment[]) => void;
   /** Item 8: center on a comment's anchored object without selecting it. */
   reveal: (anchor: CommentAnchor) => void;
+  /** Visual diff: land the camera on a focused change's TRUE extent — the union bbox
+   *  of the primitives that change owns on both revisions (a rerouted stretch, not the
+   *  whole net) — falling back to the anchor bbox/comp/net when the flags aren't ready.
+   *  Never un-hides layers: diff focus owns layer isolation (unlike `reveal`, whose
+   *  net path shows every layer the net touches). */
+  revealChange: (change: Change) => void;
 }
 
-export const pcbNav: PcbNavigator = { fit: noop, zoomBy: noop, setComments: noop, reveal: noop };
+export const pcbNav: PcbNavigator = {
+  fit: noop,
+  zoomBy: noop,
+  setComments: noop,
+  reveal: noop,
+  revealChange: noop,
+};
 
 /** Measure-tool bridge: PcbGlView owns the ephemeral measurement (in refs), the app
  *  keymap drives Esc / Ctrl+C / Space. `escape` clears an in-progress measurement,

@@ -2,7 +2,6 @@ import { create } from "zustand";
 import { ipc } from "../lib/ipc";
 import {
   orderedChanges,
-  pcbAnchorToCommentAnchor,
   pcbLayerUnion,
   type DiffDoc,
   type DiffSide,
@@ -283,13 +282,12 @@ export const useDiffStore = create<DiffState>((set, get) => ({
     } else if (pcb) {
       useViewStore.getState().setView("pcb");
       diffPaint.clearA(); // no schematic side to show
-      const anchor = pcbAnchorToCommentAnchor(change);
-      if (anchor) {
-        // Isolate the layer(s) this change lives on: make it active and hide every other
-        // layer, so the compare shows just that layer's copper (red/green over grey).
-        isolateLayer(pcb.layers);
-        pcbNav.reveal(anchor);
-      }
+      // Isolate the layer(s) this change lives on: make it active and hide every other
+      // layer, so the compare shows just that layer's copper over grey. revealChange
+      // (unlike pcbNav.reveal's net path) never un-hides layers, so the isolation
+      // sticks — and it frames the change's OWN extent, not the whole net.
+      isolateLayer(pcb.layers);
+      pcbNav.revealChange(change);
     }
   },
 

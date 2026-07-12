@@ -16,7 +16,8 @@ import { IconClose, IconComment, IconCopy, IconFit, IconRuler, IconSheet, IconTr
 import type { CommentAnchor } from "../../lib/types";
 import type { PcbGeometry, PcbTextDef } from "../../lib/pcbGeometry";
 import { PcbGlRenderer, netLabelRows, type BBox, type Camera, type DiffFlags, type ObjectState } from "./glRenderer";
-import { buildDiffVisibility, computeDiffFlags } from "./glDiff";
+import { buildDiffVisibility, changeExtent, computeDiffFlags, DIFF_OWNED_BASE, unionExtent } from "./glDiff";
+import type { Change } from "../../lib/diff";
 import { isTypingTarget } from "../../lib/keymap";
 import { useDiffStore } from "../../stores/diffStore";
 import { resolveCssColor } from "./glColor";
@@ -317,7 +318,15 @@ export function PcbGlView({ visible }: { visible: boolean }) {
   const rendererARef = useRef<PcbGlRenderer | null>(null);
   /** Prepared diff inputs (A geometry + both sides' changed flags); renderers rebuild
    *  with the flags baked in when this lands (diffEpoch bump re-runs the create effect). */
-  const diffDataRef = useRef<{ geomA: PcbGeometry; flagsA: DiffFlags; flagsB: DiffFlags } | null>(null);
+  const diffDataRef = useRef<{
+    geomA: PcbGeometry;
+    geomB: PcbGeometry;
+    flagsA: DiffFlags;
+    flagsB: DiffFlags;
+  } | null>(null);
+  /** Memoised focused-change extent (world mm), keyed by change id + the diff-data
+   *  object identity so it recomputes when the flags rebuild. */
+  const extentMemo = useRef<{ id: string; data: object; box: BBox | null } | null>(null);
   const [diffEpoch, setDiffEpoch] = useState(0);
   const diffOnRef = useRef(false);
   diffOnRef.current = diffActive;
@@ -469,6 +478,48 @@ export function PcbGlView({ visible }: { visible: boolean }) {
       b = r.netBBox(anchor.ref);
     } else {
       b = r.compBBox(anchor.ref);
+    }
+    if (b) applyReveal(b);
+  };
+
+  /** The focused change's TRUE extent: the union bbox of the primitives that change
+   *  owns on BOTH revisions (glDiff flags), so the camera/pulse-frame covers exactly
+   *  the rerouted stretch / moved footprint's old+new spot — not the whole net.
+   *  Null until the async diff flags land (callers fall back to the anchor). */
+  const extentForChange = (id: string): BBox | null => {
+    const data = diffDataRef.current;
+    if (!data) return null;
+    const m = extentMemo.current;
+    if (m && m.id === id && m.data === data) return m.box;
+    const doc = useDiffStore.getState().doc;
+    const k = doc?.changes.findIndex((c) => c.id === id) ?? -1;
+    let box: BBox | null = null;
+    if (k >= 0) {
+      const code = k + DIFF_OWNED_BASE;
+      box = unionExtent(
+        changeExtent(data.geomA, data.flagsA, code),
+        changeExtent(data.geomB, data.flagsB, code),
+      );
+    }
+    extentMemo.current = { id, data, box };
+    return box;
+  };
+
+  /** Land the camera on a focused change (diff mode). Prefers the change's own extent;
+   *  falls back to the anchor's bbox/comp/net until the flags land. Deliberately does
+   *  NOT un-hide layers (unlike revealAnchor's net path) — focusChange just isolated
+   *  the changed layer, and this must not undo that. */
+  const revealChange = (change: Change) => {
+    const r = rendererRef.current;
+    if (!r) return;
+    let b = extentForChange(change.id);
+    const pcb = change.anchors.pcb;
+    if (!b && pcb) {
+      if (pcb.bbox) {
+        const [x, y, w, h] = pcb.bbox;
+        b = { minx: x, miny: y, maxx: x + w, maxy: y + h };
+      } else if (pcb.comp) b = r.compBBox(pcb.comp);
+      else if (pcb.net) b = r.netBBox(pcb.net);
     }
     if (b) applyReveal(b);
   };
@@ -887,13 +938,17 @@ export function PcbGlView({ visible }: { visible: boolean }) {
       const chg = d.doc?.changes.find((cc) => cc.id === d.focusedChangeId);
       const pcbA = chg?.anchors.pcb;
       if (chg && pcbA) {
-        // Frame rect: the anchor's own bbox, else the comp/net extent on B.
-        let fb: BBox | null = null;
-        if (pcbA.bbox) {
-          const [bx, by, bw, bh] = pcbA.bbox;
-          fb = { minx: bx, miny: by, maxx: bx + bw, maxy: by + bh };
-        } else if (pcbA.comp) fb = r.compBBox(pcbA.comp);
-        else if (pcbA.net) fb = r.netBBox(pcbA.net);
+        // Frame rect: the change's OWN extent (just the changed primitives — a rerouted
+        // stretch, not the whole net); until the flags land, the anchor's bbox, else
+        // the comp/net extent on B.
+        let fb: BBox | null = extentForChange(chg.id);
+        if (!fb) {
+          if (pcbA.bbox) {
+            const [bx, by, bw, bh] = pcbA.bbox;
+            fb = { minx: bx, miny: by, maxx: bx + bw, maxy: by + bh };
+          } else if (pcbA.comp) fb = r.compBBox(pcbA.comp);
+          else if (pcbA.net) fb = r.netBBox(pcbA.net);
+        }
         if (fb) {
           const pad = 6; // screen-px breathing room so the frame never sits on the copper
           ctx.save();
@@ -956,8 +1011,13 @@ export function PcbGlView({ visible }: { visible: boolean }) {
       // and gates zone tinting on a real zone row (refill jitter stays grey).
       const changes = useDiffStore.getState().doc?.changes ?? [];
       const flags = computeDiffFlags(geomA, geomB, changes);
-      diffDataRef.current = { geomA, flagsA: flags.a, flagsB: flags.b };
+      diffDataRef.current = { geomA, geomB, flagsA: flags.a, flagsB: flags.b };
       setDiffEpoch((e) => e + 1);
+      // A change focused before the flags landed was framed on its coarse anchor
+      // (whole net / comp): re-land the camera on the true extent now known.
+      const d = useDiffStore.getState();
+      const focused = d.doc?.changes.find((c) => c.id === d.focusedChangeId);
+      if (focused?.anchors.pcb) revealChange(focused);
     })();
     return () => {
       cancelled = true;
@@ -1170,6 +1230,7 @@ export function PcbGlView({ visible }: { visible: boolean }) {
       renderPcbCommentChips();
     };
     pcbNav.reveal = (anchor) => revealAnchor(anchor);
+    pcbNav.revealChange = (change) => revealChange(change);
     // Esc while measuring: clear an in-progress measurement (report whether we did, so
     // the app keymap only exits the mode when there was nothing to clear).
     measureNav.escape = () => {
@@ -1203,6 +1264,7 @@ export function PcbGlView({ visible }: { visible: boolean }) {
       pcbNav.zoomBy = () => {};
       pcbNav.setComments = () => {};
       pcbNav.reveal = () => {};
+      pcbNav.revealChange = () => {};
       measureNav.escape = () => false;
       measureNav.clear = () => {};
       measureNav.copy = () => false;

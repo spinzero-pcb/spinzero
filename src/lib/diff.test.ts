@@ -2,7 +2,6 @@ import {
   filterChanges,
   groupChanges,
   orderedChanges,
-  pcbAnchorToCommentAnchor,
   pcbLayerUnion,
   tintRole,
   tintsA,
@@ -132,29 +131,6 @@ describe("diff helpers", () => {
       const c = ch({ id: "x", group: "component", kind: "modified", side: "both" });
       expect(tintsA(c)).toBe(true);
       expect(tintsB(c)).toBe(true);
-    });
-  });
-
-  describe("pcbAnchorToCommentAnchor", () => {
-    it("prefers a net anchor", () => {
-      const c = ch({ id: "x", group: "routing", kind: "added", anchors: { pcb: { net: "/GND", comp: "U1", bbox: [1, 2, 3, 4] } } });
-      expect(pcbAnchorToCommentAnchor(c)).toEqual({ type: "net", ref: "/GND" });
-    });
-    it("falls back to a component anchor", () => {
-      const c = ch({ id: "x", group: "placement", kind: "moved", anchors: { pcb: { comp: "R7", bbox: [1, 2, 3, 4] } } });
-      expect(pcbAnchorToCommentAnchor(c)).toEqual({ type: "component", ref: "R7" });
-    });
-    it("falls back to a bbox region anchor", () => {
-      const c = ch({ id: "ch7", group: "outline", kind: "modified", anchors: { pcb: { bbox: [10, 20, 5, 6] } } });
-      expect(pcbAnchorToCommentAnchor(c)).toEqual({
-        type: "region",
-        ref: "ch7",
-        rect: { x: 10, y: 20, w: 5, h: 6 },
-      });
-    });
-    it("returns null when there is no PCB anchor", () => {
-      const c = ch({ id: "x", group: "net", kind: "added", anchors: { schematic: { sheet: 1, uuids: [] } } });
-      expect(pcbAnchorToCommentAnchor(c)).toBeNull();
     });
   });
 

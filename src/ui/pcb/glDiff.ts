@@ -30,7 +30,7 @@
 
 import type { PcbGeometry } from "../../lib/pcbGeometry";
 import type { Change } from "../../lib/diff";
-import type { DiffFlags } from "./glRenderer";
+import type { BBox, DiffFlags } from "./glRenderer";
 
 /** Flag value for a changed primitive no semantic change row owns. */
 export const DIFF_ORPHAN = 1;
@@ -242,4 +242,80 @@ export function buildDiffVisibility(changes: Change[], hidden: ReadonlySet<strin
     vis[i + DIFF_OWNED_BASE] = hidden.has(c.id) ? 0 : 1;
   });
   return vis;
+}
+
+/** The world-mm extent of ONE change's owned primitives on one side (flag == `code`,
+ *  i.e. changes[code - DIFF_OWNED_BASE]) — the box the camera/pulse-frame should land
+ *  on. Unlike the anchor's net/comp bbox this covers only the copper that actually
+ *  changed (a rerouted segment, not the whole net). Widths/radii inflate the box;
+ *  pads use the rotation-safe half-diagonal. Null when the change owns nothing here. */
+export function changeExtent(g: PcbGeometry, flags: DiffFlags, code: number): BBox | null {
+  let minx = Infinity;
+  let miny = Infinity;
+  let maxx = -Infinity;
+  let maxy = -Infinity;
+  const pt = (x: number, y: number, r: number) => {
+    if (x - r < minx) minx = x - r;
+    if (y - r < miny) miny = y - r;
+    if (x + r > maxx) maxx = x + r;
+    if (y + r > maxy) maxy = y + r;
+  };
+
+  const seg = g.tracks.seg;
+  for (let i = 0; i < flags.seg.length; i++) {
+    if (flags.seg[i] !== code) continue;
+    const o = i * 4;
+    const hw = seg.w[i] / 2;
+    pt(seg.xy[o], seg.xy[o + 1], hw);
+    pt(seg.xy[o + 2], seg.xy[o + 3], hw);
+  }
+  const arc = g.tracks.arc;
+  for (let i = 0; i < flags.arc.length; i++) {
+    if (flags.arc[i] !== code) continue;
+    const o = i * 6;
+    const hw = arc.w[i] / 2;
+    // start/mid/end under-cover the bulge slightly; fine for a camera frame.
+    pt(arc.xy[o], arc.xy[o + 1], hw);
+    pt(arc.xy[o + 2], arc.xy[o + 3], hw);
+    pt(arc.xy[o + 4], arc.xy[o + 5], hw);
+  }
+  for (let i = 0; i < flags.vias.length; i++) {
+    if (flags.vias[i] !== code) continue;
+    const v = g.vias[i];
+    pt(v.x, v.y, v.size / 2);
+  }
+  for (let i = 0; i < flags.pads.length; i++) {
+    if (flags.pads[i] !== code) continue;
+    const p = g.pads[i];
+    pt(p.x, p.y, Math.hypot(p.w, p.h) / 2);
+  }
+  for (let i = 0; i < flags.zones.length; i++) {
+    if (flags.zones[i] !== code) continue;
+    const pts = g.zones[i].pts;
+    for (let j = 0; j + 1 < pts.length; j += 2) pt(pts[j], pts[j + 1], 0);
+  }
+  for (let i = 0; i < flags.graphics.length; i++) {
+    if (flags.graphics[i] !== code) continue;
+    const gr = g.graphics[i];
+    const hw = gr.width / 2;
+    if (gr.kind === "circle") {
+      pt(gr.data[0], gr.data[1], gr.data[2] + hw);
+    } else {
+      // seg [x1,y1,x2,y2], arc [s,m,e], poly [x,y,…] — all plain coordinate pairs.
+      for (let j = 0; j + 1 < gr.data.length; j += 2) pt(gr.data[j], gr.data[j + 1], hw);
+    }
+  }
+  return Number.isFinite(minx) ? { minx, miny, maxx, maxy } : null;
+}
+
+/** Union of two optional extents (either side of a change may own nothing). */
+export function unionExtent(a: BBox | null, b: BBox | null): BBox | null {
+  if (!a) return b;
+  if (!b) return a;
+  return {
+    minx: Math.min(a.minx, b.minx),
+    miny: Math.min(a.miny, b.miny),
+    maxx: Math.max(a.maxx, b.maxx),
+    maxy: Math.max(a.maxy, b.maxy),
+  };
 }
