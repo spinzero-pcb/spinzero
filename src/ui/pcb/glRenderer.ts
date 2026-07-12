@@ -155,7 +155,7 @@ export interface RenderOpts {
    *  changed-copper tint (0 = flat diffColor, 1 = the primitive's true layer colour —
    *  the compare's layer-legible mode). Default 0. */
   diffMix?: number;
-  /** Pass-2 fill style: true draws the changed copper with a 45° screen-space hatch
+  /** Pass-2 fill style: true draws the changed copper with a screen-space checkerboard
    *  (the REMOVED side's "was here" texture); false/omitted draws solid (added). */
   diffHatch?: boolean;
   /** Draw drill holes (default true; the changed-only overlay passes skip them). */
@@ -218,8 +218,8 @@ vec4 hotColor(float net, float comp){
 // flat neutral grey — fully greyed out, not hue-dimmed — so only the changed copper
 // carries colour); 2 = changed-only. Changed copper draws in its TRUE layer colour
 // (uDiffMix = 1) so "which layer" reads instantly on a multi-layer compare; old vs
-// new is a fill-style contrast instead of a hue: the removed (A) pass hatches
-// (uDiffHatch = stripe period in device px) while the added (B) pass draws solid.
+// new is a fill-style contrast instead of a hue: the removed (A) pass checkers
+// (uDiffHatch = square size in device px) while the added (B) pass draws solid.
 // The flag attribute encodes WHICH change owns a changed primitive (glDiff.ts:
 // 0 unchanged, 1 orphan, k+2 = change k); uDiffVis gates each code per frame, so
 // hiding/soloing changes never rebuilds the batches. A hidden-changed primitive
@@ -228,7 +228,7 @@ uniform int uDiffPass;
 uniform vec3 uDiffColor;
 uniform vec3 uDiffBase;      // flat grey for the unchanged base (whitish/blackish)
 uniform float uDiffMix;      // pass-2 fraction of the layer colour kept in the tint
-uniform float uDiffHatch;    // pass-2 hatch period in device px (0 = solid fill)
+uniform float uDiffHatch;    // pass-2 checker square size in device px (0 = solid fill)
 uniform sampler2D uDiffVis;  // a > 0.5 at texel [flag] = this change is shown
 vec4 shade(vec3 baseColor, float layerAlpha, float coverage, float net, float comp, float flag){
   bool changed = flag > 0.5 && texelFetch(uDiffVis, ivec2(int(flag + 0.5), 0), 0).a > 0.5;
@@ -237,12 +237,13 @@ vec4 shade(vec3 baseColor, float layerAlpha, float coverage, float net, float co
     if (!changed) discard;                     // changed-only pass: everything else skipped
     float ac = layerAlpha * uObjAlpha * coverage;
     if (uDiffHatch > 0.5) {
-      // Removed-side texture: 45° screen-space stripes. The gaps keep a faint ghost
-      // (not 0) so a hatched shape still reads as ONE primitive, and the stripe edge
-      // is feathered by one device px so panning doesn't shimmer.
-      float t = fract((gl_FragCoord.x + gl_FragCoord.y) / uDiffHatch);
-      float px = 1.0 / uDiffHatch;
-      ac *= mix(0.22, 1.0, smoothstep(0.5 - px, 0.5 + px, abs(t - 0.5) * 2.0));
+      // Removed-side texture: screen-space CHECKERBOARD. (45° stripes were tried and
+      // degenerated into parallel lines on diagonal tracks; a checker reads as texture
+      // at any track angle — thin tracks become dashes, pours become a weave.) The off
+      // squares keep a faint ghost so the shape reads as ONE primitive, and so the
+      // ADDED copper drawn underneath shows through where the two overlap.
+      vec2 cb = floor(gl_FragCoord.xy / uDiffHatch);
+      if (mod(cb.x + cb.y, 2.0) < 0.5) ac *= 0.15;
     }
     if (ac < 0.003) discard;
     return vec4(mix(uDiffColor, baseColor, uDiffMix), ac);
@@ -1523,9 +1524,9 @@ export class PcbGlRenderer {
     const gl = this.gl;
     this.diffPass = opts?.diffPass ?? 0;
     this.diffMix = opts?.diffMix ?? 0;
-    // ~8 css px per stripe: coarse enough that a hatched thin track reads as dashed,
-    // fine enough that pads/zones read as textured rather than banded.
-    this.diffHatchPx = opts?.diffHatch ? 8 * this.dpr : 0;
+    // ~5 css px checker squares: coarse enough that a thin track reads as dashed,
+    // fine enough that pads/zones read as textured rather than blocky.
+    this.diffHatchPx = opts?.diffHatch ? 5 * this.dpr : 0;
     if (opts?.diffColor) this.diffColor = opts.diffColor;
     gl.viewport(0, 0, w, h);
     if (opts?.clear !== false) {

@@ -2,6 +2,7 @@ import { mockIPC, clearMocks } from "@tauri-apps/api/mocks";
 import { useDiffStore, normalizeOrder } from "./diffStore";
 import { useProjectStore } from "./projectStore";
 import { useViewStore } from "./viewStore";
+import { usePcbViewStore } from "./pcbViewStore";
 import type { DiffDoc } from "../lib/diff";
 import type { ExtractionMeta } from "../lib/types";
 
@@ -29,7 +30,7 @@ const DOC: DiffDoc = {
   a: { rev: "rA", label: "older" },
   b: { rev: "rB", label: "newer" },
   changes: [
-    { id: "ch_0", group: "component", kind: "modified", impact: "electrical", title: "C14 100n → 1µ", anchors: { schematic: { sheet: 2, uuids: ["u1"] } }, side: "both" },
+    { id: "ch_0", group: "component", kind: "modified", impact: "electrical", title: "C14 100n → 1µ", anchors: { schematic: { sheet: 2, uuids: ["u1"] }, pcb: { comp: "C14", layers: ["F.Cu"] } }, side: "both" },
     { id: "ch_1", group: "routing", kind: "added", impact: "electrical", title: "/VBUS rerouted", anchors: { pcb: { net: "/VBUS", layers: ["In2.Cu"] } }, side: "b" },
     { id: "ch_2", group: "component", kind: "removed", impact: "electrical", title: "R7 removed", anchors: { schematic: { sheet: 1, uuids: ["u2"] } }, side: "a" },
   ],
@@ -186,6 +187,31 @@ describe("diffStore enter/exit/step/seen", () => {
     expect(useDiffStore.getState().hiddenChangeIds).toEqual(new Set(["ch_2"]));
     useDiffStore.getState().showAllChanges();
     expect(useDiffStore.getState().hiddenChangeIds.size).toBe(0);
+  });
+
+  it("shift-click composing expands the layer view to the visible subset", async () => {
+    mockIPC((cmd) => {
+      if (cmd === "prepare_diff")
+        return { doc: DOC, path: "p", cache_key_a: "keyA", cache_key_b: "keyB", label_a: "older", label_b: "newer" };
+      throw new Error(cmd);
+    });
+    usePcbViewStore.setState({
+      known: ["F.Cu", "In2.Cu", "B.Cu", "Edge.Cuts"],
+      hidden: new Set(),
+      active: null,
+    });
+    await useDiffStore.getState().enterDiff("rA", "rB");
+    // Focusing isolates the change's own layer…
+    useDiffStore.getState().focusChange("ch_1"); // routing on In2.Cu
+    expect(usePcbViewStore.getState().hidden).toEqual(new Set(["F.Cu", "B.Cu", "Edge.Cuts"]));
+    // …and shift-clicking in a change on ANOTHER layer must reveal that layer too,
+    // or the GPU mask shows it into a hidden layer and nothing appears.
+    useDiffStore.getState().toggleChangeHidden("ch_0"); // component on F.Cu
+    const pv = usePcbViewStore.getState();
+    expect(pv.hidden.has("F.Cu")).toBe(false);
+    expect(pv.hidden.has("In2.Cu")).toBe(false);
+    expect(pv.hidden.has("B.Cu")).toBe(true); // no visible change lives there
+    expect(pv.hidden.has("Edge.Cuts")).toBe(false); // outline context rides along
   });
 
   it("focusChange on a PCB-anchored change switches to the PCB view", async () => {

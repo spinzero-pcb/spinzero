@@ -45,7 +45,7 @@ export function DiffBanner() {
       {view === "pcb" && (
         <span
           className="diff-legend"
-          title="Changed copper shows in its layer colour over the grey board. Hatched = removed (old revision), solid = added (new revision)."
+          title="Changed copper shows in its layer colour over the grey board. Checkered = removed (old revision), solid = added (new revision)."
         >
           <span className="diff-legend-swatch diff-legend-removed" aria-hidden="true" />
           <span className="diff-legend-label">removed</span>

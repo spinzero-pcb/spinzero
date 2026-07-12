@@ -3,6 +3,7 @@ import { ipc } from "../lib/ipc";
 import {
   orderedChanges,
   pcbLayerUnion,
+  type Change,
   type DiffDoc,
   type DiffSide,
 } from "../lib/diff";
@@ -196,7 +197,7 @@ export const useDiffStore = create<DiffState>((set, get) => ({
       // Overview by default: EVERY change tinted, the PCB view isolated to the union
       // of layers the changes land on. No change is focused (and no camera yank) until
       // the user steps/clicks — then that change solos (see focusChange).
-      applyLayerUnion(handle.doc);
+      applyLayerUnion(handle.doc.changes);
     } catch (e) {
       if (token !== diffSeq) return; // superseded — whoever superseded us owns the state
       set({ preparing: false });
@@ -325,19 +326,26 @@ export const useDiffStore = create<DiffState>((set, get) => ({
 
   setHideZones: (on) => set({ hideZones: on }),
 
-  toggleChangeHidden: (id) =>
+  toggleChangeHidden: (id) => {
     set((s) => {
       const next = new Set(s.hiddenChangeIds);
       if (next.has(id)) next.delete(id);
       else next.add(id);
       return { hiddenChangeIds: next };
-    }),
+    });
+    // The layer view follows the VISIBLE subset: shift-clicking in a change that lives
+    // on another layer must also reveal that layer, or the GPU mask shows it into a
+    // hidden layer and nothing appears. (Union of the visible changes' layers; the
+    // focused-change isolation is just the one-visible-change case of this rule.)
+    const { doc, hiddenChangeIds } = get();
+    if (doc) applyLayerUnion(doc.changes.filter((c) => !hiddenChangeIds.has(c.id)));
+  },
 
   showAllChanges: () => {
     const { doc } = get();
     set({ hiddenChangeIds: new Set() });
     // Back to the overview layer set (the focused change may have isolated one layer).
-    if (doc) applyLayerUnion(doc);
+    if (doc) applyLayerUnion(doc.changes);
   },
 
   getPcbGeometryA: (relPath) => {
@@ -388,14 +396,15 @@ function step(
   if (target) get().focusChange(target.id);
 }
 
-/** Show the union of layers the changeset lands on ("relevant layers"), hiding the
- *  rest — the overview view on enter / show-all. Leaves the user's layer view alone
- *  when no change names a layer (schematic-only diffs). A single-layer union gets the
+/** Show the union of layers the given changes land on ("relevant layers"), hiding the
+ *  rest — the whole changeset on enter / show-all, the visible subset after shift-click
+ *  composing. Leaves the user's layer view alone when no change names a layer
+ *  (schematic-only diffs / an emptied subset). A single-layer union gets the
  *  active-layer emphasis; a multi-layer union has no active layer (the diff-mode
  *  copper-stack fade differentiates depth instead). Restored on exit (priorPcbView). */
-function applyLayerUnion(doc: DiffDoc) {
+function applyLayerUnion(changes: Change[]) {
   const pv = usePcbViewStore.getState();
-  const union = pcbLayerUnion(doc.changes, pv.known);
+  const union = pcbLayerUnion(changes, pv.known);
   if (union.length === 0) return;
   const keep = new Set(union);
   pv.setHidden(pv.known.filter((l) => !keep.has(l)));

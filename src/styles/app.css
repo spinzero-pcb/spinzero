@@ -3105,7 +3105,7 @@ button {
 .diff-banner-close:hover { color: var(--err); background: var(--err-dim); }
 
 /* PCB compare legend: changed copper is layer-coloured, so the swatches teach the
-   FILL STYLE (hatched = removed, solid = added) in a neutral tone, not a hue. */
+   FILL STYLE (checkered = removed, solid = added) in a neutral tone, not a hue. */
 .diff-legend {
   display: inline-flex;
   align-items: center;
@@ -3121,11 +3121,11 @@ button {
   border: 1px solid var(--border-1);
 }
 .diff-legend-removed {
-  background: repeating-linear-gradient(
-    45deg,
-    var(--fg-2) 0 2px,
-    transparent 2px 5px
-  );
+  background-image:
+    linear-gradient(45deg, var(--fg-2) 25%, transparent 25%, transparent 75%, var(--fg-2) 75%),
+    linear-gradient(45deg, var(--fg-2) 25%, transparent 25%, transparent 75%, var(--fg-2) 75%);
+  background-position: 0 0, 2px 2px;
+  background-size: 4px 4px;
 }
 .diff-legend-added { background: var(--fg-2); }
 .diff-legend-label { margin-right: 3px; }

@@ -48,8 +48,9 @@ const MAX_SCALE = 2000;
 
 /** Diff overlay encoding: colour = LAYER, texture = old vs new. Changed copper keeps
  *  its TRUE layer colour (mix 1.0) so "which layer changed" reads instantly over the
- *  grey base; removed (A) copper is hatched, added (B) is solid (glRenderer diffHatch).
- *  Red/green tints were tried and dropped — per-layer tint blends were illegible. */
+ *  grey base; removed (A) copper is checkered, added (B) is solid (glRenderer
+ *  diffHatch). Red/green tints were tried and dropped — per-layer tint blends were
+ *  illegible; 45° stripes likewise (they read as parallel lines on diagonal tracks). */
 const DIFF_LAYER_MIX = 1.0;
 
 /** Draw one net-label row: the plain `text` centred at (0, cy) plus a KiCad-style
@@ -1319,15 +1320,18 @@ export function PcbGlView({ visible }: { visible: boolean }) {
               ? { objects: { ...base.objects, zones: false }, opacity: base.opacity }
               : base;
             // Overlay: the unchanged common base as flat grey (from B), then the changed
-            // copper in its TRUE layer colour — A's removed copper hatched, B's added
-            // copper solid (colour = layer, texture = old/new; see DIFF_LAYER_MIX).
-            // With blink on, removed and added alternate phases.
+            // copper in its TRUE layer colour — B's added copper solid FIRST, A's removed
+            // copper checkered ON TOP (colour = layer, texture = old/new; DIFF_LAYER_MIX).
+            // Removed paints last because a same-spot restyle (e.g. a thickened track)
+            // otherwise buries the old copper under the new; the checker's ghost squares
+            // let the added copper show through where the two overlap. With blink on,
+            // removed and added alternate phases instead.
             r.render(cam.current, w, h, obj, { diffPass: 1 });
             const blinkOn = blinkRef.current;
-            if (!blinkOn || blinkA.current)
-              rA.render(cam.current, w, h, obj, { clear: false, diffPass: 2, diffMix: DIFF_LAYER_MIX, diffHatch: true });
             if (!blinkOn || !blinkA.current)
               r.render(cam.current, w, h, obj, { clear: false, diffPass: 2, diffMix: DIFF_LAYER_MIX });
+            if (!blinkOn || blinkA.current)
+              rA.render(cam.current, w, h, obj, { clear: false, diffPass: 2, diffMix: DIFF_LAYER_MIX, diffHatch: true });
           } else {
             r.render(cam.current, w, h, objRef.current);
           }
