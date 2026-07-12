@@ -109,6 +109,34 @@ fn symbol_bbox(sch: &Schematic, sym: &SymbolInstance) -> [f64; 4] {
     [r4(sym.at.x), r4(sym.at.y), 0.0, 0.0]
 }
 
+/// Presentation signature of a symbol's *visible* property fields — per field: its key,
+/// font size, bold/italic, and position RELATIVE to the symbol placement. Field VALUES
+/// are excluded (a value/MPN edit is a semantic change reported on its own row); a hidden
+/// or blank field contributes only its (in)visibility, so moving or resizing text that
+/// isn't drawn never reads as an edit. Relative positions keep a whole-symbol drag a
+/// "moved" (the fields travel with the body), while dragging one field or changing a
+/// field's font size flips the signature to an "edited".
+fn fields_sig(sym: &SymbolInstance) -> String {
+    let mut parts: Vec<String> = Vec::with_capacity(sym.properties.len());
+    for p in &sym.properties {
+        if p.effects.hidden || p.value.trim().is_empty() {
+            parts.push(format!("{}:-", p.key)); // not drawn: only its (in)visibility
+            continue;
+        }
+        // Field position relative to the symbol origin ("~" when KiCad auto-places it),
+        // so a pure body drag — which carries the fields along — leaves it unchanged.
+        let rel = match p.at {
+            Some(at) => format!("{},{},{}", r4(at.x - sym.at.x), r4(at.y - sym.at.y), r4(at.angle)),
+            None => "~".to_string(),
+        };
+        parts.push(format!(
+            "{}:z{}:{}{}:{}",
+            p.key, r4(p.effects.size), p.effects.bold as u8, p.effects.italic as u8, rel,
+        ));
+    }
+    parts.join(";")
+}
+
 /// Points describing a sheet graphic's extent.
 fn shape_points(s: &Shape) -> Vec<Pt> {
     match s {
@@ -144,14 +172,18 @@ fn build_sheet(file: &str, sch: &Schematic) -> SheetGeom {
         let is_power =
             sch.lib_for(sym).map(|l| l.power).unwrap_or(false) || sym.lib_id.starts_with("power:");
         let kind = if is_power { "power" } else { "symbol" };
-        // Signature excludes position (that lives in the bbox), so a pure drag reads as
-        // "moved" and a rotation / library swap reads as "edited".
+        // Signature excludes the symbol's own position (that lives in the bbox), so a pure
+        // drag reads as "moved" and a rotation / library swap / field edit reads as
+        // "edited". `fields_sig` folds in the visible property fields' presentation (font
+        // size, relative position, weight, visibility) so restyling or repositioning a
+        // reference/value label — invisible in the body bbox — is caught too.
         let sig = format!(
-            "{}|u{}|a{}|m{}",
+            "{}|u{}|a{}|m{}|{}",
             sym.lib_id,
             sym.unit,
             r4(sym.at.angle),
-            sym.mirror.as_deref().unwrap_or("")
+            sym.mirror.as_deref().unwrap_or(""),
+            fields_sig(sym),
         );
         push(&sym.uuid, kind, symbol_bbox(sch, sym), sig);
     }
@@ -259,6 +291,68 @@ mod tests {
         let gb = b.elements.iter().find(|e| e.uuid == "gnd1").unwrap();
         assert_eq!(ga.sig, gb.sig, "a pure move keeps the signature");
         assert_ne!(ga.bbox, gb.bbox, "but the bbox moves");
+    }
+
+    /// A resistor whose Reference/Value fields carry explicit positions + font sizes, so
+    /// the field-presentation signature has something to react to.
+    const FIELDS_SHEET: &str = r##"
+    (kicad_sch (version 20240101) (uuid "root")
+      (lib_symbols
+        (symbol "Device:R"
+          (symbol "R_0_1" (rectangle (start -1 -2.5) (end 1 2.5)))
+          (symbol "R_1_1" (pin passive line (at 0 3.81 270) (length 1.27) (name "~") (number "1")))))
+      (symbol (lib_id "Device:R") (at 50 50 0) (unit 1) (uuid "r1")
+        (property "Reference" "R1" (at 52 48 0) (effects (font (size 1.27 1.27))))
+        (property "Value" "10k" (at 52 52 0) (effects (font (size 1.27 1.27))))))
+    "##;
+
+    fn field_sig(src: &str) -> String {
+        let sch = Schematic::parse_str(src).unwrap();
+        build_sheet("root.kicad_sch", &sch)
+            .elements
+            .into_iter()
+            .find(|e| e.uuid == "r1")
+            .unwrap()
+            .sig
+    }
+
+    #[test]
+    fn font_size_change_flips_signature() {
+        // Only a field's font size grows: the body bbox is untouched, so this must show up
+        // in the signature (an "edited") — the C68 case the plain body diff missed.
+        let a = field_sig(FIELDS_SHEET);
+        let bigger = FIELDS_SHEET.replacen("(size 1.27 1.27)", "(size 2.54 2.54)", 1);
+        assert_ne!(a, field_sig(&bigger), "a field font-size change changes the signature");
+    }
+
+    #[test]
+    fn field_reposition_flips_signature() {
+        // Dragging just the Reference label (symbol body unmoved) changes the signature.
+        let a = field_sig(FIELDS_SHEET);
+        let moved = FIELDS_SHEET.replace(r#""Reference" "R1" (at 52 48 0)"#, r#""Reference" "R1" (at 56 48 0)"#);
+        assert_ne!(a, field_sig(&moved), "moving one field changes the signature");
+    }
+
+    #[test]
+    fn whole_symbol_drag_keeps_signature_with_positioned_fields() {
+        // Moving the WHOLE symbol shifts its `at` and every field's absolute `at` by the
+        // same delta: the field positions are stored relative to the body, so the signature
+        // is stable (a "moved", not an "edited") even though fields carry explicit `at`.
+        let a = field_sig(FIELDS_SHEET);
+        let dragged = FIELDS_SHEET
+            .replace("(at 50 50 0) (unit 1) (uuid \"r1\")", "(at 70 80 0) (unit 1) (uuid \"r1\")")
+            .replace("(at 52 48 0)", "(at 72 78 0)")
+            .replace("(at 52 52 0)", "(at 72 82 0)");
+        assert_eq!(a, field_sig(&dragged), "a whole-symbol drag preserves the signature");
+    }
+
+    #[test]
+    fn field_value_edit_alone_keeps_signature() {
+        // Retyping a field's VALUE (a semantic change reported on its own row) must NOT
+        // move the presentation signature — otherwise it would double-report.
+        let a = field_sig(FIELDS_SHEET);
+        let revalued = FIELDS_SHEET.replace(r#""Value" "10k""#, r#""Value" "22k""#);
+        assert_eq!(a, field_sig(&revalued), "a value edit leaves the presentation signature alone");
     }
 
     #[test]

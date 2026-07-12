@@ -590,6 +590,13 @@ struct ChangedElem {
     uuid: String,
     kind: String,
     change: ElemChange,
+    /// The signature changed — a presentation/content edit (field restyle, redrawn wire).
+    /// Orthogonal to any semantic value/footprint row, so it surfaces even for a component
+    /// that already has one.
+    edited: bool,
+    /// The bbox moved past the grid threshold. Can be true *alongside* `edited` (an edited
+    /// note that was also dragged), which the cluster verb reports as "edited & moved".
+    moved: bool,
     on_a: bool,
     on_b: bool,
     bbox: [f64; 4],
@@ -684,31 +691,42 @@ fn diff_sch_graphics(
         // B-only additions — both source lists are already sorted, so this is deterministic.
         let mut changed: Vec<ChangedElem> = Vec::new();
         for e in &sa.elements {
-            if suppressed.contains(e.uuid.as_str()) {
-                continue;
-            }
+            let is_suppressed = suppressed.contains(e.uuid.as_str());
             match ib.get(e.uuid.as_str()) {
-                None => changed.push(ChangedElem {
-                    uuid: e.uuid.clone(),
-                    kind: e.kind.clone(),
-                    change: ElemChange::Removed,
-                    on_a: true,
-                    on_b: false,
-                    bbox: e.bbox,
-                }),
+                None => {
+                    // A removal already carried by a semantic row (a removed component)
+                    // needs no second graphical row.
+                    if is_suppressed {
+                        continue;
+                    }
+                    changed.push(ChangedElem {
+                        uuid: e.uuid.clone(),
+                        kind: e.kind.clone(),
+                        change: ElemChange::Removed,
+                        edited: false,
+                        moved: false,
+                        on_a: true,
+                        on_b: false,
+                        bbox: e.bbox,
+                    });
+                }
                 Some(be) => {
-                    let (chg, moved_or_edited) = if e.sig != be.sig {
-                        (ElemChange::Edited, true)
-                    } else if sch_bbox_moved(&e.bbox, &be.bbox) {
-                        (ElemChange::Moved, true)
-                    } else {
-                        (ElemChange::Moved, false)
-                    };
-                    if moved_or_edited {
+                    let edited = e.sig != be.sig;
+                    let moved = sch_bbox_moved(&e.bbox, &be.bbox);
+                    // A suppressed symbol's MOVE is already its semantic row (e.g. "C68
+                    // moved on schematic"), but a presentation EDIT — a restyled or
+                    // repositioned field — is never described by a value/footprint/MPN row,
+                    // so surface it even when the symbol carries a semantic change.
+                    if is_suppressed && !edited {
+                        continue;
+                    }
+                    if edited || moved {
                         changed.push(ChangedElem {
                             uuid: e.uuid.clone(),
                             kind: e.kind.clone(),
-                            change: chg,
+                            change: if edited { ElemChange::Edited } else { ElemChange::Moved },
+                            edited,
+                            moved,
                             on_a: true,
                             on_b: true,
                             bbox: be.bbox, // frame the new position
@@ -725,6 +743,8 @@ fn diff_sch_graphics(
                 uuid: e.uuid.clone(),
                 kind: e.kind.clone(),
                 change: ElemChange::Added,
+                edited: false,
+                moved: false,
                 on_a: false,
                 on_b: true,
                 bbox: e.bbox,
@@ -774,14 +794,19 @@ fn diff_sch_graphics(
             } else {
                 Side::Both
             };
-            // Cluster verb: added/removed when uniform, else "edited" if any signature
-            // changed, else "moved".
+            // Cluster verb: added/removed when uniform; else "edited" if any signature
+            // changed, widened to "edited & moved" when an edit also shifted position
+            // (a note that was reworded *and* dragged); else a plain "moved".
             let all = |c: ElemChange| members.iter().all(|m| m.change == c);
+            let any_edited = members.iter().any(|m| m.edited);
+            let any_moved = members.iter().any(|m| m.moved);
             let (kind, verb) = if all(ElemChange::Added) {
                 (Kind::Added, "added")
             } else if all(ElemChange::Removed) {
                 (Kind::Removed, "removed")
-            } else if members.iter().any(|m| m.change == ElemChange::Edited) {
+            } else if any_edited && any_moved {
+                (Kind::Modified, "edited & moved")
+            } else if any_edited {
                 (Kind::Modified, "edited")
             } else {
                 (Kind::Moved, "moved")

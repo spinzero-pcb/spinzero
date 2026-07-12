@@ -884,6 +884,69 @@ fn removed_schematic_element_anchors_a_side() {
 }
 
 #[test]
+fn field_presentation_edit_surfaces_alongside_semantic_row() {
+    // C68: the MPN is cleared (a semantic component row) AND a visible field's font size
+    // changes (a geometry-signature edit, body bbox untouched). The MPN row must NOT
+    // swallow the presentation edit — both appear, and the edit anchors to the symbol so
+    // clicking it lands on C68.
+    let mut a = empty_indexes();
+    a.sheets = vec![sheet(6, "current_sense")];
+    a.components.insert("C68".into(), comp_full("100n", "C_0402", "GCM155", 6, "sym68"));
+    let mut b = empty_indexes();
+    b.sheets = vec![sheet(6, "current_sense")];
+    b.components.insert("C68".into(), comp_full("100n", "C_0402", "", 6, "sym68"));
+
+    let mut ba = bundle(a);
+    ba.sheet_files.insert(6, "current_sense.kicad_sch".into());
+    ba.sch_geometry = Some(sch_geom(
+        "current_sense.kicad_sch",
+        vec![sch_elem("sym68", "symbol", [41.0, 92.0, 4.0, 7.0], "Device:C|u1|a0|m|Value:z1.27:00:5,2,0")],
+    ));
+    let mut bb = bundle(b);
+    bb.sheet_files.insert(6, "current_sense.kicad_sch".into());
+    bb.sch_geometry = Some(sch_geom(
+        "current_sense.kicad_sch",
+        vec![sch_elem("sym68", "symbol", [41.0, 92.0, 4.0, 7.0], "Device:C|u1|a0|m|Value:z2.54:00:5,2,0")],
+    ));
+
+    let doc = diff_bundles(&ba, &bb, &changed(&["current_sense.kicad_sch"]));
+    assert!(
+        doc.changes.iter().any(|c| c.group == Group::Component && c.title.contains("C68") && c.title.contains("MPN")),
+        "the semantic MPN row is present: {:?}",
+        doc.changes
+    );
+    let edit = doc
+        .changes
+        .iter()
+        .find(|c| c.group == Group::Sheet && c.title.contains("edited"))
+        .unwrap_or_else(|| panic!("field-edit row is NOT suppressed by the MPN row: {:?}", doc.changes));
+    assert_eq!(edit.anchors.schematic.as_ref().unwrap().uuids, vec!["sym68".to_string()]);
+}
+
+#[test]
+fn simultaneous_move_and_edit_reads_as_both() {
+    // A note that was reworded AND dragged (the "close→near" note that also shifted a grid
+    // step) reads as "edited & moved", not a plain "edited" that hides the move.
+    let make_ix = || {
+        let mut ix = empty_indexes();
+        ix.sheets = vec![sheet(1, "root")];
+        ix
+    };
+    let mut ba = bundle(make_ix());
+    ba.sheet_files.insert(1, "root.kicad_sch".into());
+    ba.sch_geometry =
+        Some(sch_geom("root.kicad_sch", vec![sch_elem("n1", "text", [10.0, 10.0, 0.0, 0.0], "text|close")]));
+    let mut bb = bundle(make_ix());
+    bb.sheet_files.insert(1, "root.kicad_sch".into());
+    bb.sch_geometry =
+        Some(sch_geom("root.kicad_sch", vec![sch_elem("n1", "text", [10.0, 11.27, 0.0, 0.0], "text|near")]));
+
+    let doc = diff_bundles(&ba, &bb, &changed(&["root.kicad_sch"]));
+    assert_eq!(doc.changes.len(), 1, "{:?}", doc.changes);
+    assert!(doc.changes[0].title.contains("edited & moved"), "{}", doc.changes[0].title);
+}
+
+#[test]
 fn value_change_carries_per_side_emphasis() {
     let mut a = empty_indexes();
     a.components.insert("C134".into(), comp_full("1nF", "C_0402", "", 1, "u1"));
