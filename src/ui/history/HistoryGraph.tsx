@@ -42,7 +42,6 @@ export function HistoryGraph() {
   const setTag = useProjectStore((s) => s.setTag);
   const removeTag = useProjectStore((s) => s.removeTag);
   const deleteCheckpoint = useProjectStore((s) => s.deleteCheckpoint);
-  const purgeLocal = useProjectStore((s) => s.purgeLocal);
   const enterDiff = useDiffStore((s) => s.enterDiff);
 
   // Compare pick-mode: after "Compare with…", the graph waits for a second row; other
@@ -56,9 +55,9 @@ export function HistoryGraph() {
   const [tagDraft, setTagDraft] = useState("");
   const [publishing, setPublishing] = useState<string | null>(null); // changelog dialog
   const [changelog, setChangelog] = useState("");
-  // Permanent (unrecoverable) delete confirmation. `checkpoint` = a local-only checkpoint;
-  // `purge` = purge a synced revision's local bytes.
-  const [confirmDel, setConfirmDel] = useState<{ id: string; kind: "checkpoint" | "purge" } | null>(null);
+  // Permanent (unrecoverable) delete confirmation for a local-only checkpoint — the
+  // only revision kind with a hard delete; published history is soft-deleted (hide).
+  const [confirmDel, setConfirmDel] = useState<string | null>(null);
 
   useEffect(() => {
     if (!open) return;
@@ -130,10 +129,9 @@ export function HistoryGraph() {
   }
   function doConfirmDelete() {
     if (!confirmDel) return;
-    const { id, kind } = confirmDel;
+    const id = confirmDel;
     setConfirmDel(null);
-    if (kind === "checkpoint") void deleteCheckpoint(id);
-    else void purgeLocal(id);
+    void deleteCheckpoint(id);
   }
 
   function rowMenu(r: ExtractionMeta): MenuItem[] {
@@ -165,21 +163,19 @@ export function HistoryGraph() {
       items.push({ label: "Publish…", icon: <IconSparkle size={14} />, onClick: () => { setChangelog(""); setPublishing(r.id); } });
     }
     items.push({ separator: true });
-    // Soft delete is recoverable via Restore; "Delete permanently" is the hard,
-    // unrecoverable removal (item 10).
-    items.push(
-      r.hidden
-        ? { label: "Restore", icon: <IconRefresh size={14} />, onClick: () => void unhide(r.id) }
-        : { label: "Delete", icon: <IconTrash size={14} />, onClick: () => void hide(r.id) },
-    );
-    items.push({ label: "Copy revision id", icon: <IconCopy size={14} />, onClick: () => void navigator.clipboard?.writeText(r.id) });
-    items.push({ separator: true });
-    // Both are unrecoverable — confirm first (the label's "…" signals the dialog).
-    if (localOnly) {
-      items.push({ label: "Delete permanently…", icon: <IconTrash size={14} />, onClick: () => setConfirmDel({ id: r.id, kind: "checkpoint" }) });
-    } else {
-      items.push({ label: "Delete permanently…", icon: <IconTrash size={14} />, onClick: () => setConfirmDel({ id: r.id, kind: "purge" }) });
+    // One delete action per row. Local checkpoints are private to this machine, so
+    // their delete is the hard, confirmed removal (the "…" signals the dialog).
+    // Published revisions are shared history: delete is soft (hide) and recoverable
+    // via "Show deleted" → Restore — no permanent-purge in the menu.
+    if (r.hidden) {
+      items.push({ label: "Restore", icon: <IconRefresh size={14} />, onClick: () => void unhide(r.id) });
     }
+    if (localOnly) {
+      items.push({ label: "Delete permanently…", icon: <IconTrash size={14} />, onClick: () => setConfirmDel(r.id) });
+    } else if (!r.hidden) {
+      items.push({ label: "Delete", icon: <IconTrash size={14} />, onClick: () => void hide(r.id) });
+    }
+    items.push({ label: "Copy revision id", icon: <IconCopy size={14} />, onClick: () => void navigator.clipboard?.writeText(r.id) });
     return items;
   }
 
@@ -397,9 +393,7 @@ export function HistoryGraph() {
           <div className="publish-card" role="dialog" aria-label="Confirm permanent delete">
             <div className="history-title">Delete permanently?</div>
             <p className="publish-hint">
-              {confirmDel.kind === "checkpoint"
-                ? "This local checkpoint will be removed for good. This can’t be undone."
-                : "This removes the revision for everyone and deletes its bytes from this machine. Teammates who already synced keep their copy until their own cleanup. This can’t be undone."}
+              This local checkpoint will be removed for good. This can’t be undone.
             </p>
             <div className="publish-actions">
               <button className="btn-ghost" onClick={() => setConfirmDel(null)}>

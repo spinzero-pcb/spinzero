@@ -47,7 +47,6 @@ interface ProjectState {
   hide: (id: string) => Promise<void>;
   unhide: (id: string) => Promise<void>;
   publish: (id: string, message: string) => Promise<void>;
-  purgeLocal: (id: string) => Promise<void>;
   deleteCheckpoint: (id: string) => Promise<void>;
   refreshIndex: () => Promise<void>;
 }
@@ -268,14 +267,6 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     }),
   deleteCheckpoint: (id) =>
     refreshAfter("Couldn’t delete checkpoint", () => ipc.deleteCheckpoint(id)),
-  purgeLocal: (id) =>
-    refreshAfter("Couldn’t delete", () => ipc.purgeRevisionLocal(id), {
-      // Honest serverless caveat — be clear about what a permanent delete can and can't reach.
-      kind: "warning",
-      title: "Deleted permanently",
-      message:
-        "Removed for everyone and its bytes deleted from this machine. Teammates who already synced keep their copy until their own cleanup.",
-    }),
 
   refreshIndex: async () => {
     // The index may still be rebuilding in the background right after open

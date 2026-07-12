@@ -85,8 +85,6 @@ export const ipc = {
     invoke<void>("publish_checkpoint", { id, message }),
   /** Hard-delete a machine-local checkpoint (unsynced). */
   deleteCheckpoint: (id: string) => invoke<void>("delete_checkpoint", { id }),
-  /** Hide everywhere + delete this revision's bytes on this machine (leaked secret). */
-  purgeRevisionLocal: (id: string) => invoke<void>("purge_revision_local", { id }),
   /** Other users who touched this project recently (soft fork-awareness). */
   getPresence: () => invoke<PresenceEntry[]>("get_presence"),
 
