@@ -11,13 +11,21 @@ import {
   type ImpactBucket,
 } from "../../lib/diff";
 import { isTypingTarget } from "../../lib/keymap";
-import { IconCheck, IconChevron, IconEye, IconEyeOff } from "../icons";
+import { IconCheck, IconChevron } from "../icons";
 
 /** The Changes panel (visual-diff §5): the left-rail tab shown only in diff mode. A tree
  *  grouped by impact (Electrical / Placement / Cosmetic — the panel's single
- *  categorization) with count badges, a free-text filter, a stepper header
- *  ("Change 7 of 23") with prev/next and ←/→ + J/K keyboard walk, per-change seen
- *  checkmarks, and click-to-focus. */
+ *  categorization) with count badges, a free-text filter, and a stepper header
+ *  ("Change 7 of 23") with prev/next and ←/→ + J/K keyboard walk.
+ *
+ *  Board-overlay selection: CLICK a row to focus it (solo on the board, camera lands
+ *  on it); SHIFT-CLICK to add/remove a change from the board overlay without moving
+ *  the camera — the way to light up several changes at once. "Show all" restores the
+ *  everything-tinted overview.
+ *
+ *  Review progress: focusing a change automatically marks it REVIEWED (the ✓ dims the
+ *  row); the per-row ✓ and the group button are manual overrides. Progress is the
+ *  reviewer's own bookkeeping — it never hides a change or affects the board. */
 export function ChangesPanel() {
   const doc = useDiffStore((s) => s.doc);
   const focusedId = useDiffStore((s) => s.focusedChangeId);
@@ -120,6 +128,11 @@ export function ChangesPanel() {
         </button>
         <span className="step-count">
           {focusIdx >= 0 ? `Change ${focusIdx + 1} of ${ordered.length}` : `${ordered.length} changes`}
+          {seen.size > 0 && (
+            <span className="step-reviewed" title="Changes you have focused (or checked off) so far">
+              {" "}· {seen.size} reviewed
+            </span>
+          )}
         </span>
         <button className="btn-ghost step-btn" title="Next change (→/J)" onClick={() => stepVisible(+1)}>
           ›
@@ -135,11 +148,12 @@ export function ChangesPanel() {
       />
 
       {/* Board-overlay visibility: by default every change is tinted; clicking a row
-          solos it and the eye buttons build subsets. This bar is the way back. */}
+          solos it and shift-clicking rows builds subsets. This bar is the way back. */}
       {hiddenIds.size > 0 && (
         <div className="changes-visbar">
-          <span>
-            Showing {Math.max(allChanges.length - hiddenIds.size, 0)} of {allChanges.length} on board
+          <span title="Shift-click rows to add or remove changes from the board overlay">
+            {Math.max(allChanges.length - hiddenIds.size, 0)} of {allChanges.length} on board
+            <span className="visbar-hint"> · shift-click adds</span>
           </span>
           <button className="btn-ghost changes-visbar-btn" onClick={showAllChanges}>
             Show all
@@ -155,7 +169,8 @@ export function ChangesPanel() {
           groups.map((grp) => {
             const isCollapsed = collapsed.has(grp.impact);
             const groupIds = grp.changes.map((c) => c.id);
-            const allSeen = groupIds.every((id) => seen.has(id));
+            const seenCount = groupIds.filter((id) => seen.has(id)).length;
+            const allSeen = seenCount === groupIds.length;
             return (
               <div key={grp.impact} className="changes-group">
                 <div className="changes-group-head">
@@ -164,14 +179,23 @@ export function ChangesPanel() {
                       <IconChevron size={12} />
                     </span>
                     {grp.label}
-                    <span className="group-count">{grp.changes.length}</span>
+                    <span
+                      className="group-count"
+                      title={seenCount > 0 ? `${seenCount} of ${grp.changes.length} reviewed` : undefined}
+                    >
+                      {seenCount > 0 ? `${seenCount}/${grp.changes.length}` : grp.changes.length}
+                    </span>
                   </button>
                   <button
                     className="group-markall"
-                    title={allSeen ? "Mark all unseen" : "Mark all in group as seen"}
+                    title={
+                      allSeen
+                        ? "Reset this group's review progress"
+                        : "Mark every change in this group reviewed (e.g. to skip a group you don't need to walk)"
+                    }
                     onClick={() => markGroupSeen(groupIds, !allSeen)}
                   >
-                    {allSeen ? "Unsee" : "Seen"}
+                    {allSeen ? "Reset" : "Mark reviewed"}
                   </button>
                 </div>
                 {!isCollapsed &&
@@ -184,7 +208,7 @@ export function ChangesPanel() {
                       hidden={hiddenIds.has(c.id)}
                       onFocus={() => focusChange(c.id)}
                       onToggleSeen={() => markSeen(c.id, !seen.has(c.id))}
-                      onToggleHidden={() => toggleChangeHidden(c.id)}
+                      onToggleOnBoard={() => toggleChangeHidden(c.id)}
                       rowRef={(el) => {
                         if (el) rowRefs.current.set(c.id, el);
                         else rowRefs.current.delete(c.id);
@@ -207,27 +231,38 @@ function ChangeRow({
   hidden,
   onFocus,
   onToggleSeen,
-  onToggleHidden,
+  onToggleOnBoard,
   rowRef,
 }: {
   change: Change;
   focused: boolean;
+  /** Reviewed (auto-marked on focus; the ✓ is a manual override). */
   seen: boolean;
-  /** Hidden from the PCB overlay tint (the eye toggle), NOT filtered from the list. */
+  /** Not currently tinted on the PCB overlay (shift-click toggles), NOT list-filtered. */
   hidden: boolean;
   onFocus: () => void;
   onToggleSeen: () => void;
-  onToggleHidden: () => void;
+  onToggleOnBoard: () => void;
   rowRef: (el: HTMLDivElement | null) => void;
 }) {
   const role = tintRole(change.kind); // err/ok/warn → drives the dot colour via CSS var
-  const onBoard = hasPcbAnchor(change); // only board-anchored changes can be eye-toggled
+  const onBoard = hasPcbAnchor(change); // only board-anchored changes join the overlay
+  const hint = onBoard ? "\n\nClick: focus · Shift-click: add/remove on board" : "";
   return (
     <div
       ref={rowRef}
       className={`change-row ${focused ? "focused" : ""} ${seen ? "seen" : ""} ${hidden ? "board-hidden" : ""}`}
-      onClick={onFocus}
-      title={change.detail ? `${change.title}\n${change.detail}` : change.title}
+      onClick={(e) => {
+        // Shift-click composes a multi-change board overlay (same gesture as the PCB
+        // canvas's shift-click net composing) — no camera move, no refocus.
+        if (e.shiftKey && onBoard) onToggleOnBoard();
+        else onFocus();
+      }}
+      // Shift-click must not start a text selection sweep across rows.
+      onMouseDown={(e) => {
+        if (e.shiftKey) e.preventDefault();
+      }}
+      title={(change.detail ? `${change.title}\n${change.detail}` : change.title) + hint}
     >
       <span className={`change-dot change-dot-${role}`} />
       <div className="change-body">
@@ -241,21 +276,9 @@ function ChangeRow({
           </span>
         )}
       </div>
-      {onBoard && (
-        <button
-          className={`change-eye ${hidden ? "off" : ""}`}
-          title={hidden ? "Show this change on the board" : "Hide this change on the board"}
-          onClick={(e) => {
-            e.stopPropagation(); // eye builds subsets — it must not refocus/solo
-            onToggleHidden();
-          }}
-        >
-          {hidden ? <IconEyeOff size={12} /> : <IconEye size={12} />}
-        </button>
-      )}
       <button
         className={`change-seen ${seen ? "on" : ""}`}
-        title={seen ? "Mark unseen" : "Mark seen"}
+        title={seen ? "Reviewed (click to mark as not reviewed)" : "Mark reviewed without visiting"}
         onClick={(e) => {
           e.stopPropagation();
           onToggleSeen();

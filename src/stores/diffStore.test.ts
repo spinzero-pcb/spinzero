@@ -179,7 +179,9 @@ describe("diffStore enter/exit/step/seen", () => {
     await useDiffStore.getState().enterDiff("rA", "rB");
     useDiffStore.getState().focusChange("ch_1");
     expect(useDiffStore.getState().hiddenChangeIds).toEqual(new Set(["ch_0", "ch_2"]));
-    // The eye toggle builds subsets from either state.
+    // Focusing counts as reviewing — progress tracks what the walk visited.
+    expect(useDiffStore.getState().seen.has("ch_1")).toBe(true);
+    // Shift-click (toggleChangeHidden) builds subsets from either state.
     useDiffStore.getState().toggleChangeHidden("ch_0");
     expect(useDiffStore.getState().hiddenChangeIds).toEqual(new Set(["ch_2"]));
     useDiffStore.getState().showAllChanges();

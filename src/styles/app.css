@@ -3215,7 +3215,7 @@ button {
 }
 .changes-search:focus { outline: none; border-color: var(--accent); }
 
-/* Board-overlay visibility bar: shown while a solo / eye-subset hides changes. */
+/* Board-overlay visibility bar: shown while a solo / shift-click subset hides changes. */
 .changes-visbar {
   display: flex;
   align-items: center;
@@ -3231,6 +3231,10 @@ button {
 }
 .changes-visbar-btn { font-size: 11px; color: var(--accent); padding: 0 4px; }
 .changes-visbar-btn:hover { text-decoration: underline; }
+.visbar-hint { color: var(--fg-2); }
+
+/* Reviewed-progress readout in the stepper header ("Change 7 of 23 · 12 reviewed"). */
+.step-reviewed { color: var(--fg-2); }
 
 .changes-tree { flex: 1; overflow-y: auto; padding-bottom: var(--sp-3); }
 .changes-group { border-bottom: 1px solid var(--border-0); }
@@ -3321,24 +3325,7 @@ button {
 .change-seen:hover { color: var(--fg-2); }
 .change-seen.on { color: var(--ok); border-color: var(--ok); }
 
-/* Eye toggle: this change's tint on the board (visible by default, quiet until hover;
-   the crossed-off state stays visible so hidden rows are findable). */
-.change-eye {
-  flex: none;
-  background: none;
-  border: 1px solid transparent;
-  border-radius: 3px;
-  width: 18px;
-  height: 18px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  color: transparent;
-  cursor: pointer;
-}
-.change-row:hover .change-eye { color: var(--fg-2); border-color: var(--border-1); }
-.change-eye:hover { color: var(--fg-0); }
-.change-eye.off { color: var(--fg-2); border-color: var(--border-1); opacity: 0.9; }
+/* Off-board rows (not in the shift-click overlay subset) dim but stay findable. */
 .change-row.board-hidden .change-title,
 .change-row.board-hidden .change-detail { opacity: 0.55; }
 
