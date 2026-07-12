@@ -91,11 +91,12 @@ export interface PresenceEntry {
   revision_id: string | null;
 }
 
-/** Result of selecting a revision (checkout-to-disk). `dirty` => un-captured on-disk
- *  edits; confirm, then retry with confirmed=true (mirrors lib.rs CheckoutResult). */
+/** Result of writing a revision into the design folder (updateDesignFiles). `dirty` =>
+ *  un-captured on-disk edits; confirm, then retry with confirmed=true (mirrors lib.rs
+ *  CheckoutResult). */
 export interface CheckoutResult {
   status: "switched" | "dirty" | "busy";
-  /** Checkpoint id the dirty working tree was captured into (after a confirmed switch). */
+  /** Checkpoint id the dirty working tree was captured into (after a confirmed update). */
   captured: string | null;
 }
 

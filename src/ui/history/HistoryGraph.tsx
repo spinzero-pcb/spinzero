@@ -3,7 +3,7 @@ import { useHistoryStore } from "../../stores/historyStore";
 import { useProjectStore } from "../../stores/projectStore";
 import { useDiffStore } from "../../stores/diffStore";
 import { ContextMenu, type MenuItem } from "../ContextMenu";
-import { IconClose, IconCompare, IconCopy, IconEdit, IconEye, IconRefresh, IconSparkle, IconTag, IconTrash } from "../icons";
+import { IconClose, IconCompare, IconCopy, IconEdit, IconEye, IconFolder, IconRefresh, IconSparkle, IconTag, IconTrash } from "../icons";
 import { formatLocalTime } from "../../lib/time";
 import { layoutDag } from "./layout";
 import type { ExtractionMeta } from "../../lib/types";
@@ -20,8 +20,9 @@ const shortId = (id: string) => id.slice(0, 10);
 
 /** The revision-history overlay — the single version-control surface (opened from the
  *  footer version chip). A DAG of the merged published + local-checkpoint timeline,
- *  with a "viewing" marker on the active node and per-row actions: open / rename / tag /
- *  publish (with a required changelog) / hide / delete. Local checkpoints render
+ *  with a "viewing" marker on the active node and per-row actions: open / update the
+ *  KiCad files (the only path that writes to disk — opening a version is view-only) /
+ *  rename / tag / publish (with a required changelog) / hide / delete. Local checkpoints render
  *  distinctly (hollow dot + "local" badge + italic) so a reader sees only the published
  *  line as the "normal" history. Compare/diff is a first-class feature again (visual-diff
  *  §3): "Compare with…" enters pick mode, "Compare with previous" uses the parent pointer,
@@ -35,6 +36,8 @@ export function HistoryGraph() {
   const extractions = useProjectStore((s) => s.extractions);
   const activeExtraction = useProjectStore((s) => s.activeExtraction);
   const setActiveExtraction = useProjectStore((s) => s.setActiveExtraction);
+  const updateDesignFiles = useProjectStore((s) => s.updateDesignFiles);
+  const designPathMissing = useProjectStore((s) => s.designPathMissing);
   const publish = useProjectStore((s) => s.publish);
   const hide = useProjectStore((s) => s.hide);
   const unhide = useProjectStore((s) => s.unhide);
@@ -139,6 +142,17 @@ export function HistoryGraph() {
     const parent = parentOf(r);
     const items: MenuItem[] = [
       { label: "Open this version", icon: <IconEye size={14} />, onClick: () => openVersion(r.id) },
+      // The ONLY way a version reaches the KiCad files on disk — opening/viewing a
+      // version never writes them. Disabled when the design folder is missing here.
+      {
+        label: "Update KiCad files to this version…",
+        icon: <IconFolder size={14} />,
+        disabled: designPathMissing,
+        onClick: () => {
+          closeGraph();
+          void updateDesignFiles(r.id);
+        },
+      },
       { separator: true },
       // Compare (visual-diff §3). "Compare with…" enters pick mode; "Compare with
       // previous" uses the parent pointer and is disabled for a root (no parent). Both

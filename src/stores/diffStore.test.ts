@@ -86,7 +86,7 @@ describe("normalizeOrder", () => {
 describe("diffStore enter/exit/step/seen", () => {
   beforeEach(() => {
     reset();
-    // B ("rB") is already active so enterDiff skips the slow setActiveExtraction checkout.
+    // B ("rB") is already active so enterDiff skips the setActiveExtraction viewer switch.
     useProjectStore.setState({
       extractions: [meta("rB", ["rA"], "2026-02-02"), meta("rA", [], "2026-01-01")],
       activeExtraction: "rB",
@@ -132,7 +132,7 @@ describe("diffStore enter/exit/step/seen", () => {
     mockIPC((cmd) => {
       if (cmd === "prepare_diff")
         return { doc: DOC, path: "p", cache_key_a: "keyA", cache_key_b: "keyB", label_a: "older", label_b: "newer" };
-      if (cmd === "set_active_extraction") return { status: "switched", captured: null };
+      if (cmd === "set_active_extraction") return undefined; // pure viewer switch, void
       // set_active_extraction fan-out (refreshIndex/load) — return benign shapes.
       return null;
     });

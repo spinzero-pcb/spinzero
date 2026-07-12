@@ -164,8 +164,8 @@ export const useDiffStore = create<DiffState>((set, get) => ({
     set({ preparing: true });
     try {
       // Pin the active revision to B (the newer side) so selection / cross-probe /
-      // comments all anchor there (plan §3). setActiveExtraction is a slow disk write;
-      // skip it when B is already active.
+      // comments all anchor there (plan §3). A pure viewer switch (never writes the
+      // design folder) — but may re-extract, so skip it when B is already active.
       const latestId = extractions[0]?.id ?? null;
       const activeNow = activeExtraction ?? latestId;
       if (activeNow !== newer) {

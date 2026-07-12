@@ -1,10 +1,10 @@
 import { useEffect } from "react";
 import { useProjectStore } from "../stores/projectStore";
 
-/** Confirmation shown when selecting a revision would overwrite un-captured on-disk
- *  edits (checkout-to-disk). Resolves `projectStore.checkoutPrompt` with the choice;
- *  Cancel / Escape / backdrop = false, "Save & switch" = true (which captures the
- *  working tree as a checkpoint first, then writes the selected revision to disk). */
+/** Confirmation shown when "Update KiCad files" would overwrite un-captured on-disk
+ *  edits. Resolves `projectStore.checkoutPrompt` with the choice; Cancel / Escape /
+ *  backdrop = false, "Save & update" = true (which captures the working tree as a
+ *  checkpoint first, then writes the selected revision to disk). */
 export function CheckoutConfirm() {
   const prompt = useProjectStore((s) => s.checkoutPrompt);
 
@@ -32,26 +32,26 @@ export function CheckoutConfirm() {
       className="wizard-overlay"
       onPointerDown={(e) => e.target === e.currentTarget && cancel()}
     >
-      <div className="wizard-card" role="dialog" aria-label="Confirm version switch">
+      <div className="wizard-card" role="dialog" aria-label="Confirm KiCad files update">
         <div className="wizard-head">
           <div>
-            <div className="wizard-title">Switch the design folder?</div>
+            <div className="wizard-title">Update the KiCad files?</div>
             <div className="wizard-step">You have un-captured changes</div>
           </div>
         </div>
         <div className="wizard-body">
           <p className="wizard-hint">
-            Your design folder has edits that aren’t in any saved version yet. Switching
+            Your design folder has edits that aren’t in any saved version yet. Updating
             will first save them as a local checkpoint, then write the selected version
-            into the design folder so KiCad shows the same thing as the app. If the board
-            is open in KiCad, close it first.
+            into the design folder so KiCad shows the same thing as the app. If the
+            design is open in KiCad, close it first and reopen it after the update.
           </p>
           <div className="wizard-actions">
             <button className="btn-ghost" onClick={cancel}>
               Cancel
             </button>
             <button className="btn-primary" onClick={confirm}>
-              Save &amp; switch
+              Save &amp; update
             </button>
           </div>
         </div>

@@ -428,9 +428,9 @@ async fn relink_design_path(
     Ok(handle.info())
 }
 
-/// Outcome of selecting a revision. KiCad-with-a-design-folder selections are a
-/// checkout-to-disk: `dirty` means there are un-captured on-disk edits and the caller
-/// must confirm; on a confirmed retry they're captured as a checkpoint, then overwritten.
+/// Outcome of writing a revision back into the design folder (`update_design_files`):
+/// `dirty` means there are un-captured on-disk edits and the caller must confirm; on a
+/// confirmed retry they're captured as a checkpoint, then overwritten.
 #[derive(serde::Serialize, Clone)]
 struct CheckoutResult {
     status: String, // "switched" | "dirty" | "busy"
@@ -438,7 +438,8 @@ struct CheckoutResult {
 }
 
 /// Point the viewer at a resolved revision: ensure its cache, ingest it, persist the
-/// active pointer. No disk write — used by the read-only path and after a checkout.
+/// active pointer. Never touches the design folder — used by every viewer switch and
+/// after an explicit `update_design_files` checkout.
 fn view_resolved(
     handle: &ProjectHandle,
     id: Option<&str>,
@@ -453,51 +454,64 @@ fn view_resolved(
     Ok(())
 }
 
-/// Select a revision. With a design folder present this is a **checkout-to-disk**
-/// (the revision is written back into the design folder so KiCad and the app agree),
-/// guarded so un-captured edits are never silently lost. For a read-only project it
-/// is a pure viewer switch. `id = None` means "latest". `confirmed = true` permits
-/// overwriting a dirty working tree (after capturing it).
+/// Select the revision the viewer shows. This is a **pure viewer switch** — the design
+/// folder on disk is never touched, so it needs no confirmation and is always safe.
+/// `id = None` means "latest". Writing a revision back into the KiCad files is a
+/// separate, explicit action: `update_design_files`.
 #[tauri::command]
 async fn set_active_extraction(
     state: State<'_, AppState>,
     id: Option<String>,
+) -> Result<(), String> {
+    let handle = current_project(&state)?;
+    if let Some(rid) = id.as_deref() {
+        let resolved = handle.resolve_rev(rid).ok_or_else(|| format!("unknown revision {rid}"))?;
+        view_resolved(&handle, Some(rid), &resolved)?;
+    } else {
+        project::set_active_extraction(&handle.project_dir, None)?;
+        *handle.active_extraction.lock_safe() = None;
+    }
+    Ok(())
+}
+
+/// Write a revision's source files back into the design folder, so KiCad shows the same
+/// thing as the app. An explicit user action (history graph → "Update KiCad files") —
+/// never triggered by merely viewing a version. Guarded so un-captured edits are never
+/// silently lost: `dirty` asks the caller to confirm; `confirmed = true` captures them
+/// as a checkpoint, then overwrites.
+#[tauri::command]
+async fn update_design_files(
+    state: State<'_, AppState>,
+    id: String,
     confirmed: bool,
 ) -> Result<CheckoutResult, String> {
     let handle = current_project(&state)?;
-    let switched = CheckoutResult { status: "switched".into(), captured: None };
+    let design_path = handle.design_path_clone().ok_or_else(|| {
+        "the design folder is missing on this machine — re-link it first".to_string()
+    })?;
 
-    // No design folder (read-only): pure viewer switch.
-    let Some(design_path) = handle.design_path_clone() else {
-        if let Some(rid) = id.as_deref() {
-            let resolved = handle.resolve_rev(rid).ok_or_else(|| format!("unknown revision {rid}"))?;
-            view_resolved(&handle, Some(rid), &resolved)?;
-        } else {
-            project::set_active_extraction(&handle.project_dir, id.as_deref())?;
-            *handle.active_extraction.lock_safe() = id;
-        }
-        return Ok(switched);
-    };
-
-    // With a design folder, selecting a revision checks it out to disk.
     // Suspend the watcher BEFORE the checkout: otherwise a watch-triggered crunch can
     // slip into the gap between the busy-check and the write (TOCTOU) and hash a
     // half-overwritten design folder into a torn revision. Resume unconditionally, even
     // on an early return or error.
     handle.watcher_suspended.store(true, Ordering::SeqCst);
-    let result = checkout_to_disk(&handle, &design_path, id.as_deref(), confirmed);
+    let result = checkout_to_disk(&handle, &design_path, &id, confirmed);
     handle.watcher_suspended.store(false, Ordering::SeqCst); // always resume
+    if matches!(&result, Ok(r) if r.status == "switched") {
+        log::info!("design files updated to revision {id}");
+        telemetry::bump("update_design_files");
+    }
     result
 }
 
-/// The KiCad checkout-to-disk body of `set_active_extraction`, extracted so the policy
+/// The KiCad checkout-to-disk body of `update_design_files`, extracted so the policy
 /// (busy/dirty/switched outcomes, capture-before-overwrite, hash-gate seeding) is a named,
 /// testable unit and the command wrapper is just the watcher-suspend bracket. The caller
 /// MUST have suspended the watcher; this runs the whole resolve→capture→write→view flow.
 fn checkout_to_disk(
     handle: &ProjectHandle,
     design_path: &Path,
-    id: Option<&str>,
+    id: &str,
     confirmed: bool,
 ) -> Result<CheckoutResult, String> {
     let switched = CheckoutResult { status: "switched".into(), captured: None };
@@ -505,24 +519,13 @@ fn checkout_to_disk(
         return Ok(CheckoutResult { status: "busy".into(), captured: None });
     }
 
-    // Resolve the target (id None = the newest row across both stores).
-    let resolved = match id {
-        Some(rid) => handle.resolve_rev(rid).ok_or_else(|| format!("unknown revision {rid}"))?,
-        None => match handle.latest_resolved() {
-            Some(r) => r,
-            None => {
-                project::set_active_extraction(&handle.project_dir, None)?;
-                *handle.active_extraction.lock_safe() = None;
-                return Ok(switched);
-            }
-        },
-    };
+    let resolved = handle.resolve_rev(id).ok_or_else(|| format!("unknown revision {id}"))?;
     let target_hashes = resolved.revision().source_hashes.clone();
     let live = sidecar::source_hashes(design_path);
 
     // Disk already matches the target → no write, just point the viewer.
     if live == target_hashes {
-        view_resolved(handle, id, &resolved)?;
+        view_resolved(handle, Some(id), &resolved)?;
         return Ok(switched);
     }
 
@@ -559,7 +562,7 @@ fn checkout_to_disk(
     // Seed the hash gate so any stray post-resume trigger no-ops.
     sidecar::save_last_crunch_hashes(&handle.project_dir, &target_hashes);
 
-    view_resolved(handle, id, &resolved)?;
+    view_resolved(handle, Some(id), &resolved)?;
     Ok(CheckoutResult { status: "switched".into(), captured })
 }
 
@@ -1239,6 +1242,7 @@ pub fn run() {
             detect_design_folder,
             relink_design_path,
             set_active_extraction,
+            update_design_files,
             list_extractions,
             label_extraction,
             tag_revision,

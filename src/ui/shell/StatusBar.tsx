@@ -70,13 +70,17 @@ function VersionChip() {
   return (
     <button
       className={`statusbar-btn ${isOld ? "viewing-old" : ""}`}
-      title="Revision history — click to open the graph"
+      title={
+        isOld
+          ? "Reviewing an older version — your KiCad files are unchanged. To write this version to disk, right-click it in the history graph and choose “Update KiCad files”. Click to open the graph."
+          : "Revision history — click to open the graph"
+      }
       onClick={() => useHistoryStore.getState().openGraph()}
     >
       <IconHistory size={12} />
       <span className="mono">{dateText}</span>
       {tag && <span className="rev-tag-ref">{tag}</span>}
-      {isOld && <span className="rev-old-tag">history</span>}
+      {isOld && <span className="rev-old-tag">reviewing old version</span>}
     </button>
   );
 }
