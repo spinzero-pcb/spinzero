@@ -40,7 +40,19 @@ export function DiffBanner() {
       </span>
       {preparing && <span className="diff-preparing">Preparing comparison…</span>}
       <span style={{ flex: 1 }} />
-      {/* PCB compare toggles — only meaningful on the PCB canvas. */}
+      {/* PCB compare legend + toggles — only meaningful on the PCB canvas. Changed
+          copper keeps its layer colour; old vs new is the fill style. */}
+      {view === "pcb" && (
+        <span
+          className="diff-legend"
+          title="Changed copper shows in its layer colour over the grey board. Hatched = removed (old revision), solid = added (new revision)."
+        >
+          <span className="diff-legend-swatch diff-legend-removed" aria-hidden="true" />
+          <span className="diff-legend-label">removed</span>
+          <span className="diff-legend-swatch diff-legend-added" aria-hidden="true" />
+          <span className="diff-legend-label">added</span>
+        </span>
+      )}
       {view === "pcb" && (
         <span className="diff-mode-toggle" role="group" aria-label="PCB compare options">
           <button

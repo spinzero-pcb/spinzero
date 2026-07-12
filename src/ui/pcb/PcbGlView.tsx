@@ -15,7 +15,7 @@ import { ContextMenu, type MenuItem } from "../ContextMenu";
 import { IconClose, IconComment, IconCopy, IconFit, IconRuler, IconSheet, IconTrash } from "../icons";
 import type { CommentAnchor } from "../../lib/types";
 import type { PcbGeometry, PcbTextDef } from "../../lib/pcbGeometry";
-import { PcbGlRenderer, netLabelRows, type BBox, type Camera, type DiffFlags, type ObjectState, type RGB } from "./glRenderer";
+import { PcbGlRenderer, netLabelRows, type BBox, type Camera, type DiffFlags, type ObjectState } from "./glRenderer";
 import { buildDiffVisibility, computeDiffFlags } from "./glDiff";
 import { isTypingTarget } from "../../lib/keymap";
 import { useDiffStore } from "../../stores/diffStore";
@@ -45,10 +45,11 @@ import { PcbToolbar } from "./PcbToolbar";
 const MIN_SCALE = 0.05;
 const MAX_SCALE = 2000;
 
-/** Diff overlay: fraction of a changed primitive's OWN layer colour kept in the
- *  red/green tint. High enough that F.Cu still reads as F.Cu on a multi-layer
- *  compare, low enough that added-vs-removed stays unmistakable. */
-const DIFF_LAYER_MIX = 0.4;
+/** Diff overlay encoding: colour = LAYER, texture = old vs new. Changed copper keeps
+ *  its TRUE layer colour (mix 1.0) so "which layer changed" reads instantly over the
+ *  grey base; removed (A) copper is hatched, added (B) is solid (glRenderer diffHatch).
+ *  Red/green tints were tried and dropped — per-layer tint blends were illegible. */
+const DIFF_LAYER_MIX = 1.0;
 
 /** Draw one net-label row: the plain `text` centred at (0, cy) plus a KiCad-style
  *  overline over each `~{…}` run (feedback: nets like `~{project_rst}`). ctx.font /
@@ -333,8 +334,6 @@ export function PcbGlView({ visible }: { visible: boolean }) {
   /** Blink phase (true = the removed/A overlay is showing) + Space-held pause. */
   const blinkA = useRef(true);
   const blinkHold = useRef(false);
-  /** Diff tint colours, re-resolved with the theme (never hardcoded — CLAUDE.md). */
-  const diffColors = useRef<{ removed: RGB; added: RGB }>({ removed: [1, 0.2, 0.2], added: [0.2, 1, 0.4] });
   const cam = useRef<Camera>({ x: 0, y: 0, scale: 1 });
   const dirty = useRef(true);
   const needsFit = useRef(false);
@@ -1070,17 +1069,6 @@ export function PcbGlView({ visible }: { visible: boolean }) {
     dirty.current = true;
   }, [indexes?.theme]);
 
-  // Diff tint colours track the theme: same removed/added semantics as the schematic
-  // tints (--err / --ok). Re-resolved on theme change and on entering diff mode.
-  useEffect(() => {
-    if (!diffActive) return;
-    diffColors.current = {
-      removed: resolveCssColor("var(--err)"),
-      added: resolveCssColor("var(--ok)"),
-    };
-    dirty.current = true;
-  }, [diffActive, indexes?.theme]);
-
   // Blink: pulse the changed copper — removed (A) and added (B) overlays alternate
   // phases every 500 ms over the stable grey base, so what pulses IN is new copper and
   // what pulses OUT is old. Holding Space freezes the current phase.
@@ -1262,23 +1250,22 @@ export function PcbGlView({ visible }: { visible: boolean }) {
           const rA = rendererARef.current;
           if (rA && diffOnRef.current) {
             rA.setDpr(dpr);
-            const { removed, added } = diffColors.current;
             const base = objRef.current;
             // The banner's Zones toggle drops pours from the WHOLE compare (they
             // re-flow around edits; sometimes even the gated tint is unwanted).
             const obj = hideZonesRef.current
               ? { objects: { ...base.objects, zones: false }, opacity: base.opacity }
               : base;
-            // Overlay: the unchanged common base as flat grey (from B), then A's removed
-            // copper red-tinted and B's added copper green-tinted, each keeping a share
-            // of its own layer colour (DIFF_LAYER_MIX) so multi-layer compares stay
-            // layer-legible. With blink on, removed and added alternate phases.
+            // Overlay: the unchanged common base as flat grey (from B), then the changed
+            // copper in its TRUE layer colour — A's removed copper hatched, B's added
+            // copper solid (colour = layer, texture = old/new; see DIFF_LAYER_MIX).
+            // With blink on, removed and added alternate phases.
             r.render(cam.current, w, h, obj, { diffPass: 1 });
             const blinkOn = blinkRef.current;
             if (!blinkOn || blinkA.current)
-              rA.render(cam.current, w, h, obj, { clear: false, diffPass: 2, diffColor: removed, diffMix: DIFF_LAYER_MIX });
+              rA.render(cam.current, w, h, obj, { clear: false, diffPass: 2, diffMix: DIFF_LAYER_MIX, diffHatch: true });
             if (!blinkOn || !blinkA.current)
-              r.render(cam.current, w, h, obj, { clear: false, diffPass: 2, diffColor: added, diffMix: DIFF_LAYER_MIX });
+              r.render(cam.current, w, h, obj, { clear: false, diffPass: 2, diffMix: DIFF_LAYER_MIX });
           } else {
             r.render(cam.current, w, h, objRef.current);
           }
