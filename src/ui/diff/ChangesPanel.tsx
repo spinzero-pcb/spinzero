@@ -1,24 +1,22 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useDiffStore } from "../../stores/diffStore";
 import {
-  countByImpact,
   filterChanges,
   groupChanges,
   orderedChanges,
   hasPcbAnchor,
   hasSchematicAnchor,
-  IMPACT_FILTERS,
   tintRole,
   type Change,
-  type ChangeImpact,
-  type ChangeGroup,
+  type ImpactBucket,
 } from "../../lib/diff";
 import { isTypingTarget } from "../../lib/keymap";
 import { IconCheck, IconChevron, IconEye, IconEyeOff } from "../icons";
 
 /** The Changes panel (visual-diff §5): the left-rail tab shown only in diff mode. A tree
- *  grouped by change group with count badges, impact + free-text filters, a stepper
- *  header ("Change 7 of 23") with prev/next and ←/→ + J/K keyboard walk, per-change seen
+ *  grouped by impact (Electrical / Placement / Cosmetic — the panel's single
+ *  categorization) with count badges, a free-text filter, a stepper header
+ *  ("Change 7 of 23") with prev/next and ←/→ + J/K keyboard walk, per-change seen
  *  checkmarks, and click-to-focus. */
 export function ChangesPanel() {
   const doc = useDiffStore((s) => s.doc);
@@ -32,28 +30,15 @@ export function ChangesPanel() {
   const toggleChangeHidden = useDiffStore((s) => s.toggleChangeHidden);
   const showAllChanges = useDiffStore((s) => s.showAllChanges);
 
-  const [impacts, setImpacts] = useState<Set<ChangeImpact>>(new Set());
   const [query, setQuery] = useState("");
-  const [collapsed, setCollapsed] = useState<Set<ChangeGroup>>(new Set());
+  const [collapsed, setCollapsed] = useState<Set<ImpactBucket>>(new Set());
 
   const allChanges = doc?.changes ?? [];
-  // Apply filters, then re-group for the tree and re-flatten for the stepper walk, so
-  // "Change N of M" and prev/next count only the *visible* changes.
-  const visible = useMemo(
-    () => filterChanges(allChanges, impacts, query),
-    [allChanges, impacts, query],
-  );
+  // Apply the text filter, then re-group for the tree and re-flatten for the stepper
+  // walk, so "Change N of M" and prev/next count only the *visible* changes.
+  const visible = useMemo(() => filterChanges(allChanges, query), [allChanges, query]);
   const groups = useMemo(() => groupChanges(visible), [visible]);
   const ordered = useMemo(() => orderedChanges(visible), [visible]);
-  // Only offer chips that would show something: a bucket with zero changes is noise
-  // (the Cosmetic chip's bucket also covers doc-impact changes — see impactBucket).
-  const chips = useMemo(() => {
-    if (!doc) return IMPACT_FILTERS;
-    const counts = countByImpact(doc);
-    return IMPACT_FILTERS.filter(
-      (f) => counts[f.id] + (f.id === "cosmetic" ? counts.doc : 0) > 0,
-    );
-  }, [doc]);
   const focusIdx = ordered.findIndex((c) => c.id === focusedId);
 
   // Step within the *visible* (filtered) sequence — the same set the "Change N of M"
@@ -103,15 +88,7 @@ export function ChangesPanel() {
     if (focusedId) rowRefs.current.get(focusedId)?.scrollIntoView({ block: "nearest" });
   }, [focusedId]);
 
-  function toggleImpact(id: ChangeImpact) {
-    setImpacts((prev) => {
-      const nextSet = new Set(prev);
-      if (nextSet.has(id)) nextSet.delete(id);
-      else nextSet.add(id);
-      return nextSet;
-    });
-  }
-  function toggleCollapse(g: ChangeGroup) {
+  function toggleCollapse(g: ImpactBucket) {
     setCollapsed((prev) => {
       const nextSet = new Set(prev);
       if (nextSet.has(g)) nextSet.delete(g);
@@ -149,18 +126,6 @@ export function ChangesPanel() {
         </button>
       </div>
 
-      {/* Filters */}
-      <div className="changes-filters">
-        {chips.map((f) => (
-          <button
-            key={f.id}
-            className={`filter-chip ${impacts.has(f.id) ? "active" : ""}`}
-            onClick={() => toggleImpact(f.id)}
-          >
-            {f.label}
-          </button>
-        ))}
-      </div>
       <input
         className="changes-search"
         type="text"
@@ -188,13 +153,13 @@ export function ChangesPanel() {
           <div className="menu-empty">No changes match the filter.</div>
         ) : (
           groups.map((grp) => {
-            const isCollapsed = collapsed.has(grp.group);
+            const isCollapsed = collapsed.has(grp.impact);
             const groupIds = grp.changes.map((c) => c.id);
             const allSeen = groupIds.every((id) => seen.has(id));
             return (
-              <div key={grp.group} className="changes-group">
+              <div key={grp.impact} className="changes-group">
                 <div className="changes-group-head">
-                  <button className="group-toggle" onClick={() => toggleCollapse(grp.group)}>
+                  <button className="group-toggle" onClick={() => toggleCollapse(grp.impact)}>
                     <span className={`chevron ${isCollapsed ? "collapsed" : ""}`}>
                       <IconChevron size={12} />
                     </span>

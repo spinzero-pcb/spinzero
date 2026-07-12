@@ -1,5 +1,4 @@
 import {
-  countByImpact,
   filterChanges,
   groupChanges,
   orderedChanges,
@@ -9,7 +8,6 @@ import {
   tintsA,
   tintsB,
   type Change,
-  type DiffDoc,
 } from "./diff";
 
 // A small builder so each test spells out only the fields it cares about.
@@ -25,18 +23,28 @@ function ch(partial: Partial<Change> & Pick<Change, "id" | "group" | "kind">): C
 
 describe("diff helpers", () => {
   describe("groupChanges", () => {
-    it("groups by group in GROUP_ORDER and omits empty groups", () => {
+    it("groups by impact in IMPACT_ORDER and omits empty buckets", () => {
       const changes = [
-        ch({ id: "a", group: "routing", kind: "added" }),
-        ch({ id: "b", group: "component", kind: "modified" }),
-        ch({ id: "c", group: "net", kind: "removed" }),
+        ch({ id: "a", group: "silk", kind: "added", impact: "cosmetic" }),
+        ch({ id: "b", group: "component", kind: "modified", impact: "electrical" }),
+        ch({ id: "c", group: "placement", kind: "moved", impact: "placement" }),
       ];
       const groups = groupChanges(changes);
-      expect(groups.map((g) => g.group)).toEqual(["component", "net", "routing"]);
-      expect(groups.map((g) => g.label)).toEqual(["Components", "Nets", "Routing"]);
+      expect(groups.map((g) => g.impact)).toEqual(["electrical", "placement", "cosmetic"]);
+      expect(groups.map((g) => g.label)).toEqual(["Electrical", "Placement", "Cosmetic"]);
     });
 
-    it("orders within a group by sheet then position", () => {
+    it("folds doc impact into the Cosmetic bucket", () => {
+      const changes = [
+        ch({ id: "d", group: "doc", kind: "modified", impact: "doc" }),
+        ch({ id: "s", group: "silk", kind: "modified", impact: "cosmetic" }),
+      ];
+      const groups = groupChanges(changes);
+      expect(groups.map((g) => g.impact)).toEqual(["cosmetic"]);
+      expect(groups[0].changes.map((c) => c.id).sort()).toEqual(["d", "s"]);
+    });
+
+    it("orders within a bucket by sheet then position", () => {
       const changes = [
         ch({ id: "s3", group: "component", kind: "modified", anchors: { schematic: { sheet: 3, uuids: [] } } }),
         ch({ id: "s1", group: "component", kind: "modified", anchors: { schematic: { sheet: 1, uuids: [] } } }),
@@ -68,12 +76,12 @@ describe("diff helpers", () => {
   });
 
   describe("orderedChanges", () => {
-    it("flattens groups into a single walk sequence", () => {
+    it("flattens buckets into a single walk sequence (electrical first)", () => {
       const changes = [
-        ch({ id: "r1", group: "routing", kind: "added" }),
-        ch({ id: "c1", group: "component", kind: "modified" }),
+        ch({ id: "s1", group: "silk", kind: "added", impact: "cosmetic" }),
+        ch({ id: "c1", group: "component", kind: "modified", impact: "electrical" }),
       ];
-      expect(orderedChanges(changes).map((c) => c.id)).toEqual(["c1", "r1"]);
+      expect(orderedChanges(changes).map((c) => c.id)).toEqual(["c1", "s1"]);
     });
   });
 
@@ -82,47 +90,20 @@ describe("diff helpers", () => {
       ch({ id: "e", group: "net", kind: "modified", impact: "electrical", title: "net /VBUS rewired" }),
       ch({ id: "p", group: "placement", kind: "moved", impact: "placement", title: "R7 moved 3mm" }),
       ch({ id: "s", group: "silk", kind: "modified", impact: "cosmetic", title: "Silk REV A → B" }),
-      ch({ id: "d", group: "doc", kind: "modified", impact: "doc", title: "Rev 1.2 → 1.3" }),
     ];
 
-    it("empty impact set shows all", () => {
-      expect(filterChanges(changes, new Set(), "").map((c) => c.id)).toEqual(["e", "p", "s", "d"]);
-    });
-
-    it("filters by an active impact chip", () => {
-      expect(filterChanges(changes, new Set(["electrical"]), "").map((c) => c.id)).toEqual(["e"]);
-    });
-
-    it("folds doc impact under the cosmetic chip", () => {
-      // Selecting 'cosmetic' keeps both the cosmetic and the doc change (so nothing is
-      // ever unreachable behind a filter).
-      expect(filterChanges(changes, new Set(["cosmetic"]), "").map((c) => c.id).sort()).toEqual(["d", "s"]);
+    it("empty query shows all", () => {
+      expect(filterChanges(changes, "").map((c) => c.id)).toEqual(["e", "p", "s"]);
     });
 
     it("free-text matches title (case-insensitive)", () => {
-      expect(filterChanges(changes, new Set(), "vbus").map((c) => c.id)).toEqual(["e"]);
+      expect(filterChanges(changes, "vbus").map((c) => c.id)).toEqual(["e"]);
     });
 
-    it("combines impact + text", () => {
-      expect(filterChanges(changes, new Set(["placement"]), "R7").map((c) => c.id)).toEqual(["p"]);
-      expect(filterChanges(changes, new Set(["electrical"]), "R7")).toEqual([]);
-    });
-  });
-
-  describe("countByImpact", () => {
-    it("reads the doc stats when present", () => {
-      const doc = { stats: { electrical: 3, placement: 6 }, changes: [] } as unknown as DiffDoc;
-      expect(countByImpact(doc)).toEqual({ electrical: 3, placement: 6, cosmetic: 0, doc: 0 });
-    });
-    it("falls back to counting the change list when stats are empty", () => {
-      const doc = {
-        stats: {},
-        changes: [
-          ch({ id: "a", group: "net", kind: "added", impact: "electrical" }),
-          ch({ id: "b", group: "silk", kind: "added", impact: "cosmetic" }),
-        ],
-      } as unknown as DiffDoc;
-      expect(countByImpact(doc)).toEqual({ electrical: 1, placement: 0, cosmetic: 1, doc: 0 });
+    it("matches detail text too", () => {
+      const withDetail = [ch({ id: "d", group: "net", kind: "modified", title: "GND", detail: "stitching vias" })];
+      expect(filterChanges(withDetail, "stitching").map((c) => c.id)).toEqual(["d"]);
+      expect(filterChanges(withDetail, "nothing")).toEqual([]);
     });
   });
 

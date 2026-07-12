@@ -3178,19 +3178,6 @@ button {
 .step-btn { font-size: 18px; line-height: 1; padding: 0 8px; color: var(--fg-1); }
 .step-btn:hover { color: var(--fg-0); }
 
-.changes-filters { display: flex; gap: 6px; padding: var(--sp-2) var(--sp-3) 0; flex-wrap: wrap; }
-.filter-chip {
-  font-size: 11px;
-  padding: 2px 8px;
-  border-radius: 10px;
-  border: 1px solid var(--border-1);
-  background: var(--bg-2);
-  color: var(--fg-1);
-  cursor: pointer;
-}
-.filter-chip:hover { color: var(--fg-0); }
-.filter-chip.active { background: var(--accent-dim); border-color: var(--accent); color: var(--fg-0); }
-
 .changes-search {
   margin: var(--sp-2) var(--sp-3);
   padding: 5px 8px;

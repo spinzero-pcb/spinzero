@@ -111,41 +111,26 @@ export interface DiffHandle {
 
 // ----------------------------------------------------------------- pure helpers
 
-/** Display order of groups in the Changes tree (electrical first, cosmetic last). */
-export const GROUP_ORDER: ChangeGroup[] = [
-  "component",
-  "net",
-  "sheet",
-  "placement",
-  "routing",
-  "zone",
-  "outline",
-  "silk",
-  "text",
-  "doc",
-];
+/** The Changes tree groups by impact — the one categorization the panel shows (the
+ *  old object-type grouping, Components/Nets/Sheets/…, was removed as a second
+ *  competing taxonomy; `Change.group` stays in the data for the renderers). `doc`
+ *  folds into "cosmetic" via impactBucket so every change lands in exactly one
+ *  bucket. Display order: what can break the board first, looks last. */
+export type ImpactBucket = Exclude<ChangeImpact, "doc">;
 
-/** Human label for a group header. */
-export const GROUP_LABELS: Record<ChangeGroup, string> = {
-  component: "Components",
-  net: "Nets",
-  sheet: "Sheets",
+export const IMPACT_ORDER: ImpactBucket[] = ["electrical", "placement", "cosmetic"];
+
+export const IMPACT_LABELS: Record<ImpactBucket, string> = {
+  electrical: "Electrical",
   placement: "Placement",
-  routing: "Routing",
-  zone: "Zones",
-  outline: "Outline",
-  silk: "Silkscreen",
-  text: "Text",
-  doc: "Document",
+  cosmetic: "Cosmetic",
 };
 
-/** The three impact filter chips the panel exposes (doc folds under "Cosmetic" in the
- *  UI filter but keeps its own class in the data). */
-export const IMPACT_FILTERS: { id: ChangeImpact; label: string }[] = [
-  { id: "electrical", label: "Electrical" },
-  { id: "placement", label: "Placement" },
-  { id: "cosmetic", label: "Cosmetic" },
-];
+/** Which impact bucket a change falls into: its own class, except `doc`, which shows
+ *  under "Cosmetic" (non-electrical, non-placement) so no change is ever unreachable. */
+export function impactBucket(impact: ChangeImpact): ImpactBucket {
+  return impact === "doc" ? "cosmetic" : impact;
+}
 
 /** A group's first change's within-group sort key: sheet (schematic) or first layer
  *  name (PCB), then the anchor position, then the id — a total order so stepping is
@@ -173,27 +158,28 @@ function cmpOrderKey(a: Change, b: Change): number {
 }
 
 export interface ChangeGroupNode {
-  group: ChangeGroup;
+  impact: ImpactBucket;
   label: string;
   changes: Change[];
 }
 
-/** Group changes by `group`, ordered by GROUP_ORDER, with each group's changes sorted
- *  by sheet/layer then position (§5). Empty groups are omitted. Pure. */
+/** Group changes by impact bucket, ordered by IMPACT_ORDER, with each bucket's changes
+ *  sorted by sheet/layer then position (§5). Empty buckets are omitted. Pure. */
 export function groupChanges(changes: Change[]): ChangeGroupNode[] {
-  const byGroup = new Map<ChangeGroup, Change[]>();
+  const byBucket = new Map<ImpactBucket, Change[]>();
   for (const c of changes) {
-    const list = byGroup.get(c.group);
+    const bucket = impactBucket(c.impact);
+    const list = byBucket.get(bucket);
     if (list) list.push(c);
-    else byGroup.set(c.group, [c]);
+    else byBucket.set(bucket, [c]);
   }
   const out: ChangeGroupNode[] = [];
-  for (const group of GROUP_ORDER) {
-    const list = byGroup.get(group);
+  for (const impact of IMPACT_ORDER) {
+    const list = byBucket.get(impact);
     if (!list || list.length === 0) continue;
     out.push({
-      group,
-      label: GROUP_LABELS[group],
+      impact,
+      label: IMPACT_LABELS[impact],
       changes: [...list].sort(cmpOrderKey),
     });
   }
@@ -206,43 +192,12 @@ export function orderedChanges(changes: Change[]): Change[] {
   return groupChanges(changes).flatMap((g) => g.changes);
 }
 
-/** Which impact-filter bucket a change falls into. `doc` impact shows under the
- *  "Cosmetic" chip (it is non-electrical, non-placement) so no change is ever
- *  unreachable when a filter is active. */
-function impactBucket(impact: ChangeImpact): ChangeImpact {
-  return impact === "doc" ? "cosmetic" : impact;
-}
-
-/** Filter changes by an active set of impact chips (empty set = show all) and a
- *  free-text query (matches title + detail, case-insensitive). Pure. */
-export function filterChanges(
-  changes: Change[],
-  impacts: ReadonlySet<ChangeImpact>,
-  query: string,
-): Change[] {
+/** Filter changes by a free-text query (matches title + detail, case-insensitive).
+ *  Pure. */
+export function filterChanges(changes: Change[], query: string): Change[] {
   const q = query.trim().toLowerCase();
-  return changes.filter((c) => {
-    if (impacts.size > 0 && !impacts.has(impactBucket(c.impact))) return false;
-    if (q && !`${c.title} ${c.detail ?? ""}`.toLowerCase().includes(q)) return false;
-    return true;
-  });
-}
-
-/** Total change count by impact class, from the doc's stats (with a fallback that
- *  recomputes from the change list if stats are absent). Pure. */
-export function countByImpact(doc: DiffDoc): Record<ChangeImpact, number> {
-  const s = doc.stats;
-  if (s.electrical || s.placement || s.cosmetic || s.doc) {
-    return {
-      electrical: s.electrical ?? 0,
-      placement: s.placement ?? 0,
-      cosmetic: s.cosmetic ?? 0,
-      doc: s.doc ?? 0,
-    };
-  }
-  const out: Record<ChangeImpact, number> = { electrical: 0, placement: 0, cosmetic: 0, doc: 0 };
-  for (const c of doc.changes) out[c.impact]++;
-  return out;
+  if (!q) return changes;
+  return changes.filter((c) => `${c.title} ${c.detail ?? ""}`.toLowerCase().includes(q));
 }
 
 /** Does a change land on the schematic canvas? (An empty-uuid anchor still lands —
