@@ -304,12 +304,27 @@ pub struct GeomGraphic {
     pub data: Vec<f64>,
 }
 
-#[derive(Deserialize, Clone)]
+#[derive(Deserialize, Default, Clone)]
 pub struct GeomText {
     pub layer: u16,
     pub text: String,
     pub x: f64,
     pub y: f64,
+    // Style fields (mirror of `extract::ir::TextDef`) — absent in the JSON means the
+    // extractor's defaults. Compared so a restyle (resize, pen change, font swap)
+    // surfaces as a change instead of masking as "unchanged".
+    #[serde(default)]
+    pub size: Option<f64>,
+    #[serde(default)]
+    pub width: Option<f64>,
+    #[serde(default)]
+    pub thickness: Option<f64>,
+    #[serde(default)]
+    pub bold: bool,
+    #[serde(default)]
+    pub italic: bool,
+    #[serde(default)]
+    pub font: Option<String>,
 }
 
 // ======================================= schematic geometry (deserialize side)
@@ -1954,58 +1969,119 @@ fn ring_area(pts: &[f64]) -> f64 {
 /// from here: a graphic on Edge.Cuts is an outline change; text is a silk/text change;
 /// other graphics are silk. (plan §2)
 fn diff_graphics_and_text(a: &Geometry, b: &Geometry, out: &mut Vec<Change>) {
-    // --- text diff. We work on indices so an in-place edit (same layer+position,
-    // changed string) folds to one "modified" instead of add+remove, and the
-    // still-unpaired texts on each side become add/remove. Identity for pairing is
-    // (layer, rounded x, rounded y); identity for "unchanged" additionally includes
-    // the string, so an untouched text is dropped on both sides.
-    let pos_key = |g: &Geometry, t: &GeomText| (t.layer, (t.x * 1e4).round() as i64, (t.y * 1e4).round() as i64, layer_of(g, t.layer));
-    let full_key = |_g: &Geometry, t: &GeomText| (t.layer, (t.x * 1e4).round() as i64, (t.y * 1e4).round() as i64, t.text.clone());
+    // --- text diff. Three-stage pairing on indices so ONE authoring action reads as
+    // ONE row instead of an add+remove pair:
+    //   0. identical texts (layer + position + string + style) are unchanged — masked;
+    //   1. leftovers at the SAME spot pair as an in-place edit: a changed string
+    //      ("'REV A' → 'REV B'") or, string intact, a restyle (size/pen/font/bold);
+    //   2. leftovers with the SAME string on the same layer pair as a move
+    //      (nearest candidate first), anchored on a box covering BOTH positions so
+    //      each side's render frames its own copy;
+    //   3. whatever is still unpaired really is an add / remove.
+    let pos_of = |t: &GeomText| ((t.x * 1e4).round() as i64, (t.y * 1e4).round() as i64);
+    let full_key = |g: &Geometry, t: &GeomText| (layer_of(g, t.layer), pos_of(t), t.text.clone(), style_key(t));
 
-    // Texts identical on both sides (same position AND string) are unchanged — mask them.
-    let b_full: HashSet<(u16, i64, i64, String)> = b.texts.iter().map(|t| full_key(b, t)).collect();
-    let a_full: HashSet<(u16, i64, i64, String)> = a.texts.iter().map(|t| full_key(a, t)).collect();
+    // Stage 0: texts identical on both sides are unchanged — mask them.
+    let b_full: HashSet<_> = b.texts.iter().map(|t| full_key(b, t)).collect();
+    let a_full: HashSet<_> = a.texts.iter().map(|t| full_key(a, t)).collect();
     let mut a_left: Vec<usize> = (0..a.texts.len()).filter(|&i| !b_full.contains(&full_key(a, &a.texts[i]))).collect();
     let mut b_left: Vec<usize> = (0..b.texts.len()).filter(|&j| !a_full.contains(&full_key(b, &b.texts[j]))).collect();
 
-    // Pair by position (an edit): a leftover A and leftover B at the same spot = a modify.
-    let mut a_by_pos: HashMap<(u16, i64, i64, String), Vec<usize>> = HashMap::new();
+    // Stage 1: pair by position — a string edit or a restyle at the same spot.
+    let pos_key = |g: &Geometry, t: &GeomText| (layer_of(g, t.layer), pos_of(t));
+    let mut a_by_pos: HashMap<(String, (i64, i64)), Vec<usize>> = HashMap::new();
     for &i in &a_left {
         a_by_pos.entry(pos_key(a, &a.texts[i])).or_default().push(i);
     }
     let mut consumed_a: HashSet<usize> = HashSet::new();
     let mut consumed_b: HashSet<usize> = HashSet::new();
-    let mut edits: Vec<(String, String, String, [f64; 2])> = Vec::new(); // (old, new, layer, at)
+    // (title, detail, layer, anchor bbox [x, y, w, h])
+    let mut paired: Vec<(String, String, String, [f64; 4])> = Vec::new();
     for &j in &b_left {
         let bt = &b.texts[j];
         if let Some(cands) = a_by_pos.get(&pos_key(b, bt)) {
             if let Some(&i) = cands.iter().find(|&&i| !consumed_a.contains(&i)) {
                 consumed_a.insert(i);
                 consumed_b.insert(j);
+                let at = &a.texts[i];
                 let layer = layer_of(b, bt.layer);
-                edits.push((a.texts[i].text.clone(), bt.text.clone(), layer, [bt.x, bt.y]));
+                let (title, detail) = if at.text != bt.text {
+                    (format!("Text '{}' → '{}'", at.text, bt.text), format!("on {layer}"))
+                } else {
+                    (format!("Text '{}' restyled on {layer}", bt.text), style_delta(at, bt))
+                };
+                paired.push((title, detail, layer, point_box(bt.x, bt.y)));
             }
         }
     }
     a_left.retain(|i| !consumed_a.contains(i));
     b_left.retain(|j| !consumed_b.contains(j));
 
-    edits.sort_by(|x, y| (x.2.as_str(), x.0.as_str(), x.1.as_str()).cmp(&(y.2.as_str(), y.0.as_str(), y.1.as_str())));
-    for (old, new, layer, at) in edits {
-        out.push(Change {
-            id: String::new(),
-            emph_a: None,
-            emph_b: None,
-            group: Group::Text,
-            kind: Kind::Modified,
-            impact: Impact::Cosmetic,
-            title: format!("Text '{}' → '{}'", old, new),
-            detail: format!("on {layer}"),
-            anchors: pcb_point_anchor(&layer, at),
-            side: Side::Both,
-        });
+    // Stage 2: pair by string — the same text at a new spot is a move, not add+remove.
+    // Nearest surviving candidate wins so several same-string labels pair sensibly.
+    let mut a_by_text: HashMap<(String, String), Vec<usize>> = HashMap::new();
+    for &i in &a_left {
+        let at = &a.texts[i];
+        a_by_text.entry((layer_of(a, at.layer), at.text.clone())).or_default().push(i);
     }
-    // Remaining unpaired texts → add / remove.
+    let mut moves: Vec<(String, String, String, [f64; 4])> = Vec::new();
+    for &j in &b_left {
+        let bt = &b.texts[j];
+        let layer = layer_of(b, bt.layer);
+        let Some(cands) = a_by_text.get(&(layer.clone(), bt.text.clone())) else { continue };
+        let nearest = cands
+            .iter()
+            .filter(|&&i| !consumed_a.contains(&i))
+            .min_by(|&&p, &&q| {
+                let d = |i: usize| (a.texts[i].x - bt.x).hypot(a.texts[i].y - bt.y);
+                d(p).total_cmp(&d(q)).then(p.cmp(&q))
+            });
+        let Some(&i) = nearest else { continue };
+        consumed_a.insert(i);
+        consumed_b.insert(j);
+        let at = &a.texts[i];
+        let dist = (at.x - bt.x).hypot(at.y - bt.y);
+        let mut detail = format!("by {dist:.2} mm");
+        let restyle = style_delta(at, bt);
+        if !restyle.is_empty() {
+            detail = format!("{detail} · {restyle}");
+        }
+        // Anchor covers both the old and the new position so either side's render
+        // shows its copy of the text when the change is focused.
+        let (x0, y0) = (at.x.min(bt.x), at.y.min(bt.y));
+        let (x1, y1) = (at.x.max(bt.x), at.y.max(bt.y));
+        let bbox = [x0 - 5.0, y0 - 5.0, (x1 - x0) + 10.0, (y1 - y0) + 10.0];
+        moves.push((format!("Text '{}' moved on {layer}", bt.text), detail, layer, bbox));
+    }
+    a_left.retain(|i| !consumed_a.contains(i));
+    b_left.retain(|j| !consumed_b.contains(j));
+
+    let by_title = |x: &(String, String, String, [f64; 4]), y: &(String, String, String, [f64; 4])| {
+        (x.2.as_str(), x.0.as_str(), x.1.as_str()).cmp(&(y.2.as_str(), y.0.as_str(), y.1.as_str()))
+    };
+    paired.sort_by(by_title);
+    moves.sort_by(by_title);
+    for (kind, rows) in [(Kind::Modified, paired), (Kind::Moved, moves)] {
+        for (title, detail, layer, bbox) in rows {
+            out.push(Change {
+                id: String::new(),
+                emph_a: None,
+                emph_b: None,
+                group: Group::Text,
+                kind,
+                impact: Impact::Cosmetic,
+                title,
+                detail,
+                anchors: Anchors {
+                    schematic: None,
+                    schematic_a: None,
+                    pcb: Some(PcbAnchor { bbox: Some(bbox), layers: vec![layer], comp: None, net: None }),
+                },
+                side: Side::Both,
+            });
+        }
+    }
+    // Stage 3: remaining unpaired texts → add / remove.
     push_text_addremove(out, a, &a_left, Kind::Removed, Side::A);
     push_text_addremove(out, b, &b_left, Kind::Added, Side::B);
 
@@ -2095,6 +2171,46 @@ fn push_text_addremove(out: &mut Vec<Change>, g: &Geometry, idxs: &[usize], kind
     }
 }
 
+/// A text's comparable style, floats rounded to 1 µm so re-serialization noise never
+/// reads as a restyle. Absent options are the extractor defaults on both sides, so
+/// `None == None` correctly means "same".
+fn style_key(t: &GeomText) -> (Option<i64>, Option<i64>, Option<i64>, bool, bool, Option<String>) {
+    let um = |v: Option<f64>| v.map(|v| (v * 1e3).round() as i64);
+    (um(t.size), um(t.width), um(t.thickness), t.bold, t.italic, t.font.clone())
+}
+
+/// Human-readable summary of what changed between two same-string texts' styles
+/// (empty when the styles match).
+fn style_delta(a: &GeomText, b: &GeomText) -> String {
+    let mut bits = Vec::new();
+    let mm = |v: Option<f64>| v.map(|v| format!("{v} mm")).unwrap_or_else(|| "default".into());
+    if style_key(a).0 != style_key(b).0 {
+        bits.push(format!("size {} → {}", mm(a.size), mm(b.size)));
+    }
+    if style_key(a).1 != style_key(b).1 {
+        bits.push(format!("width {} → {}", mm(a.width), mm(b.width)));
+    }
+    if style_key(a).2 != style_key(b).2 {
+        bits.push(format!("thickness {} → {}", mm(a.thickness), mm(b.thickness)));
+    }
+    if a.bold != b.bold {
+        bits.push(format!("bold {}", if b.bold { "on" } else { "off" }));
+    }
+    if a.italic != b.italic {
+        bits.push(format!("italic {}", if b.italic { "on" } else { "off" }));
+    }
+    if a.font != b.font {
+        let name = |f: &Option<String>| f.clone().unwrap_or_else(|| "KiCad stroke".into());
+        bits.push(format!("font {} → {}", name(&a.font), name(&b.font)));
+    }
+    bits.join(", ")
+}
+
+/// The small camera-landing box `pcb_point_anchor` uses, as a raw `[x, y, w, h]`.
+fn point_box(x: f64, y: f64) -> [f64; 4] {
+    [x - 5.0, y - 5.0, 10.0, 10.0]
+}
+
 fn pcb_point_anchor(layer: &str, at: [f64; 2]) -> Anchors {
     Anchors {
         schematic: None,
@@ -2164,7 +2280,7 @@ pub fn diff_key(cache_key_a: &str, cache_key_b: &str) -> String {
     // Engine revision: bump whenever the changeset a given bundle pair produces
     // changes shape (new rows, anchors, fields) — the key only hashes the inputs,
     // so without this a cached diff.json would keep serving the old shape.
-    const DIFF_ENGINE_VERSION: &str = "3";
+    const DIFF_ENGINE_VERSION: &str = "4";
     let mut h = blake3::Hasher::new();
     h.update(DIFF_ENGINE_VERSION.as_bytes());
     h.update(b" ");

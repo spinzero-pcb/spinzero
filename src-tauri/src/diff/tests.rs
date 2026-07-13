@@ -668,7 +668,7 @@ fn pcb_text_edit_folds_to_modify() {
     let make = |rev: &str| Geometry {
         layers: vec![GeomLayer { name: "F.SilkS".into(), role: "silkscreen".into() }],
         nets: vec![String::new()],
-        texts: vec![GeomText { layer: 0, text: rev.into(), x: 10.0, y: 10.0 }],
+        texts: vec![GeomText { layer: 0, text: rev.into(), x: 10.0, y: 10.0, ..Default::default() }],
         ..Default::default()
     };
     let mut a = bundle(empty_indexes());
@@ -681,6 +681,86 @@ fn pcb_text_edit_folds_to_modify() {
     assert_eq!(t.len(), 1, "one text modify, not add+remove: {t:?}");
     assert_eq!(t[0].kind, Kind::Modified);
     assert!(t[0].title.contains("REV A") && t[0].title.contains("REV B"), "{}", t[0].title);
+}
+
+#[test]
+fn pcb_text_move_folds_to_moved() {
+    // The same string at a new spot is ONE moved row (anchored over both positions),
+    // not a remove + add pair.
+    let make = |x: f64, y: f64| Geometry {
+        layers: vec![GeomLayer { name: "F.SilkS".into(), role: "silkscreen".into() }],
+        nets: vec![String::new()],
+        texts: vec![GeomText { layer: 0, text: "TDO".into(), x, y, ..Default::default() }],
+        ..Default::default()
+    };
+    let mut a = bundle(empty_indexes());
+    a.geometry = Some(make(10.0, 10.0));
+    let mut b = bundle(empty_indexes());
+    b.geometry = Some(make(14.0, 13.0));
+
+    let doc = diff_bundles(&a, &b, &changed(&["board.kicad_pcb"]));
+    let t: Vec<_> = doc.changes.iter().filter(|c| c.group == Group::Text).collect();
+    assert_eq!(t.len(), 1, "one moved row, not add+remove: {t:?}");
+    assert_eq!(t[0].kind, Kind::Moved);
+    assert!(t[0].title.contains("TDO") && t[0].title.contains("moved"), "{}", t[0].title);
+    assert_eq!(t[0].side, Side::Both);
+    // Anchor spans BOTH positions so either side's render frames its copy.
+    let bbox = t[0].anchors.pcb.as_ref().unwrap().bbox.unwrap();
+    assert!(bbox[0] <= 5.0 && bbox[0] + bbox[2] >= 19.0, "bbox covers old+new x: {bbox:?}");
+    assert!(bbox[1] <= 5.0 && bbox[1] + bbox[3] >= 18.0, "bbox covers old+new y: {bbox:?}");
+}
+
+#[test]
+fn pcb_text_restyle_surfaces_as_modify() {
+    // A style-only edit (size / pen thickness / font, string and position intact)
+    // must surface as ONE modified row — not mask as unchanged, not add+remove.
+    let make = |size: f64, thickness: Option<f64>, font: Option<&str>| Geometry {
+        layers: vec![GeomLayer { name: "F.SilkS".into(), role: "silkscreen".into() }],
+        nets: vec![String::new()],
+        texts: vec![
+            GeomText { layer: 0, text: "EN/FLT".into(), x: 10.0, y: 10.0, size: Some(size), font: font.map(Into::into), ..Default::default() },
+            GeomText { layer: 0, text: "V_phs".into(), x: 20.0, y: 20.0, size: Some(1.0), thickness, ..Default::default() },
+        ],
+        ..Default::default()
+    };
+    let mut a = bundle(empty_indexes());
+    a.geometry = Some(make(1.0, Some(0.15), None));
+    let mut b = bundle(empty_indexes());
+    b.geometry = Some(make(0.8, Some(0.3), Some("Calibri")));
+
+    let doc = diff_bundles(&a, &b, &changed(&["board.kicad_pcb"]));
+    let t: Vec<_> = doc.changes.iter().filter(|c| c.group == Group::Text).collect();
+    assert_eq!(t.len(), 2, "one restyle row per text: {t:?}");
+    for c in &t {
+        assert_eq!(c.kind, Kind::Modified);
+        assert!(c.title.contains("restyled"), "{}", c.title);
+    }
+    let en = t.iter().find(|c| c.title.contains("EN/FLT")).expect("EN/FLT row");
+    assert!(en.detail.contains("size") && en.detail.contains("font"), "{}", en.detail);
+    let vp = t.iter().find(|c| c.title.contains("V_phs")).expect("V_phs row");
+    assert!(vp.detail.contains("thickness 0.15 mm → 0.3 mm"), "{}", vp.detail);
+}
+
+#[test]
+fn pcb_text_untouched_style_stays_masked() {
+    // Identical texts (including style) on both sides must produce NO text rows.
+    let make = || Geometry {
+        layers: vec![GeomLayer { name: "F.SilkS".into(), role: "silkscreen".into() }],
+        nets: vec![String::new()],
+        texts: vec![GeomText { layer: 0, text: "B-".into(), x: 5.0, y: 5.0, size: Some(1.0), thickness: Some(0.15), ..Default::default() }],
+        ..Default::default()
+    };
+    let mut a = bundle(empty_indexes());
+    a.geometry = Some(make());
+    let mut b = bundle(empty_indexes());
+    b.geometry = Some(make());
+
+    let doc = diff_bundles(&a, &b, &changed(&["board.kicad_pcb"]));
+    assert!(
+        !doc.changes.iter().any(|c| c.group == Group::Text),
+        "no text rows for identical texts: {:?}",
+        doc.changes
+    );
 }
 
 // ----------------------------------------------- one-action-one-row + schematic moves
