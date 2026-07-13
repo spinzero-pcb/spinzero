@@ -206,6 +206,7 @@ export function ChangesPanel() {
                       focused={c.id === focusedId}
                       seen={seen.has(c.id)}
                       hidden={hiddenIds.has(c.id)}
+                      subsetActive={hiddenIds.size > 0}
                       onFocus={() => focusChange(c.id)}
                       onToggleSeen={() => markSeen(c.id, !seen.has(c.id))}
                       onToggleOnBoard={() => toggleChangeHidden(c.id)}
@@ -229,6 +230,7 @@ function ChangeRow({
   focused,
   seen,
   hidden,
+  subsetActive,
   onFocus,
   onToggleSeen,
   onToggleOnBoard,
@@ -240,6 +242,8 @@ function ChangeRow({
   seen: boolean;
   /** Not currently tinted on the PCB overlay (shift-click toggles), NOT list-filtered. */
   hidden: boolean;
+  /** A shift-click subset is composed (some change is hidden) — highlight the members. */
+  subsetActive: boolean;
   onFocus: () => void;
   onToggleSeen: () => void;
   onToggleOnBoard: () => void;
@@ -251,7 +255,7 @@ function ChangeRow({
   return (
     <div
       ref={rowRef}
-      className={`change-row ${focused ? "focused" : ""} ${seen ? "seen" : ""} ${hidden ? "board-hidden" : ""}`}
+      className={`change-row ${focused ? "focused" : ""} ${seen ? "seen" : ""} ${hidden ? "board-hidden" : ""} ${subsetActive && !hidden && onBoard ? "board-on" : ""}`}
       onClick={(e) => {
         // Shift-click composes a multi-change board overlay (same gesture as the PCB
         // canvas's shift-click net composing) — no camera move, no refocus.

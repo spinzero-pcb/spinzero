@@ -3323,6 +3323,10 @@ button {
 .change-seen:hover { color: var(--fg-2); }
 .change-seen.on { color: var(--ok); border-color: var(--ok); }
 
+/* Members of a composed shift-click subset light up blue; the focused row keeps its
+   stronger accent border on top of the same wash. */
+.change-row.board-on { background: var(--accent-dim); }
+
 /* Off-board rows (not in the shift-click overlay subset) dim but stay findable. */
 .change-row.board-hidden .change-title,
 .change-row.board-hidden .change-detail { opacity: 0.55; }
