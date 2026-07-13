@@ -786,7 +786,12 @@ export function PcbGlView({ visible }: { visible: boolean }) {
     // exactly. Text that names a real outline font (`(font (face …))`, e.g. Calibri) is
     // the exception — KiCad plots those with the actual TTF, so drawOutlineText fills them
     // in that family (the stroke font can't reproduce an arbitrary typeface).
-    const drawBoardText = (tctx: CanvasRenderingContext2D, rr: PcbGlRenderer, t: PcbTextDef) => {
+    const drawBoardText = (
+      tctx: CanvasRenderingContext2D,
+      rr: PcbGlRenderer,
+      t: PcbTextDef,
+      colorOverride?: string,
+    ) => {
       const key = t.comp != null ? "footprints" : "text"; // footprint text vs board text
       if (pv.objects[key] === false) return;
       if (pv.hidden.has(rr.layerNames[t.layer] ?? "")) return;
@@ -802,7 +807,7 @@ export function PcbGlView({ visible }: { visible: boolean }) {
         if (a >= 180) a -= 180;
       } else if (a > 180) a -= 360;
       else if (a <= -180) a += 360;
-      const textColor = rr.layerColorCss(t.layer);
+      const textColor = colorOverride ?? rr.layerColorCss(t.layer);
       // A text that names a real outline font (e.g. Calibri) is rendered in that font —
       // KiCad plots such text with the actual TTF, not the stroke font. Everything else
       // keeps the exact Newstroke stroke-font pipeline below.
@@ -849,19 +854,21 @@ export function PcbGlView({ visible }: { visible: boolean }) {
       tctx.restore();
     };
 
-    // In diff mode the text passes mirror the GL copper passes: B's texts draw solid
-    // (an owned changed text follows the added blink phase and its row's visibility;
-    // a HIDDEN changed text still draws, like hidden copper drawing as base grey),
-    // then A's removed/old texts draw crosshatched ON TOP for visible rows only.
+    // In diff mode the text passes mirror the GL copper passes: unchanged texts (and
+    // a HIDDEN change's texts) draw in the flat base grey so only the spotlit change
+    // carries colour; a visible changed text draws solid in its layer colour and
+    // follows the added blink phase; then A's removed/old texts draw crosshatched ON
+    // TOP for visible rows only.
     const diff = diffOnRef.current ? diffDataRef.current : null;
     const rA = rendererARef.current;
     const diffDoc = diff && rA ? useDiffStore.getState() : null;
     const vis = diffDoc?.doc ? buildDiffVisibility(diffDoc.doc.changes, diffDoc.hiddenChangeIds) : null;
     const blinkOn = blinkRef.current;
+    const diffGrey = rootStyle.getPropertyValue("--pcb-diff-base").trim() || "#8b8f98";
     for (let i = 0; i < r.texts.length; i++) {
-      const code = diff && vis ? diff.flagsB.texts[i] : 0;
-      if (code && vis![code] && blinkOn && blinkA.current) continue; // added: B phase only
-      drawBoardText(ctx, r, r.texts[i]);
+      const spotlit = diff && vis ? diff.flagsB.texts[i] > 0 && vis[diff.flagsB.texts[i]] > 0 : false;
+      if (spotlit && blinkOn && blinkA.current) continue; // added: B phase only
+      drawBoardText(ctx, r, r.texts[i], diff && vis && !spotlit ? diffGrey : undefined);
     }
     if (diff && vis && rA && (!blinkOn || blinkA.current)) {
       let sctx: CanvasRenderingContext2D | null = null;
