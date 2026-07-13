@@ -77,6 +77,18 @@ describe("computeDiffFlags", () => {
     expect([...f.b.vias]).toEqual([0, 0]);
   });
 
+  it("a moved text flags on both sides; a restyled text flags too", () => {
+    const text = { layer: 0, text: "TDO", x: 10, y: 10, angle: 0, size: 1, justify: [0, 0] as [number, number] };
+    const a = board({ texts: [{ ...text }, { ...text, text: "V_phs", x: 20, thickness: 0.1 }] });
+    const b = board({ texts: [{ ...text, x: 14 }, { ...text, text: "V_phs", x: 20, thickness: 0.15 }] });
+    const f = computeDiffFlags(a, b);
+    expect([...f.a.texts]).toEqual([1, 1]); // old spot + old pen → removed side
+    expect([...f.b.texts]).toEqual([1, 1]); // new spot + new pen → added side
+    // Identical texts stay unflagged.
+    const same = computeDiffFlags(a, a);
+    expect([...same.a.texts]).toEqual([0, 0]);
+  });
+
   it("a resized pad flags on both sides", () => {
     const b = board();
     b.pads = [{ ...b.pads[0], w: 1.2 }];
@@ -135,6 +147,49 @@ describe("computeDiffFlags ownership", () => {
     // Without the change list at all (legacy/geometric mode), zones stay ungated:
     const raw = computeDiffFlags(a, b);
     expect([...raw.a.zones]).toEqual([DIFF_ORPHAN]);
+  });
+
+  it("texts match their text row by layer + bbox (a moved row's bbox covers both spots)", () => {
+    const text = { layer: 0, text: "TDO", x: 10, y: 10, angle: 0, size: 1, justify: [0, 0] as [number, number] };
+    const a = board({ texts: [{ ...text }] });
+    const b = board({ texts: [{ ...text, x: 14 }] });
+    const changes = [
+      change({
+        id: "ch_0000",
+        group: "text",
+        kind: "moved",
+        // The Rust moved-row anchor: a box covering the old AND new positions.
+        anchors: { pcb: { layers: ["F.Cu"], bbox: [5, 5, 14, 10] } },
+      }),
+    ];
+    const f = computeDiffFlags(a, b, changes);
+    expect([...f.a.texts]).toEqual([DIFF_OWNED_BASE]); // old copy owned by the row
+    expect([...f.b.texts]).toEqual([DIFF_OWNED_BASE]); // new copy too
+    // A flagged text outside every text row's bbox stays an orphan.
+    const far = computeDiffFlags(
+      board({ texts: [{ ...text, x: 90, y: 90 }] }),
+      board({ texts: [{ ...text, x: 94, y: 90 }] }),
+      changes,
+    );
+    expect([...far.a.texts]).toEqual([DIFF_ORPHAN]);
+  });
+
+  it("changeExtent covers an owned text's glyph run", () => {
+    const text = { layer: 0, text: "TDO", x: 10, y: 10, angle: 0, size: 1, justify: [0, 0] as [number, number] };
+    const b = board({ texts: [{ ...text, x: 14 }] });
+    const changes = [
+      change({
+        id: "ch_0000",
+        group: "text",
+        kind: "moved",
+        anchors: { pcb: { layers: ["F.Cu"], bbox: [5, 5, 14, 10] } },
+      }),
+    ];
+    const f = computeDiffFlags(board({ texts: [{ ...text }] }), b, changes);
+    const ext = changeExtent(b, f.b, DIFF_OWNED_BASE);
+    expect(ext).not.toBeNull();
+    expect(ext!.minx).toBeLessThan(14);
+    expect(ext!.maxx).toBeGreaterThan(14);
   });
 
   it("pads follow their component's placement change over its field change", () => {

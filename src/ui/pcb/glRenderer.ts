@@ -136,6 +136,9 @@ export interface DiffFlags {
   pads: Uint16Array;
   zones: Uint16Array;
   graphics: Uint16Array;
+  /** Texts are not GPU batches — the Canvas2D overlay (PcbGlView drawOverlay) reads
+   *  these to gate/style board text per change, with the same code scheme. */
+  texts: Uint16Array;
   /** Entries in the visibility mask (DIFF_OWNED_BASE + change count, min 2). */
   maskSize: number;
 }

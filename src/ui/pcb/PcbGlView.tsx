@@ -57,6 +57,62 @@ const DIFF_LAYER_MIX = 1.0;
  *  same-spot restyle (thickened track) stands out against it. */
 const DIFF_ADDED_ALPHA = 0.75;
 
+/** Crosshatch period for the removed-TEXT overlay pass, matching the GL shader's
+ *  removed-copper texture (glRenderer: 7 css px, cuts keep a faint ghost). */
+const HATCH_PERIOD_CSS = 7;
+
+/** Prepare the reusable scratch canvas for the removed-text pass: sized to the view,
+ *  cleared, with the same css-px transform as the overlay context. Returns null when
+ *  a 2D context is unavailable (the pass is skipped — never crash the frame). */
+function beginHatchScratch(
+  ref: { current: HTMLCanvasElement | null },
+  cssW: number,
+  cssH: number,
+  dpr: number,
+): CanvasRenderingContext2D | null {
+  ref.current ??= document.createElement("canvas");
+  const cnv = ref.current;
+  const W = Math.round(cssW * dpr);
+  const H = Math.round(cssH * dpr);
+  if (cnv.width !== W || cnv.height !== H) {
+    cnv.width = W;
+    cnv.height = H;
+  }
+  const sctx = cnv.getContext("2d");
+  if (!sctx) return null;
+  sctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  sctx.clearRect(0, 0, cssW, cssH);
+  return sctx;
+}
+
+/** Punch the GL shader's ±45° crosshatch through everything drawn on the scratch
+ *  canvas (destination-out, cuts keep a 0.25 ghost like the copper texture), then
+ *  composite it onto the overlay. Both diagonal directions, screen-space period. */
+function compositeHatched(ctx: CanvasRenderingContext2D, sctx: CanvasRenderingContext2D, dpr: number) {
+  const { width: W, height: H } = sctx.canvas; // device px
+  sctx.save();
+  sctx.setTransform(1, 0, 0, 1, 0, 0);
+  sctx.globalCompositeOperation = "destination-out";
+  sctx.strokeStyle = "rgba(0,0,0,0.75)"; // cut to a faint ghost, not fully out
+  const period = HATCH_PERIOD_CSS * dpr; // spacing along an axis, like gl_FragCoord.x+y
+  sctx.lineWidth = 0.22 * period * 0.7071; // the shader's band width, made perpendicular
+  sctx.beginPath();
+  for (let o = -H; o < W; o += period) {
+    sctx.moveTo(o, 0);
+    sctx.lineTo(o + H, H); // "\" set: x − y = o
+  }
+  for (let o = 0; o < W + H; o += period) {
+    sctx.moveTo(o, 0);
+    sctx.lineTo(o - H, H); // "/" set: x + y = o
+  }
+  sctx.stroke();
+  sctx.restore();
+  ctx.save();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.drawImage(sctx.canvas, 0, 0);
+  ctx.restore();
+}
+
 /** Draw one net-label row: the plain `text` centred at (0, cy) plus a KiCad-style
  *  overline over each `~{…}` run (feedback: nets like `~{project_rst}`). ctx.font /
  *  fillStyle / textAlign="center" / textBaseline="middle" are already set; `size` is
@@ -317,6 +373,8 @@ export function PcbGlView({ visible }: { visible: boolean }) {
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const labelCanvasRef = useRef<HTMLCanvasElement>(null);
+  /** Reusable offscreen canvas for the removed-text crosshatch pass (diff mode). */
+  const hatchScratchRef = useRef<HTMLCanvasElement | null>(null);
   const commentLayerRef = useRef<HTMLDivElement>(null);
   const rendererRef = useRef<PcbGlRenderer | null>(null);
   /** The A (older) side's renderer, sharing the same GL context; null outside diff mode. */
@@ -728,14 +786,14 @@ export function PcbGlView({ visible }: { visible: boolean }) {
     // exactly. Text that names a real outline font (`(font (face …))`, e.g. Calibri) is
     // the exception — KiCad plots those with the actual TTF, so drawOutlineText fills them
     // in that family (the stroke font can't reproduce an arbitrary typeface).
-    for (const t of r.texts) {
+    const drawBoardText = (tctx: CanvasRenderingContext2D, rr: PcbGlRenderer, t: PcbTextDef) => {
       const key = t.comp != null ? "footprints" : "text"; // footprint text vs board text
-      if (pv.objects[key] === false) continue;
-      if (pv.hidden.has(r.layerNames[t.layer] ?? "")) continue;
-      if (t.size * scale < 3.2) continue; // unreadable at this zoom
+      if (pv.objects[key] === false) return;
+      if (pv.hidden.has(rr.layerNames[t.layer] ?? "")) return;
+      if (t.size * scale < 3.2) return; // unreadable at this zoom
       const sx = (t.x - c.x) * scale + cssW / 2;
       const sy = (t.y - c.y) * scale + cssH / 2;
-      if (sx < -250 || sx > cssW + 250 || sy < -250 || sy > cssH + 250) continue;
+      if (sx < -250 || sx > cssW + 250 || sy < -250 || sy > cssH + 250) return;
       // KiCad CCW angle → screen CW = -a; footprint text is kept upright [0,180), board
       // text uses its literal angle normalised to (-180, 180] (mirrors the SVG view).
       let a = t.angle % 360;
@@ -744,13 +802,13 @@ export function PcbGlView({ visible }: { visible: boolean }) {
         if (a >= 180) a -= 180;
       } else if (a > 180) a -= 360;
       else if (a <= -180) a += 360;
-      const textColor = r.layerColorCss(t.layer);
+      const textColor = rr.layerColorCss(t.layer);
       // A text that names a real outline font (e.g. Calibri) is rendered in that font —
       // KiCad plots such text with the actual TTF, not the stroke font. Everything else
       // keeps the exact Newstroke stroke-font pipeline below.
       if (t.font) {
-        drawOutlineText(ctx, t, sx, sy, a, scale, textColor, strokeFont);
-        continue;
+        drawOutlineText(tctx, t, sx, sy, a, scale, textColor, strokeFont);
+        return;
       }
       const layout = layoutStrokeText(t.text, {
         size: t.size,
@@ -760,35 +818,61 @@ export function PcbGlView({ visible }: { visible: boolean }) {
         italic: t.italic,
         justify: t.justify,
       });
-      if (layout.strokes.length === 0) continue;
-      ctx.save();
-      ctx.translate(sx, sy);
-      if (a) ctx.rotate((-a * Math.PI) / 180);
-      if (t.mirror) ctx.scale(-1, 1);
-      ctx.scale(scale, scale); // draw in text-local mm; lineWidth is the pen in mm
-      ctx.lineWidth = layout.pen;
-      ctx.lineCap = "round";
-      ctx.lineJoin = "round";
+      if (layout.strokes.length === 0) return;
+      tctx.save();
+      tctx.translate(sx, sy);
+      if (a) tctx.rotate((-a * Math.PI) / 180);
+      if (t.mirror) tctx.scale(-1, 1);
+      tctx.scale(scale, scale); // draw in text-local mm; lineWidth is the pen in mm
+      tctx.lineWidth = layout.pen;
+      tctx.lineCap = "round";
+      tctx.lineJoin = "round";
       if (t.knockout && layout.bbox) {
         // KiCad knockout: the ink bbox (pen included) inflated by max(pen/2, height/9),
         // filled in the layer colour, with the glyph strokes punched back out
         // (pcb_text.cpp TransformTextToPolySet + buildBoundingHull).
         const b = layout.bbox;
         const m = knockoutMargin(t.size, layout.pen);
-        ctx.fillStyle = textColor;
-        ctx.fillRect(b.minx - m, b.miny - m, b.maxx - b.minx + 2 * m, b.maxy - b.miny + 2 * m);
-        ctx.globalCompositeOperation = "destination-out";
-        ctx.strokeStyle = "#000"; // any opaque colour — only alpha matters here
-        ctx.beginPath();
-        traceStrokeText(ctx, layout);
-        ctx.stroke();
+        tctx.fillStyle = textColor;
+        tctx.fillRect(b.minx - m, b.miny - m, b.maxx - b.minx + 2 * m, b.maxy - b.miny + 2 * m);
+        tctx.globalCompositeOperation = "destination-out";
+        tctx.strokeStyle = "#000"; // any opaque colour — only alpha matters here
+        tctx.beginPath();
+        traceStrokeText(tctx, layout);
+        tctx.stroke();
       } else {
-        ctx.strokeStyle = textColor;
-        ctx.beginPath();
-        traceStrokeText(ctx, layout);
-        ctx.stroke();
+        tctx.strokeStyle = textColor;
+        tctx.beginPath();
+        traceStrokeText(tctx, layout);
+        tctx.stroke();
       }
-      ctx.restore();
+      tctx.restore();
+    };
+
+    // In diff mode the text passes mirror the GL copper passes: B's texts draw solid
+    // (an owned changed text follows the added blink phase and its row's visibility;
+    // a HIDDEN changed text still draws, like hidden copper drawing as base grey),
+    // then A's removed/old texts draw crosshatched ON TOP for visible rows only.
+    const diff = diffOnRef.current ? diffDataRef.current : null;
+    const rA = rendererARef.current;
+    const diffDoc = diff && rA ? useDiffStore.getState() : null;
+    const vis = diffDoc?.doc ? buildDiffVisibility(diffDoc.doc.changes, diffDoc.hiddenChangeIds) : null;
+    const blinkOn = blinkRef.current;
+    for (let i = 0; i < r.texts.length; i++) {
+      const code = diff && vis ? diff.flagsB.texts[i] : 0;
+      if (code && vis![code] && blinkOn && blinkA.current) continue; // added: B phase only
+      drawBoardText(ctx, r, r.texts[i]);
+    }
+    if (diff && vis && rA && (!blinkOn || blinkA.current)) {
+      let sctx: CanvasRenderingContext2D | null = null;
+      for (let i = 0; i < diff.geomA.texts.length; i++) {
+        const code = diff.flagsA.texts[i];
+        if (!code || !vis[code]) continue;
+        sctx ??= beginHatchScratch(hatchScratchRef, cssW, cssH, dpr);
+        if (!sctx) break; // scratch context unavailable — skip the removed-text pass
+        drawBoardText(sctx, rA, diff.geomA.texts[i]);
+      }
+      if (sctx) compositeHatched(ctx, sctx, dpr);
     }
 
     // --- net-name labels (+ pad numbers) ---

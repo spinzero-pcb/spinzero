@@ -80,7 +80,14 @@ function buildKeys(g: PcbGeometry) {
     (gr) =>
       `g|${gr.kind}|${layer(gr.layer)}|${comp(gr.comp)}|${q(gr.width)}|${gr.filled ? 1 : 0}|${gr.data.map(q).join(",")}`,
   );
-  return { seg, arc, vias, pads, zones, graphics };
+  // Text identity mirrors diff.rs (pos + string + style at the same roundings): a
+  // moved/restyled text flags on both sides, matching its semantic moved/restyled row.
+  const qs = (v: number | undefined) => (v == null ? "" : Math.round(v * 1e3));
+  const texts = g.texts.map(
+    (t) =>
+      `t|${layer(t.layer)}|${t.text}|${q(t.x)},${q(t.y)}|${qs(t.size)},${qs(t.width)},${qs(t.thickness)},${t.bold ? 1 : 0},${t.italic ? 1 : 0},${t.font ?? ""}`,
+  );
+  return { seg, arc, vias, pads, zones, graphics, texts };
 }
 
 type Keys = ReturnType<typeof buildKeys>;
@@ -113,10 +120,13 @@ interface OwnerIndex {
   comp: Map<string, number>;
   /** layer name → silk/outline change. */
   silk: Map<string, number>;
+  /** Text rows, matched by layer + anchor-bbox containment (a moved row's bbox covers
+   *  BOTH positions, so either side's copy lands in it). */
+  text: { layer: string; bbox: [number, number, number, number]; code: number }[];
 }
 
 function buildOwnerIndex(changes: Change[]): OwnerIndex {
-  const idx: OwnerIndex = { routing: new Map(), zone: new Map(), comp: new Map(), silk: new Map() };
+  const idx: OwnerIndex = { routing: new Map(), zone: new Map(), comp: new Map(), silk: new Map(), text: [] };
   const key = (layer: string, net: string) => `${layer}\u{0}${net}`;
   changes.forEach((c, i) => {
     const code = i + DIFF_OWNED_BASE;
@@ -129,6 +139,8 @@ function buildOwnerIndex(changes: Change[]): OwnerIndex {
       if (!idx.comp.has(pcb.comp)) idx.comp.set(pcb.comp, code);
     } else if ((c.group === "silk" || c.group === "outline") && pcb?.layers?.[0] != null) {
       idx.silk.set(pcb.layers[0], code);
+    } else if (c.group === "text" && pcb?.layers?.[0] != null && pcb.bbox) {
+      idx.text.push({ layer: pcb.layers[0], bbox: pcb.bbox as [number, number, number, number], code });
     }
   });
   // Placement rows overwrite component rows for the same refdes (see OwnerIndex.comp).
@@ -195,6 +207,32 @@ function assignOwners(g: PcbGeometry, flags: Omit<DiffFlags, "maskSize">, owners
       owners.silk.get(layer(gr.layer)) ??
       DIFF_ORPHAN;
   }
+  for (let i = 0; i < flags.texts.length; i++) {
+    if (!flags.texts[i]) continue;
+    const t = g.texts[i];
+    // Footprint text rides its component's row; loose board text matches its text
+    // row by layer + bbox containment (nearest bbox centre when several overlap).
+    const ref = compRef(t.comp);
+    const byComp = ref ? owners.comp.get(ref) : undefined;
+    if (byComp != null) {
+      flags.texts[i] = byComp;
+      continue;
+    }
+    const lname = layer(t.layer);
+    let best = DIFF_ORPHAN;
+    let bestD = Infinity;
+    for (const row of owners.text) {
+      if (row.layer !== lname) continue;
+      const [x, y, w, h] = row.bbox;
+      if (t.x < x || t.x > x + w || t.y < y || t.y > y + h) continue;
+      const d = Math.hypot(t.x - (x + w / 2), t.y - (y + h / 2));
+      if (d < bestD) {
+        bestD = d;
+        best = row.code;
+      }
+    }
+    flags.texts[i] = best;
+  }
 }
 
 function sideFlags(mine: Keys, other: Keys): Omit<DiffFlags, "maskSize"> {
@@ -205,6 +243,7 @@ function sideFlags(mine: Keys, other: Keys): Omit<DiffFlags, "maskSize"> {
     pads: flagAbsent(mine.pads, other.pads),
     zones: flagAbsent(mine.zones, other.zones),
     graphics: flagAbsent(mine.graphics, other.graphics),
+    texts: flagAbsent(mine.texts, other.texts),
   };
 }
 
@@ -304,6 +343,13 @@ export function changeExtent(g: PcbGeometry, flags: DiffFlags, code: number): BB
       // seg [x1,y1,x2,y2], arc [s,m,e], poly [x,y,…] — all plain coordinate pairs.
       for (let j = 0; j + 1 < gr.data.length; j += 2) pt(gr.data[j], gr.data[j + 1], hw);
     }
+  }
+  for (let i = 0; i < flags.texts.length; i++) {
+    if (flags.texts[i] !== code) continue;
+    const t = g.texts[i];
+    // Rotation/justify-safe over-estimate of the glyph run: half its length either way.
+    const glyphW = (t.width ?? t.size) * 0.9;
+    pt(t.x, t.y, Math.hypot(t.text.length * glyphW, t.size) / 2 + t.size / 2);
   }
   return Number.isFinite(minx) ? { minx, miny, maxx, maxy } : null;
 }
