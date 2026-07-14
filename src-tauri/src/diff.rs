@@ -302,6 +302,10 @@ pub struct GeomGraphic {
     pub kind: String,
     #[serde(default)]
     pub data: Vec<f64>,
+    /// Owning component index (footprint art placed to board space); None = loose
+    /// board graphic. Lets the graphics diff skip art a component-level row explains.
+    #[serde(default)]
+    pub comp: Option<i64>,
 }
 
 #[derive(Deserialize, Default, Clone)]
@@ -325,6 +329,10 @@ pub struct GeomText {
     pub italic: bool,
     #[serde(default)]
     pub font: Option<String>,
+    /// Owning component index (footprint reference/value/user text); None = loose
+    /// board text. Lets the text diff skip text a component-level row explains.
+    #[serde(default)]
+    pub comp: Option<i64>,
 }
 
 // ======================================= schematic geometry (deserialize side)
@@ -452,7 +460,7 @@ pub fn diff_bundles(
             diff_placement(ga, gb, &mut raw);
             diff_routing(ga, gb, &mut raw);
             diff_zones(ga, gb, &mut raw);
-            diff_graphics_and_text(ga, gb, &mut raw);
+            diff_graphics_and_text(ga, gb, &comp_delta, &mut raw);
         }
     }
 
@@ -1968,7 +1976,7 @@ fn ring_area(pts: &[f64]) -> f64 {
 /// Graphics + texts set-diff on non-copper layers. Silk/text/outline groups all come
 /// from here: a graphic on Edge.Cuts is an outline change; text is a silk/text change;
 /// other graphics are silk. (plan §2)
-fn diff_graphics_and_text(a: &Geometry, b: &Geometry, out: &mut Vec<Change>) {
+fn diff_graphics_and_text(a: &Geometry, b: &Geometry, comp_delta: &CompDelta, out: &mut Vec<Change>) {
     // Layer-name → manifest role, merged over both sides, for impact classing of
     // rows built after their layer index is gone (paired texts, graphics set-diff).
     let mut roles: HashMap<String, String> = HashMap::new();
@@ -1977,6 +1985,26 @@ fn diff_graphics_and_text(a: &Geometry, b: &Geometry, out: &mut Vec<Change>) {
     }
     let impact_of =
         |layer: &str| layer_impact(layer, roles.get(layer).map(String::as_str).unwrap_or(""));
+
+    // Refdes a component-level row (placement move / add / remove / rename) already
+    // explains. Its footprint's art and text moved WITH it — the overlay hands those
+    // primitives to that row, and one user action must read as ONE row — so they sit
+    // out of the loose-graphics/text diff below. Without this, every footprint move
+    // spawned phantom "changed on F.CrtYd / F.Fab / silk" and "text moved" rows that
+    // owned nothing on the board (feedback: clicking them showed no change).
+    let mut explained: HashSet<String> = out
+        .iter()
+        .filter(|c| matches!(c.group, Group::Placement | Group::Component))
+        .filter_map(|c| c.anchors.pcb.as_ref().and_then(|p| p.comp.clone()))
+        .collect();
+    // A re-annotation's row anchors the NEW refdes; the A side's art still carries the
+    // old one — cover it too, or the old refdes text surfaces as a phantom "removed".
+    explained.extend(comp_delta.renamed.iter().map(|(old, _)| old.clone()));
+    let comp_explained = |g: &Geometry, idx: Option<i64>| -> bool {
+        idx.and_then(|i| usize::try_from(i).ok())
+            .and_then(|i| g.components.get(i))
+            .is_some_and(|c| explained.contains(&c.reference))
+    };
 
     // --- text diff. Three-stage pairing on indices so ONE authoring action reads as
     // ONE row instead of an add+remove pair:
@@ -1993,8 +2021,14 @@ fn diff_graphics_and_text(a: &Geometry, b: &Geometry, out: &mut Vec<Change>) {
     // Stage 0: texts identical on both sides are unchanged — mask them.
     let b_full: HashSet<_> = b.texts.iter().map(|t| full_key(b, t)).collect();
     let a_full: HashSet<_> = a.texts.iter().map(|t| full_key(a, t)).collect();
-    let mut a_left: Vec<usize> = (0..a.texts.len()).filter(|&i| !b_full.contains(&full_key(a, &a.texts[i]))).collect();
-    let mut b_left: Vec<usize> = (0..b.texts.len()).filter(|&j| !a_full.contains(&full_key(b, &b.texts[j]))).collect();
+    let mut a_left: Vec<usize> = (0..a.texts.len())
+        .filter(|&i| !comp_explained(a, a.texts[i].comp))
+        .filter(|&i| !b_full.contains(&full_key(a, &a.texts[i])))
+        .collect();
+    let mut b_left: Vec<usize> = (0..b.texts.len())
+        .filter(|&j| !comp_explained(b, b.texts[j].comp))
+        .filter(|&j| !a_full.contains(&full_key(b, &b.texts[j])))
+        .collect();
 
     // Stage 1: pair by position — a string edit or a restyle at the same spot.
     let pos_key = |g: &Geometry, t: &GeomText| (layer_of(g, t.layer), pos_of(t));
@@ -2095,8 +2129,8 @@ fn diff_graphics_and_text(a: &Geometry, b: &Geometry, out: &mut Vec<Change>) {
     push_text_addremove(out, b, &b_left, Kind::Added, Side::B);
 
     // --- graphics set-diff, split into outline (Edge.Cuts) vs silk (everything else) ---
-    let ga = graphic_hashes(a);
-    let gb = graphic_hashes(b);
+    let ga = graphic_hashes(a, &comp_explained);
+    let gb = graphic_hashes(b, &comp_explained);
     let mut layers: BTreeSet<String> = BTreeSet::new();
     layers.extend(ga.keys().cloned());
     layers.extend(gb.keys().cloned());
@@ -2122,7 +2156,10 @@ fn diff_graphics_and_text(a: &Geometry, b: &Geometry, out: &mut Vec<Change>) {
         let title = if is_edge {
             format!("Board outline changed on {layer} ({})", bits.join(" "))
         } else {
-            format!("Silk changed on {layer} ({})", bits.join(" "))
+            // Name the layer's function — "Silk" is only right for silkscreen
+            // (feedback: a courtyard/fab change is not "silk").
+            let noun = layer_noun(&layer, roles.get(&layer).map(String::as_str).unwrap_or(""));
+            format!("{noun} changed on {layer} ({})", bits.join(" "))
         };
         out.push(Change {
             id: String::new(),
@@ -2170,6 +2207,34 @@ fn layer_impact(name: &str, role: &str) -> Impact {
 /// Resolve a layer index to its manifest role (empty when out of range).
 fn role_of(g: &Geometry, idx: u16) -> String {
     g.layers.get(idx as usize).map(|l| l.role.clone()).unwrap_or_default()
+}
+
+/// Human noun for a loose-graphics change on a non-copper layer, by manifest role
+/// with a KiCad layer-name fallback. "Silk" is only right for silkscreen — a
+/// courtyard or fab-drawing change must say what it is.
+fn layer_noun(name: &str, role: &str) -> &'static str {
+    match role {
+        "silkscreen" => "Silkscreen",
+        "mask" => "Solder mask",
+        "paste" => "Paste",
+        "courtyard" => "Courtyard",
+        "fab" => "Fab drawing",
+        _ => {
+            if name.ends_with(".SilkS") || name.ends_with(".Silkscreen") {
+                "Silkscreen"
+            } else if name.ends_with(".Mask") {
+                "Solder mask"
+            } else if name.ends_with(".Paste") {
+                "Paste"
+            } else if name.ends_with(".CrtYd") || name.ends_with(".Courtyard") {
+                "Courtyard"
+            } else if name.ends_with(".Fab") {
+                "Fab drawing"
+            } else {
+                "Drawing"
+            }
+        }
+    }
 }
 
 /// Emit one text add/remove change per leftover text index, in a deterministic order
@@ -2258,10 +2323,18 @@ fn pcb_point_anchor(layer: &str, at: [f64; 2]) -> Anchors {
     }
 }
 
-/// layer-name -> set of graphic content hashes.
-fn graphic_hashes(g: &Geometry) -> HashMap<String, HashSet<u64>> {
+/// layer-name -> set of graphic content hashes. `comp_explained` filters out
+/// footprint art whose component already has its own change row (see
+/// diff_graphics_and_text) — that art moved with the footprint, not on its own.
+fn graphic_hashes(
+    g: &Geometry,
+    comp_explained: &dyn Fn(&Geometry, Option<i64>) -> bool,
+) -> HashMap<String, HashSet<u64>> {
     let mut m: HashMap<String, HashSet<u64>> = HashMap::new();
     for gr in &g.graphics {
+        if comp_explained(g, gr.comp) {
+            continue;
+        }
         let layer = g.layers.get(gr.layer as usize).map(|l| l.name.clone()).unwrap_or_default();
         // Skip copper — routing already covers it; graphics on copper are rare (dimensions).
         let is_copper = g.layers.get(gr.layer as usize).map(|l| l.role == "copper").unwrap_or(false);
@@ -2313,7 +2386,9 @@ pub fn diff_key(cache_key_a: &str, cache_key_b: &str) -> String {
     // Engine revision: bump whenever the changeset a given bundle pair produces
     // changes shape (new rows, anchors, fields) — the key only hashes the inputs,
     // so without this a cached diff.json would keep serving the old shape.
-    const DIFF_ENGINE_VERSION: &str = "4";
+    // 5: manufactured-layer impact reclass, footprint art/text folds into its
+    //    component row, layer-function nouns ("Courtyard changed", not "Silk").
+    const DIFF_ENGINE_VERSION: &str = "5";
     let mut h = blake3::Hasher::new();
     h.update(DIFF_ENGINE_VERSION.as_bytes());
     h.update(b" ");

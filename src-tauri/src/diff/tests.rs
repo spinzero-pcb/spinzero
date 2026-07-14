@@ -634,6 +634,7 @@ fn silk_and_outline_from_graphics() {
                 width: 0.1,
                 kind: "seg".into(),
                 data: vec![0.0, 0.0, edge_len, 0.0],
+                comp: None,
             }],
             ..Default::default()
         };
@@ -643,6 +644,7 @@ fn silk_and_outline_from_graphics() {
                 width: 0.12,
                 kind: "seg".into(),
                 data: vec![1.0, 1.0, 2.0, 2.0],
+                comp: None,
             });
         }
         g
@@ -662,6 +664,95 @@ fn silk_and_outline_from_graphics() {
         doc.changes.iter().any(|c| c.group == Group::Silk && c.impact == Impact::Placement),
         "silk change present, classed as placement"
     );
+}
+
+#[test]
+fn moved_footprint_art_and_text_fold_into_placement_row() {
+    // Moving a footprint moves its courtyard/fab art and its reference text with it.
+    // That is ONE user action — the placement row. No phantom "Courtyard changed" /
+    // "Fab drawing changed" / "Text moved" rows (feedback: those rows owned nothing
+    // on the board, so clicking them showed no change).
+    let make = |x: f64| {
+        let mut g = Geometry {
+            layers: vec![
+                GeomLayer { name: "F.Cu".into(), role: "copper".into() },
+                GeomLayer { name: "F.CrtYd".into(), role: "courtyard".into() },
+                GeomLayer { name: "F.Fab".into(), role: "fab".into() },
+            ],
+            nets: vec![String::new()],
+            components: vec![GeomComp {
+                reference: "R35".into(),
+                layer: 0,
+                x,
+                y: 5.0,
+                angle: 0.0,
+                bbox: Some([x - 1.0, 4.0, 2.0, 2.0]),
+                uuid: "u-r35".into(),
+            }],
+            ..Default::default()
+        };
+        // Footprint courtyard box edge + fab refdes text, placed to board space.
+        g.graphics.push(GeomGraphic {
+            layer: 1,
+            width: 0.05,
+            kind: "seg".into(),
+            data: vec![x - 1.0, 4.0, x + 1.0, 4.0],
+            comp: Some(0),
+        });
+        g.texts.push(GeomText {
+            layer: 2,
+            text: "R35".into(),
+            x,
+            y: 5.0,
+            comp: Some(0),
+            ..Default::default()
+        });
+        g
+    };
+    let mut a = bundle(empty_indexes());
+    a.geometry = Some(make(10.0));
+    let mut b = bundle(empty_indexes());
+    b.geometry = Some(make(12.0)); // R35 moved 2 mm, art + text ride along
+
+    let doc = diff_bundles(&a, &b, &changed(&["board.kicad_pcb"]));
+    let placement: Vec<_> = doc.changes.iter().filter(|c| c.group == Group::Placement).collect();
+    assert_eq!(placement.len(), 1, "one placement row: {:?}", doc.changes);
+    assert!(
+        !doc.changes.iter().any(|c| c.group == Group::Silk || c.group == Group::Text),
+        "no phantom silk/text rows for footprint-owned art: {:?}",
+        doc.changes
+    );
+}
+
+#[test]
+fn loose_graphics_row_names_the_layer_function() {
+    // A LOOSE (board-level) graphic changed on a courtyard layer still gets its own
+    // row — named by the layer's function, never "Silk" (feedback).
+    let make = |x: f64| Geometry {
+        layers: vec![GeomLayer { name: "F.CrtYd".into(), role: "courtyard".into() }],
+        nets: vec![String::new()],
+        graphics: vec![GeomGraphic {
+            layer: 0,
+            width: 0.05,
+            kind: "seg".into(),
+            data: vec![0.0, 0.0, x, 0.0],
+            comp: None,
+        }],
+        ..Default::default()
+    };
+    let mut a = bundle(empty_indexes());
+    a.geometry = Some(make(5.0));
+    let mut b = bundle(empty_indexes());
+    b.geometry = Some(make(8.0));
+
+    let doc = diff_bundles(&a, &b, &changed(&["board.kicad_pcb"]));
+    let row = doc
+        .changes
+        .iter()
+        .find(|c| c.group == Group::Silk)
+        .expect("loose courtyard graphic still yields a row");
+    assert!(row.title.starts_with("Courtyard changed on F.CrtYd"), "{}", row.title);
+    assert!(!row.title.contains("Silk"), "{}", row.title);
 }
 
 #[test]
