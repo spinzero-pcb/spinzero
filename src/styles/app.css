@@ -3190,15 +3190,52 @@ button {
 
 /* ---------- Changes panel (left rail, diff mode only) ---------- */
 .changes-panel { display: flex; flex-direction: column; min-height: 0; flex: 1; overflow: hidden; }
+
+/* Review-status filter: a segmented control (Pending / Reviewed / All). */
+.changes-filter {
+  display: flex;
+  gap: 2px;
+  margin: var(--sp-2) var(--sp-3) 0;
+  padding: 2px;
+  background: var(--bg-2);
+  border: 1px solid var(--border-1);
+  border-radius: 6px;
+}
+.changes-filter-btn {
+  flex: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  padding: 4px 6px;
+  font-size: 11px;
+  border: none;
+  border-radius: 4px;
+  background: none;
+  color: var(--fg-2);
+  cursor: pointer;
+}
+.changes-filter-btn:hover { color: var(--fg-0); }
+.changes-filter-btn.active { background: var(--bg-0); color: var(--fg-0); font-weight: 600; }
+.changes-filter-count {
+  font-size: 10px;
+  min-width: 15px;
+  padding: 0 4px;
+  border-radius: 8px;
+  background: var(--bg-3);
+  color: var(--fg-2);
+  text-align: center;
+}
+.changes-filter-btn.active .changes-filter-count { background: var(--accent); color: var(--accent-fg); }
+
 .changes-stepper {
   display: flex;
   align-items: center;
   justify-content: center;
   gap: var(--sp-2);
-  padding: var(--sp-2) var(--sp-3);
-  border-bottom: 1px solid var(--border-0);
+  padding: var(--sp-1) var(--sp-3);
 }
-.step-count { font-size: 12px; color: var(--fg-1); min-width: 110px; text-align: center; }
+.step-count { font-size: 11px; color: var(--fg-2); min-width: 64px; text-align: center; }
 .step-btn { font-size: 18px; line-height: 1; padding: 0 8px; color: var(--fg-1); }
 .step-btn:hover { color: var(--fg-0); }
 
@@ -3213,26 +3250,19 @@ button {
 }
 .changes-search:focus { outline: none; border-color: var(--accent); }
 
-/* Board-overlay visibility bar: shown while a solo / shift-click subset hides changes. */
+/* Board-overlay reset: shown while a solo / shift-click subset hides changes. */
 .changes-visbar {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: var(--sp-2);
+  justify-content: center;
   margin: 0 var(--sp-3) var(--sp-2);
   padding: 3px 8px;
-  font-size: 11px;
-  color: var(--fg-1);
   background: var(--accent-dim);
   border: 1px solid var(--accent);
   border-radius: 4px;
 }
 .changes-visbar-btn { font-size: 11px; color: var(--accent); padding: 0 4px; }
 .changes-visbar-btn:hover { text-decoration: underline; }
-.visbar-hint { color: var(--fg-2); }
-
-/* Reviewed-progress readout in the stepper header ("Change 7 of 23 · 12 reviewed"). */
-.step-reviewed { color: var(--fg-2); }
 
 .changes-tree { flex: 1; overflow-y: auto; padding-bottom: var(--sp-3); }
 .changes-group { border-bottom: 1px solid var(--border-0); }
@@ -3310,18 +3340,22 @@ button {
 .change-seen {
   flex: none;
   background: none;
-  border: 1px solid var(--border-1);
-  border-radius: 3px;
-  width: 18px;
-  height: 18px;
+  border: 1.5px solid var(--border-1);
+  border-radius: 4px;
+  width: 22px;
+  height: 22px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   color: transparent;
   cursor: pointer;
+  transition: background 0.12s, border-color 0.12s, color 0.12s;
 }
-.change-seen:hover { color: var(--fg-2); }
-.change-seen.on { color: var(--ok); border-color: var(--ok); }
+/* Unchecked: a faint preview of the tick on hover so the target reads as a checkbox. */
+.change-seen:hover { color: var(--fg-2); border-color: var(--fg-2); }
+/* Checked: a filled green box with a bold light tick — unmistakable at a glance. */
+.change-seen.on { background: var(--ok); border-color: var(--ok); color: var(--accent-fg); }
+.change-seen.on:hover { color: var(--accent-fg); }
 
 /* Members of a composed shift-click subset light up blue; the focused row keeps its
    stronger accent border on top of the same wash. */

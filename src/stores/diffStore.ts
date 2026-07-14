@@ -269,14 +269,14 @@ export const useDiffStore = create<DiffState>((set, get) => ({
     // Selecting a change SOLOS it on the PCB overlay: every other change drops out of
     // the tint (a cheap GPU-mask update, not a rebuild). showAllChanges restores the
     // overview; shift-clicking rows builds multi-change subsets from either state.
-    // Focusing also auto-marks the change REVIEWED — progress tracks what the stepper
-    // walk actually visited; the row ✓ stays as the manual override.
+    // Focusing does NOT mark the change reviewed — the reviewer may just be glancing
+    // through; the row ✓ (and the group "Mark reviewed" button) are the only way to
+    // record progress, so a tick always reflects a deliberate decision.
     const others = new Set(doc.changes.filter((c) => c.id !== id).map((c) => c.id));
-    set((s) => ({
+    set({
       focusedChangeId: id,
       hiddenChangeIds: others,
-      seen: new Set(s.seen).add(id),
-    }));
+    });
 
     const sch = change.anchors.schematic;
     const pcb = change.anchors.pcb;

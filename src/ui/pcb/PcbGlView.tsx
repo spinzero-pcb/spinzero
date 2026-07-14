@@ -55,7 +55,7 @@ const MAX_SCALE = 2000;
 const DIFF_LAYER_MIX = 1.0;
 /** Added-copper alpha: slightly sheer so the removed crosshatch painted on top of a
  *  same-spot restyle (thickened track) stands out against it. */
-const DIFF_ADDED_ALPHA = 0.75;
+const DIFF_ADDED_ALPHA = 0.85;
 
 /** Crosshatch period for the removed-TEXT overlay pass, matching the GL shader's
  *  removed-copper texture (glRenderer: 7 css px, cuts keep a faint ghost). */

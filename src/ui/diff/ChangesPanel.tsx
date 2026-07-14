@@ -15,17 +15,20 @@ import { IconCheck, IconChevron } from "../icons";
 
 /** The Changes panel (visual-diff §5): the left-rail tab shown only in diff mode. A tree
  *  grouped by impact (Electrical / Placement / Cosmetic — the panel's single
- *  categorization) with count badges, a free-text filter, and a stepper header
- *  ("Change 7 of 23") with prev/next and ←/→ + J/K keyboard walk.
+ *  categorization) with count badges, a free-text filter, a Pending/Reviewed/All
+ *  review-status filter (defaults to Pending so a large changeset shows only what's
+ *  left to look at), and prev/next stepper with ←/→ + J/K keyboard walk.
  *
  *  Board-overlay selection: CLICK a row to focus it (solo on the board, camera lands
  *  on it); SHIFT-CLICK to add/remove a change from the board overlay without moving
  *  the camera — the way to light up several changes at once. "Show all" restores the
  *  everything-tinted overview.
  *
- *  Review progress: focusing a change automatically marks it REVIEWED (the ✓ dims the
- *  row); the per-row ✓ and the group button are manual overrides. Progress is the
- *  reviewer's own bookkeeping — it never hides a change or affects the board. */
+ *  Review progress: the reviewer marks a change REVIEWED manually (the per-row ✓ or the
+ *  group button) — glancing through a change never ticks it. Progress is the reviewer's
+ *  own bookkeeping; it drives the Pending/Reviewed filter but never affects the board. */
+type ReviewFilter = "pending" | "reviewed" | "all";
+
 export function ChangesPanel() {
   const doc = useDiffStore((s) => s.doc);
   const focusedId = useDiffStore((s) => s.focusedChangeId);
@@ -39,12 +42,23 @@ export function ChangesPanel() {
   const showAllChanges = useDiffStore((s) => s.showAllChanges);
 
   const [query, setQuery] = useState("");
+  const [reviewFilter, setReviewFilter] = useState<ReviewFilter>("pending");
   const [collapsed, setCollapsed] = useState<Set<ImpactBucket>>(new Set());
 
   const allChanges = doc?.changes ?? [];
-  // Apply the text filter, then re-group for the tree and re-flatten for the stepper
-  // walk, so "Change N of M" and prev/next count only the *visible* changes.
-  const visible = useMemo(() => filterChanges(allChanges, query), [allChanges, query]);
+  // Text filter first, then the Pending/Reviewed status filter. Both narrow the tree
+  // AND the stepper walk, so "N of M" and prev/next count only the *visible* changes.
+  const textFiltered = useMemo(() => filterChanges(allChanges, query), [allChanges, query]);
+  const reviewedCount = useMemo(
+    () => textFiltered.filter((c) => seen.has(c.id)).length,
+    [textFiltered, seen],
+  );
+  const pendingCount = textFiltered.length - reviewedCount;
+  const visible = useMemo(() => {
+    if (reviewFilter === "all") return textFiltered;
+    const wantSeen = reviewFilter === "reviewed";
+    return textFiltered.filter((c) => seen.has(c.id) === wantSeen);
+  }, [textFiltered, reviewFilter, seen]);
   const groups = useMemo(() => groupChanges(visible), [visible]);
   const ordered = useMemo(() => orderedChanges(visible), [visible]);
   const focusIdx = ordered.findIndex((c) => c.id === focusedId);
@@ -121,22 +135,27 @@ export function ChangesPanel() {
 
   return (
     <div className="changes-panel">
-      {/* Stepper header */}
-      <div className="changes-stepper">
-        <button className="btn-ghost step-btn" title="Previous change (←/K)" onClick={() => stepVisible(-1)}>
-          ‹
-        </button>
-        <span className="step-count">
-          {focusIdx >= 0 ? `Change ${focusIdx + 1} of ${ordered.length}` : `${ordered.length} changes`}
-          {seen.size > 0 && (
-            <span className="step-reviewed" title="Changes you have focused (or checked off) so far">
-              {" "}· {seen.size} reviewed
-            </span>
-          )}
-        </span>
-        <button className="btn-ghost step-btn" title="Next change (→/J)" onClick={() => stepVisible(+1)}>
-          ›
-        </button>
+      {/* Review-status filter: default Pending so a big changeset shows only what's left
+          to review; a reviewed change drops out the moment its ✓ is ticked. */}
+      <div className="changes-filter" role="tablist">
+        {(
+          [
+            ["pending", "Pending", pendingCount],
+            ["reviewed", "Reviewed", reviewedCount],
+            ["all", "All", textFiltered.length],
+          ] as const
+        ).map(([key, label, count]) => (
+          <button
+            key={key}
+            role="tab"
+            aria-selected={reviewFilter === key}
+            className={`changes-filter-btn ${reviewFilter === key ? "active" : ""}`}
+            onClick={() => setReviewFilter(key)}
+          >
+            {label}
+            <span className="changes-filter-count">{count}</span>
+          </button>
+        ))}
       </div>
 
       <input
@@ -147,16 +166,27 @@ export function ChangesPanel() {
         onChange={(e) => setQuery(e.target.value)}
       />
 
-      {/* Board-overlay visibility: by default every change is tinted; clicking a row
-          solos it and shift-clicking rows builds subsets. This bar is the way back. */}
+      {/* Slim stepper: prev/next + position within the filtered walk (also ←/→ · J/K). */}
+      {ordered.length > 0 && (
+        <div className="changes-stepper">
+          <button className="btn-ghost step-btn" title="Previous change (←/K)" onClick={() => stepVisible(-1)}>
+            ‹
+          </button>
+          <span className="step-count">
+            {focusIdx >= 0 ? `${focusIdx + 1} of ${ordered.length}` : `${ordered.length} changes`}
+          </span>
+          <button className="btn-ghost step-btn" title="Next change (→/J)" onClick={() => stepVisible(+1)}>
+            ›
+          </button>
+        </div>
+      )}
+
+      {/* A focus/shift-click subset solos changes on the board; this is the way back to
+          the everything-tinted overview. Shown only while a subset is active. */}
       {hiddenIds.size > 0 && (
         <div className="changes-visbar">
-          <span title="Shift-click rows to add or remove changes from the board overlay">
-            {Math.max(allChanges.length - hiddenIds.size, 0)} of {allChanges.length} on board
-            <span className="visbar-hint"> · shift-click adds</span>
-          </span>
           <button className="btn-ghost changes-visbar-btn" onClick={showAllChanges}>
-            Show all
+            Show all on board
           </button>
         </div>
       )}
@@ -164,7 +194,13 @@ export function ChangesPanel() {
       {/* Tree */}
       <div className="changes-tree">
         {groups.length === 0 ? (
-          <div className="menu-empty">No changes match the filter.</div>
+          <div className="menu-empty">
+            {reviewFilter === "pending" && pendingCount === 0 && textFiltered.length > 0
+              ? "All changes reviewed 🎉"
+              : reviewFilter === "reviewed" && reviewedCount === 0
+                ? "Nothing reviewed yet."
+                : "No changes match the filter."}
+          </div>
         ) : (
           groups.map((grp) => {
             const isCollapsed = collapsed.has(grp.impact);
@@ -238,7 +274,7 @@ function ChangeRow({
 }: {
   change: Change;
   focused: boolean;
-  /** Reviewed (auto-marked on focus; the ✓ is a manual override). */
+  /** Reviewed — set only by the manual ✓ (or the group button), never by focusing. */
   seen: boolean;
   /** Not currently tinted on the PCB overlay (shift-click toggles), NOT list-filtered. */
   hidden: boolean;
@@ -282,13 +318,14 @@ function ChangeRow({
       </div>
       <button
         className={`change-seen ${seen ? "on" : ""}`}
-        title={seen ? "Reviewed (click to mark as not reviewed)" : "Mark reviewed without visiting"}
+        title={seen ? "Reviewed — click to mark as not reviewed" : "Mark as reviewed"}
+        aria-pressed={seen}
         onClick={(e) => {
           e.stopPropagation();
           onToggleSeen();
         }}
       >
-        <IconCheck size={12} />
+        <IconCheck size={15} />
       </button>
     </div>
   );
