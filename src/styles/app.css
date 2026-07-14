@@ -3341,21 +3341,29 @@ button {
   flex: none;
   background: none;
   border: 1.5px solid var(--border-1);
-  border-radius: 4px;
-  width: 22px;
-  height: 22px;
+  border-radius: 6px;
+  width: 24px;
+  height: 24px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   color: transparent;
   cursor: pointer;
-  transition: background 0.12s, border-color 0.12s, color 0.12s;
+  transition: background 0.12s, border-color 0.12s, color 0.12s, transform 0.12s;
 }
+/* Bolder tick than the icon set's 1.2px default — a thin stroke reads faint at this size. */
+.change-seen svg { stroke-width: 2; }
 /* Unchecked: a faint preview of the tick on hover so the target reads as a checkbox. */
 .change-seen:hover { color: var(--fg-2); border-color: var(--fg-2); }
 /* Checked: a filled green box with a bold light tick — unmistakable at a glance. */
-.change-seen.on { background: var(--ok); border-color: var(--ok); color: var(--accent-fg); }
+.change-seen.on {
+  background: var(--ok);
+  border-color: var(--ok);
+  color: var(--accent-fg);
+  box-shadow: 0 1px 3px color-mix(in srgb, var(--ok) 45%, transparent);
+}
 .change-seen.on:hover { color: var(--accent-fg); }
+.change-seen:active { transform: scale(0.92); }
 
 /* Members of a composed shift-click subset light up blue; the focused row keeps its
    stronger accent border on top of the same wash. */

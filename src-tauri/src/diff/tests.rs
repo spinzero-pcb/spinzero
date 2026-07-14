@@ -657,9 +657,10 @@ fn silk_and_outline_from_graphics() {
         doc.changes.iter().any(|c| c.group == Group::Outline && c.impact == Impact::Placement),
         "outline change present"
     );
+    // Silkscreen is a manufactured feature (assembly marking) — never cosmetic.
     assert!(
-        doc.changes.iter().any(|c| c.group == Group::Silk && c.impact == Impact::Cosmetic),
-        "silk change present"
+        doc.changes.iter().any(|c| c.group == Group::Silk && c.impact == Impact::Placement),
+        "silk change present, classed as placement"
     );
 }
 

@@ -1969,6 +1969,15 @@ fn ring_area(pts: &[f64]) -> f64 {
 /// from here: a graphic on Edge.Cuts is an outline change; text is a silk/text change;
 /// other graphics are silk. (plan §2)
 fn diff_graphics_and_text(a: &Geometry, b: &Geometry, out: &mut Vec<Change>) {
+    // Layer-name → manifest role, merged over both sides, for impact classing of
+    // rows built after their layer index is gone (paired texts, graphics set-diff).
+    let mut roles: HashMap<String, String> = HashMap::new();
+    for l in a.layers.iter().chain(b.layers.iter()) {
+        roles.entry(l.name.clone()).or_insert_with(|| l.role.clone());
+    }
+    let impact_of =
+        |layer: &str| layer_impact(layer, roles.get(layer).map(String::as_str).unwrap_or(""));
+
     // --- text diff. Three-stage pairing on indices so ONE authoring action reads as
     // ONE row instead of an add+remove pair:
     //   0. identical texts (layer + position + string + style) are unchanged — masked;
@@ -2069,7 +2078,7 @@ fn diff_graphics_and_text(a: &Geometry, b: &Geometry, out: &mut Vec<Change>) {
                 emph_b: None,
                 group: Group::Text,
                 kind,
-                impact: Impact::Cosmetic,
+                impact: impact_of(&layer),
                 title,
                 detail,
                 anchors: Anchors {
@@ -2102,7 +2111,7 @@ fn diff_graphics_and_text(a: &Geometry, b: &Geometry, out: &mut Vec<Change>) {
         }
         let is_edge = layer == "Edge.Cuts";
         let group = if is_edge { Group::Outline } else { Group::Silk };
-        let impact = if is_edge { Impact::Placement } else { Impact::Cosmetic };
+        let impact = impact_of(&layer);
         let mut bits = Vec::new();
         if added > 0 {
             bits.push(format!("+{added}"));
@@ -2139,30 +2148,54 @@ fn layer_of(g: &Geometry, idx: u16) -> String {
     g.layers.get(idx as usize).map(|l| l.name.clone()).unwrap_or_default()
 }
 
+/// Impact class for a change on a non-copper layer. Silkscreen, solder mask, paste
+/// and the board outline are manufactured features — a change there alters the
+/// physical board (assembly marking, soldering, fit), so it is never merely
+/// cosmetic. Fab / courtyard / user-drawing layers stay Cosmetic. Matches by
+/// manifest role, with a KiCad layer-name fallback for bundles missing roles.
+fn layer_impact(name: &str, role: &str) -> Impact {
+    let fab_role = matches!(role, "silkscreen" | "mask" | "paste" | "edge");
+    let fab_name = name == "Edge.Cuts"
+        || name.ends_with(".SilkS")
+        || name.ends_with(".Silkscreen")
+        || name.ends_with(".Mask")
+        || name.ends_with(".Paste");
+    if fab_role || fab_name {
+        Impact::Placement
+    } else {
+        Impact::Cosmetic
+    }
+}
+
+/// Resolve a layer index to its manifest role (empty when out of range).
+fn role_of(g: &Geometry, idx: u16) -> String {
+    g.layers.get(idx as usize).map(|l| l.role.clone()).unwrap_or_default()
+}
+
 /// Emit one text add/remove change per leftover text index, in a deterministic order
 /// (by layer, then the text string).
 fn push_text_addremove(out: &mut Vec<Change>, g: &Geometry, idxs: &[usize], kind: Kind, side: Side) {
-    let mut items: Vec<(String, String, [f64; 2])> = idxs
+    let mut items: Vec<(String, String, String, [f64; 2])> = idxs
         .iter()
         .map(|&i| {
             let t = &g.texts[i];
-            (layer_of(g, t.layer), t.text.clone(), [t.x, t.y])
+            (layer_of(g, t.layer), role_of(g, t.layer), t.text.clone(), [t.x, t.y])
         })
         .collect();
-    items.sort_by(|a, b| (a.0.as_str(), a.1.as_str()).cmp(&(b.0.as_str(), b.1.as_str())));
+    items.sort_by(|a, b| (a.0.as_str(), a.2.as_str()).cmp(&(b.0.as_str(), b.2.as_str())));
     let verb = match kind {
         Kind::Added => "added",
         Kind::Removed => "removed",
         _ => "changed",
     };
-    for (layer, text, at) in items {
+    for (layer, role, text, at) in items {
         out.push(Change {
             id: String::new(),
             emph_a: None,
             emph_b: None,
             group: Group::Text,
             kind,
-            impact: Impact::Cosmetic,
+            impact: layer_impact(&layer, &role),
             title: format!("Text '{text}' {verb} on {layer}"),
             detail: String::new(),
             anchors: pcb_point_anchor(&layer, at),

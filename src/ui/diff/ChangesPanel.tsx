@@ -325,7 +325,7 @@ function ChangeRow({
           onToggleSeen();
         }}
       >
-        <IconCheck size={15} />
+        <IconCheck size={18} />
       </button>
     </div>
   );
