@@ -227,7 +227,14 @@ export function HistoryGraph() {
         {compareFrom && (
           <div className="rev-nudge compare-nudge">
             Pick a revision to compare with{" "}
-            <b>{rowText(extractions.find((e) => e.id === compareFrom) ?? ({} as ExtractionMeta))}</b>{" "}
+            {/* The picked row can vanish mid-pick (a refresh hid it) — fall back to
+                its short id instead of rowText over a hollow object. */}
+            <b>
+              {(() => {
+                const from = extractions.find((e) => e.id === compareFrom);
+                return from ? rowText(from) : shortId(compareFrom);
+              })()}
+            </b>{" "}
             — or press Esc to cancel.
           </div>
         )}

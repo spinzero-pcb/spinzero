@@ -650,9 +650,9 @@ fn sch_kind_noun(kind: &str) -> &'static str {
 /// The dominant element in a cluster (highest priority present), whose noun titles the
 /// row — a symbol drag that also stretched its wires reads as "power symbol", not "wire".
 fn sch_cluster_noun(members: &[ChangedElem]) -> &'static str {
-    const PRIORITY: [&str; 11] = [
+    const PRIORITY: [&str; 12] = [
         "power", "symbol", "hier_label", "global_label", "label", "text", "graphic",
-        "netclass_flag", "bus", "wire", "junction",
+        "netclass_flag", "bus", "bus_entry", "wire", "junction",
     ];
     for k in PRIORITY {
         if members.iter().any(|m| m.kind == k) {
@@ -2499,7 +2499,8 @@ pub fn diff_key(cache_key_a: &str, cache_key_b: &str) -> String {
     //    component row, layer-function nouns ("Courtyard changed", not "Silk").
     // 6: via changes get one per-net row (`vias` anchor marker) instead of folding
     //    into every spanned layer's "segments" row.
-    const DIFF_ENGINE_VERSION: &str = "6";
+    // 7: bus entries title as "bus entry" (cluster-noun priority), not "element".
+    const DIFF_ENGINE_VERSION: &str = "7";
     let mut h = blake3::Hasher::new();
     h.update(DIFF_ENGINE_VERSION.as_bytes());
     h.update(b" ");

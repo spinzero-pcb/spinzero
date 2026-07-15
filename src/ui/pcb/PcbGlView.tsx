@@ -1262,7 +1262,9 @@ export function PcbGlView({ visible }: { visible: boolean }) {
       dirty.current = true;
     }, 500);
     const down = (e: KeyboardEvent) => {
-      if (e.code === "Space" && !isTypingTarget(e)) {
+      // Only while the PCB canvas is up — the blink pause is a PCB-compare affordance,
+      // and this window-level preventDefault must not swallow Space on the schematic.
+      if (e.code === "Space" && !isTypingTarget(e) && useViewStore.getState().view === "pcb") {
         e.preventDefault();
         blinkHold.current = true;
       }
