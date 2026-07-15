@@ -13,7 +13,7 @@ import { useViewStore } from "./viewStore";
 import { useReviewStore } from "./reviewStore";
 import { usePcbViewStore } from "./pcbViewStore";
 import { useToastStore } from "./toastStore";
-import { pcbNav, diffPaint } from "../ui/canvas/navigator";
+import { pcbNav, diffPaint, bomNav } from "../ui/canvas/navigator";
 import type { ExtractionMeta } from "../lib/types";
 
 /** The side-by-side rendering mode. `combined` (single-canvas ghost overlay) is
@@ -280,6 +280,15 @@ export const useDiffStore = create<DiffState>((set, get) => ({
 
     const sch = change.anchors.schematic;
     const pcb = change.anchors.pcb;
+    const bom = change.anchors.bom;
+    // A BOM change lands on the BOM table (row scroll + flash, §8); its designators
+    // link back to the underlying component changes from the table/panel.
+    if (change.group === "bom" && bom) {
+      useViewStore.getState().setView("bom");
+      diffPaint.clearA(); // nothing to paint on the schematic A island
+      bomNav.flashRow(bom.key);
+      return;
+    }
     // Prefer the schematic side when the change has one; else land on the PCB.
     if (sch) {
       useViewStore.getState().setView("schematic");

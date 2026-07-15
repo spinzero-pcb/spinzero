@@ -102,6 +102,10 @@ pub enum Group {
     Outline,
     Sheet,
     Doc,
+    /// BOM-terms restatement of component changes (plan §8): line added/removed,
+    /// qty change, line-identity migration, DNP flip, designator move. Derived
+    /// from the component maps — never recomputed from a BOM artifact.
+    Bom,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
@@ -144,6 +148,10 @@ pub struct Anchors {
     pub schematic_a: Option<SchematicAnchor>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pcb: Option<PcbAnchor>,
+    /// BOM-table anchor (plan §8): identifies the table row the change lands on
+    /// (scroll + flash) and carries the structured line data the table/CSV render.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bom: Option<BomAnchor>,
 }
 
 /// The schema id stamped into every diff doc.
@@ -156,6 +164,33 @@ pub struct SchematicAnchor {
     pub sheet: i64,
     /// Element uuids on that sheet (drives the highlight tint).
     pub uuids: Vec<String>,
+}
+
+/// One BOM line's identity + the structured delta a change carries. `key` is the
+/// grouping key `(value, short footprint, mpn)` joined with `\u{1f}` — the frontend
+/// computes the same key over its `BomLine`s to find the row (with a designator-
+/// overlap fallback for lines whose BOM-artifact fields differ from the schematic's).
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+pub struct BomAnchor {
+    pub key: String,
+    pub value: String,
+    /// Short footprint (library prefix stripped), matching `BomLine.footprint`.
+    pub footprint: String,
+    pub mpn: String,
+    /// Line quantity on the A (older) side; 0 when the line is new.
+    #[serde(rename = "qtyA")]
+    pub qty_a: i64,
+    /// Line quantity on the B (newer) side; 0 when the line was removed.
+    #[serde(rename = "qtyB")]
+    pub qty_b: i64,
+    /// The row's designators (B side; A side for a removed line), sorted.
+    pub designators: Vec<String>,
+    /// Designators responsible for a qty increase ("+2: R33, R34").
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub added: Vec<String>,
+    /// Designators responsible for a qty decrease.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub removed: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
@@ -451,6 +486,7 @@ pub fn diff_bundles(
     // --- semantic groups over the design.json indexes ---
     let comp_delta = diff_components(a, b, &mut raw);
     diff_nets(a, b, &comp_delta, &mut raw);
+    diff_bom(a, b, &comp_delta, &mut raw);
     diff_sheets(a, b, &mut raw);
     diff_docs(a, b, &mut raw);
 
@@ -490,11 +526,15 @@ fn finalize(a: &Bundle, b: &Bundle, mut raw: Vec<Change>, mut sheets_pruned: Vec
         .into_iter()
         .enumerate()
         .map(|(i, mut c)| {
-            match c.impact {
-                Impact::Electrical => stats.electrical += 1,
-                Impact::Placement => stats.placement += 1,
-                Impact::Cosmetic => stats.cosmetic += 1,
-                Impact::Doc => stats.doc += 1,
+            // BOM rows are derived restatements of component changes (plan §8) —
+            // counting them would double-report the same edit in the stats.
+            if c.group != Group::Bom {
+                match c.impact {
+                    Impact::Electrical => stats.electrical += 1,
+                    Impact::Placement => stats.placement += 1,
+                    Impact::Cosmetic => stats.cosmetic += 1,
+                    Impact::Doc => stats.doc += 1,
+                }
             }
             c.id = format!("ch_{i:04}");
             c
@@ -526,6 +566,7 @@ fn change_sort_key(c: &Change) -> (u8, &str, &str) {
         Group::Silk => 7,
         Group::Text => 8,
         Group::Outline => 9,
+        Group::Bom => 10,
     };
     (g, c.title.as_str(), c.detail.as_str())
 }
@@ -848,6 +889,7 @@ fn diff_sch_graphics(
                 schematic: Some(SchematicAnchor { sheet: sheet_num, uuids: primary }),
                 schematic_a: None,
                 pcb: None,
+                bom: None,
             };
             if side == Side::Both && a_uuids != b_uuids {
                 anchors.schematic_a = Some(SchematicAnchor { sheet: sheet_num, uuids: a_uuids });
@@ -920,6 +962,7 @@ fn graphical_edit_fallback(
                 schematic: Some(SchematicAnchor { sheet: num, uuids: Vec::new() }),
                 schematic_a: None,
                 pcb: None,
+                bom: None,
             },
             side: Side::Both,
         });
@@ -1202,6 +1245,346 @@ fn comp_anchors(bundle: &Bundle, refdes: &str) -> Anchors {
         }
     }
     anchors
+}
+
+// ================================================================= BOM diff
+//
+// Plan §8: `BomLine` is a grouping of the component table, so the BOM changeset is
+// DERIVED from the component maps (canonicalized through the component pass's
+// re-annotation rename map), never recomputed from a BOM artifact. Groups both
+// sides' components by (value, short footprint, mpn) and expresses the deltas in
+// build terms: line added/removed, qty change with responsible designators,
+// line-identity migration (one "changed" row when designator overlap is high),
+// DNP flips, and designator moves between surviving lines.
+
+/// Line-identity fold threshold: designator-set Jaccard at/above this folds an
+/// A-only + B-only line pair into one "changed" row (the line's value/fp/mpn edited
+/// in place) instead of remove+add.
+const BOM_LINE_JACCARD: f64 = 0.5;
+
+/// The `(value, short-footprint, mpn)` grouping key. `\u{1f}` (unit separator) can't
+/// appear in schematic fields; the TS side computes the identical key over BomLines.
+fn bom_key(value: &str, fp: &str, mpn: &str) -> String {
+    format!("{}\u{1f}{}\u{1f}{}", value, fp_short(fp), mpn)
+}
+
+/// Short footprint name — library prefix stripped, matching `design::bom_lines`.
+fn fp_short(fp: &str) -> &str {
+    fp.rsplit(':').next().unwrap_or("")
+}
+
+/// Human label for a BOM line: "10k R_0402_1005Metric" (whichever parts exist).
+fn bom_label(value: &str, fp: &str, mpn: &str) -> String {
+    let mut parts: Vec<&str> = Vec::new();
+    if !value.is_empty() {
+        parts.push(value);
+    }
+    let short = fp_short(fp);
+    if !short.is_empty() {
+        parts.push(short);
+    }
+    if parts.is_empty() && !mpn.is_empty() {
+        parts.push(mpn);
+    }
+    if parts.is_empty() {
+        "(unnamed line)".to_string()
+    } else {
+        parts.join(" ")
+    }
+}
+
+/// One BOM line during derivation: display fields + the sorted designator set.
+struct BomGroup {
+    value: String,
+    footprint: String,
+    mpn: String,
+    dsg: BTreeSet<String>,
+}
+
+/// One side's BOM grouping: key → line. Designators are canonicalized through
+/// `rename` (A-side old name → B-side new name) so a re-annotation produces zero
+/// BOM churn.
+fn bom_lines_of(
+    comps: &HashMap<String, crate::design::CompLite>,
+    rename: &HashMap<&str, &str>,
+) -> BTreeMap<String, BomGroup> {
+    let mut lines: BTreeMap<String, BomGroup> = BTreeMap::new();
+    for (refdes, c) in comps {
+        let key = bom_key(&c.value, &c.fp, &c.mpn);
+        let d = rename.get(refdes.as_str()).copied().unwrap_or(refdes.as_str());
+        lines
+            .entry(key)
+            .or_insert_with(|| BomGroup {
+                value: c.value.clone(),
+                footprint: fp_short(&c.fp).to_string(),
+                mpn: c.mpn.clone(),
+                dsg: BTreeSet::new(),
+            })
+            .dsg
+            .insert(d.to_string());
+    }
+    lines
+}
+
+fn bom_anchor(
+    key: &str,
+    line: &BomGroup,
+    qty_a: i64,
+    qty_b: i64,
+    added: Vec<String>,
+    removed: Vec<String>,
+) -> Anchors {
+    Anchors {
+        schematic: None,
+        schematic_a: None,
+        pcb: None,
+        bom: Some(BomAnchor {
+            key: key.to_string(),
+            value: line.value.clone(),
+            footprint: line.footprint.clone(),
+            mpn: line.mpn.clone(),
+            qty_a,
+            qty_b,
+            designators: line.dsg.iter().cloned().collect(),
+            added,
+            removed,
+        }),
+    }
+}
+
+fn bom_change(kind: Kind, title: String, detail: String, side: Side, anchors: Anchors) -> Change {
+    Change {
+        id: String::new(),
+        emph_a: None,
+        emph_b: None,
+        group: Group::Bom,
+        kind,
+        impact: Impact::Electrical,
+        title,
+        detail,
+        anchors,
+        side,
+    }
+}
+
+/// Derive the BOM changeset (plan §8). `comps` is the component pass's verdict —
+/// its rename map canonicalizes A-side designators so re-annotations are invisible
+/// in BOM terms.
+fn diff_bom(a: &Bundle, b: &Bundle, comps: &CompDelta, out: &mut Vec<Change>) {
+    let rename: HashMap<&str, &str> =
+        comps.renamed.iter().map(|(x, y)| (x.as_str(), y.as_str())).collect();
+    let no_rename: HashMap<&str, &str> = HashMap::new();
+    let la = bom_lines_of(&a.indexes.components, &rename);
+    let lb = bom_lines_of(&b.indexes.components, &no_rename);
+
+    // --- designator moves between lines: a common part (post-rename identity) whose
+    // grouping key changed. When BOTH endpoint lines survive on both sides, the move
+    // is a reassignment between existing lines and gets its own row; otherwise a
+    // line-level row (fold / add / remove) explains it.
+    let mut movers: HashSet<String> = HashSet::new(); // refs explained by a move row
+    let mut move_rows: Vec<(String, String, String, String)> = Vec::new(); // (ref, from, to, toKey)
+    for (ra, ca) in &a.indexes.components {
+        let d = rename.get(ra.as_str()).copied().unwrap_or(ra.as_str());
+        let Some(cb) = b.indexes.components.get(d) else { continue };
+        let ka = bom_key(&ca.value, &ca.fp, &ca.mpn);
+        let kb = bom_key(&cb.value, &cb.fp, &cb.mpn);
+        if ka == kb {
+            continue;
+        }
+        if la.contains_key(&kb) && lb.contains_key(&ka) {
+            movers.insert(d.to_string());
+            move_rows.push((
+                d.to_string(),
+                bom_label(&ca.value, &ca.fp, &ca.mpn),
+                bom_label(&cb.value, &cb.fp, &cb.mpn),
+                kb,
+            ));
+        }
+    }
+    move_rows.sort();
+    for (d, from, to, to_key) in &move_rows {
+        let line = &lb[to_key];
+        let qty_a = la.get(to_key).map(|l| l.dsg.len() as i64).unwrap_or(0);
+        let anchors = bom_anchor(to_key, line, qty_a, line.dsg.len() as i64, vec![d.clone()], Vec::new());
+        out.push(bom_change(
+            Kind::Modified,
+            format!("BOM: {d} moved {from} → {to} line"),
+            String::new(),
+            Side::Both,
+            anchors,
+        ));
+    }
+
+    // --- line-identity folds: an A-only key + a B-only key whose designator sets
+    // overlap highly are ONE changed line (its value/fp/mpn migrated), not
+    // remove+add. Best-Jaccard-first greedy pairing (same idiom as net renames).
+    let only_a: Vec<&String> = la.keys().filter(|k| !lb.contains_key(*k)).collect();
+    let only_b: Vec<&String> = lb.keys().filter(|k| !la.contains_key(*k)).collect();
+    let mut candidates: Vec<(String, &String, &String)> = Vec::new();
+    for ka in &only_a {
+        for kb in &only_b {
+            let j = jaccard(&la[*ka].dsg, &lb[*kb].dsg);
+            if j >= BOM_LINE_JACCARD {
+                candidates.push((format!("{:08.5}", 1.0 - j), *ka, *kb));
+            }
+        }
+    }
+    candidates.sort();
+    let mut consumed_a: HashSet<&String> = HashSet::new();
+    let mut consumed_b: HashSet<&String> = HashSet::new();
+    for (_, ka, kb) in &candidates {
+        if consumed_a.contains(ka) || consumed_b.contains(kb) {
+            continue;
+        }
+        consumed_a.insert(ka);
+        consumed_b.insert(kb);
+        let ga = &la[*ka];
+        let gb = &lb[*kb];
+        let mut bits: Vec<String> = Vec::new();
+        if ga.value != gb.value {
+            bits.push(format!("value {} → {}", disp(&ga.value), disp(&gb.value)));
+        }
+        if ga.footprint != gb.footprint {
+            bits.push(format!("footprint {} → {}", disp(&ga.footprint), disp(&gb.footprint)));
+        }
+        if ga.mpn != gb.mpn {
+            bits.push(format!("MPN {} → {}", disp(&ga.mpn), disp(&gb.mpn)));
+        }
+        if ga.dsg.len() != gb.dsg.len() {
+            bits.push(format!("qty {} → {}", ga.dsg.len(), gb.dsg.len()));
+        }
+        let added: Vec<String> = gb.dsg.difference(&ga.dsg).cloned().collect();
+        let removed: Vec<String> = ga.dsg.difference(&gb.dsg).cloned().collect();
+        let anchors = bom_anchor(kb, gb, ga.dsg.len() as i64, gb.dsg.len() as i64, added, removed);
+        out.push(bom_change(
+            Kind::Modified,
+            format!(
+                "BOM line {} → {}",
+                bom_label(&ga.value, &ga.footprint, &ga.mpn),
+                bom_label(&gb.value, &gb.footprint, &gb.mpn)
+            ),
+            bits.join("; "),
+            Side::Both,
+            anchors,
+        ));
+    }
+
+    // --- genuine line adds/removes (not folded).
+    for kb in &only_b {
+        if consumed_b.contains(kb) {
+            continue;
+        }
+        let line = &lb[*kb];
+        let names: Vec<String> = line.dsg.iter().cloned().collect();
+        let anchors = bom_anchor(kb, line, 0, names.len() as i64, names.clone(), Vec::new());
+        out.push(bom_change(
+            Kind::Added,
+            format!("BOM line added: {}", bom_label(&line.value, &line.footprint, &line.mpn)),
+            format!("×{}: {}", names.len(), names.join(", ")),
+            Side::B,
+            anchors,
+        ));
+    }
+    for ka in &only_a {
+        if consumed_a.contains(ka) {
+            continue;
+        }
+        let line = &la[*ka];
+        let names: Vec<String> = line.dsg.iter().cloned().collect();
+        let anchors = bom_anchor(ka, line, names.len() as i64, 0, Vec::new(), names.clone());
+        out.push(bom_change(
+            Kind::Removed,
+            format!("BOM line removed: {}", bom_label(&line.value, &line.footprint, &line.mpn)),
+            format!("×{}: {}", names.len(), names.join(", ")),
+            Side::A,
+            anchors,
+        ));
+    }
+
+    // --- qty changes on lines present on both sides, naming the responsible
+    // designators ("+2: R33, R34"). Deltas fully explained by move rows are
+    // suppressed (one user action = one row); mixed deltas keep the row with the
+    // movers marked.
+    for (k, gb) in &lb {
+        let Some(ga) = la.get(k) else { continue };
+        if ga.dsg == gb.dsg {
+            continue;
+        }
+        let added: Vec<&String> = gb.dsg.difference(&ga.dsg).collect();
+        let removed: Vec<&String> = ga.dsg.difference(&gb.dsg).collect();
+        if added.iter().chain(&removed).all(|d| movers.contains(*d)) {
+            continue;
+        }
+        let mark = |d: &&String| {
+            if movers.contains(*d) {
+                format!("{d} (moved)")
+            } else {
+                (*d).clone()
+            }
+        };
+        let mut bits: Vec<String> = Vec::new();
+        if !added.is_empty() {
+            bits.push(format!(
+                "+{}: {}",
+                added.len(),
+                added.iter().map(mark).collect::<Vec<_>>().join(", ")
+            ));
+        }
+        if !removed.is_empty() {
+            bits.push(format!(
+                "−{}: {}",
+                removed.len(),
+                removed.iter().map(mark).collect::<Vec<_>>().join(", ")
+            ));
+        }
+        let anchors = bom_anchor(
+            k,
+            gb,
+            ga.dsg.len() as i64,
+            gb.dsg.len() as i64,
+            added.iter().map(|d| (*d).clone()).collect(),
+            removed.iter().map(|d| (*d).clone()).collect(),
+        );
+        out.push(bom_change(
+            Kind::Modified,
+            format!(
+                "BOM {}: qty {} → {}",
+                bom_label(&gb.value, &gb.footprint, &gb.mpn),
+                ga.dsg.len(),
+                gb.dsg.len()
+            ),
+            bits.join("; "),
+            Side::Both,
+            anchors,
+        ));
+    }
+
+    // --- DNP flips, called out separately (fit/no-fit is a build change reviewers
+    // miss). One row per flipped designator, anchored to its B-side line.
+    let mut flips: Vec<(String, bool, String)> = Vec::new(); // (ref, nowDnp, keyB)
+    for (ra, ca) in &a.indexes.components {
+        let d = rename.get(ra.as_str()).copied().unwrap_or(ra.as_str());
+        let Some(cb) = b.indexes.components.get(d) else { continue };
+        if ca.dnp != cb.dnp {
+            flips.push((d.to_string(), cb.dnp, bom_key(&cb.value, &cb.fp, &cb.mpn)));
+        }
+    }
+    flips.sort();
+    for (d, now_dnp, kb) in &flips {
+        let Some(line) = lb.get(kb) else { continue };
+        let qty = line.dsg.len() as i64;
+        let anchors = bom_anchor(kb, line, qty, qty, Vec::new(), Vec::new());
+        out.push(bom_change(
+            Kind::Modified,
+            format!(
+                "BOM: {d} {}",
+                if *now_dnp { "marked DNP (do not fit)" } else { "un-marked DNP (now fitted)" }
+            ),
+            format!("line {}", bom_label(&line.value, &line.footprint, &line.mpn)),
+            Side::Both,
+            anchors,
+        ));
+    }
 }
 
 // ================================================================= net diff
@@ -1536,6 +1919,7 @@ fn diff_sheets(a: &Bundle, b: &Bundle, out: &mut Vec<Change>) {
                     schematic: Some(SchematicAnchor { sheet: *num, uuids: Vec::new() }),
                     schematic_a: None,
                     pcb: None,
+                    bom: None,
                 },
                 side: Side::B,
             });
@@ -1556,6 +1940,7 @@ fn diff_sheets(a: &Bundle, b: &Bundle, out: &mut Vec<Change>) {
                     schematic: Some(SchematicAnchor { sheet: *num, uuids: Vec::new() }),
                     schematic_a: None,
                     pcb: None,
+                    bom: None,
                 },
                 side: Side::A,
             });
@@ -1720,6 +2105,7 @@ fn diff_placement(a: &Geometry, b: &Geometry, out: &mut Vec<Change>) {
                     comp: Some(cb.reference.clone()),
                     net: None,
                 }),
+                bom: None,
             },
             side: Side::Both,
         });
@@ -1810,6 +2196,7 @@ fn diff_routing(a: &Geometry, b: &Geometry, out: &mut Vec<Change>) {
                     comp: None,
                     net: net_anchor,
                 }),
+                bom: None,
             },
             side: Side::Both,
         });
@@ -1935,6 +2322,7 @@ fn diff_zones(a: &Geometry, b: &Geometry, out: &mut Vec<Change>) {
                     comp: None,
                     net: (!net.is_empty()).then(|| net.clone()),
                 }),
+                bom: None,
             },
             side: Side::Both,
         });
@@ -2119,6 +2507,7 @@ fn diff_graphics_and_text(a: &Geometry, b: &Geometry, comp_delta: &CompDelta, ou
                     schematic: None,
                     schematic_a: None,
                     pcb: Some(PcbAnchor { bbox: Some(bbox), layers: vec![layer], comp: None, net: None }),
+                    bom: None,
                 },
                 side: Side::Both,
             });
@@ -2174,6 +2563,7 @@ fn diff_graphics_and_text(a: &Geometry, b: &Geometry, comp_delta: &CompDelta, ou
                 schematic: None,
                 schematic_a: None,
                 pcb: Some(PcbAnchor { bbox: None, layers: vec![layer], comp: None, net: None }),
+                bom: None,
             },
             side: Side::Both,
         });
@@ -2320,6 +2710,7 @@ fn pcb_point_anchor(layer: &str, at: [f64; 2]) -> Anchors {
             comp: None,
             net: None,
         }),
+        bom: None,
     }
 }
 
@@ -2388,7 +2779,9 @@ pub fn diff_key(cache_key_a: &str, cache_key_b: &str) -> String {
     // so without this a cached diff.json would keep serving the old shape.
     // 5: manufactured-layer impact reclass, footprint art/text folds into its
     //    component row, layer-function nouns ("Courtyard changed", not "Silk").
-    const DIFF_ENGINE_VERSION: &str = "5";
+    // 6: BOM changeset (group "bom" rows + BomAnchor) derived from the component
+    //    changeset (phase 3).
+    const DIFF_ENGINE_VERSION: &str = "6";
     let mut h = blake3::Hasher::new();
     h.update(DIFF_ENGINE_VERSION.as_bytes());
     h.update(b" ");

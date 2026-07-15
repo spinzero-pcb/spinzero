@@ -60,10 +60,9 @@ function activeLayerForSelection(sel: NonNullable<Selection>) {
 const VIEWS: { id: MainView; label: string }[] = [
   { id: "schematic", label: "Schematic" },
   { id: "pcb", label: "PCB" },
-  // BOM tab hidden for the initial release — re-add when the BOM Rules Checker
-  // lands. The BomTab component and the `view === "bom"` rendering below are left
-  // intact so re-enabling is just restoring this entry.
-  // { id: "bom", label: "BOM" },
+  // Re-enabled with the BOM diff (visual-diff plan §8): the Changes panel steps
+  // into the table, so the tab must be reachable.
+  { id: "bom", label: "BOM" },
 ];
 
 export default function App() {

@@ -21,7 +21,8 @@ export type ChangeGroup =
   | "text"
   | "outline"
   | "sheet"
-  | "doc";
+  | "doc"
+  | "bom";
 
 export type ChangeKind = "added" | "removed" | "modified" | "renamed" | "moved";
 
@@ -44,6 +45,27 @@ export interface PcbAnchor {
   net?: string;
 }
 
+/** One BOM line's identity + the structured delta a `group: "bom"` change carries
+ *  (plan §8). `key` = (value, short footprint, mpn) joined with U+001F — the same
+ *  key the frontend computes over `BomLine`s to find the table row. */
+export interface BomAnchor {
+  key: string;
+  value: string;
+  /** Short footprint (library prefix stripped), matching `BomLine.footprint`. */
+  footprint: string;
+  mpn: string;
+  /** Line quantity on the A (older) side; 0 when the line is new. */
+  qtyA: number;
+  /** Line quantity on the B (newer) side; 0 when the line was removed. */
+  qtyB: number;
+  /** The row's designators (B side; A side for a removed line), sorted. */
+  designators: string[];
+  /** Designators responsible for a qty increase ("+2: R33, R34"). */
+  added?: string[];
+  /** Designators responsible for a qty decrease. */
+  removed?: string[];
+}
+
 export interface ChangeAnchors {
   schematic?: SchematicAnchor;
   /** A-side schematic anchor, present only when the changed object's uuids differ
@@ -51,6 +73,8 @@ export interface ChangeAnchors {
    *  this when present, else `schematic`. */
   schematicA?: SchematicAnchor;
   pcb?: PcbAnchor;
+  /** BOM-table anchor: the row the change lands on (scroll + flash). */
+  bom?: BomAnchor;
 }
 
 export interface Change {
@@ -113,20 +137,26 @@ export interface DiffHandle {
  *  old object-type grouping, Components/Nets/Sheets/…, was removed as a second
  *  competing taxonomy; `Change.group` stays in the data for the renderers). `doc`
  *  folds into "cosmetic" via impactBucket so every change lands in exactly one
- *  bucket. Display order: what can break the board first, looks last. */
-export type ImpactBucket = Exclude<ChangeImpact, "doc">;
+ *  bucket. `group: "bom"` rows are derived RESTATEMENTS of component changes in
+ *  build terms (plan §8) — they get their own bucket so they don't interleave with
+ *  the component rows they restate. Display order: what can break the board first,
+ *  looks last, BOM (the purchasing view) at the end. */
+export type ImpactBucket = Exclude<ChangeImpact, "doc"> | "bom";
 
-export const IMPACT_ORDER: ImpactBucket[] = ["electrical", "placement", "cosmetic"];
+export const IMPACT_ORDER: ImpactBucket[] = ["electrical", "placement", "cosmetic", "bom"];
 
 export const IMPACT_LABELS: Record<ImpactBucket, string> = {
   electrical: "Electrical",
   placement: "Placement",
   cosmetic: "Cosmetic",
+  bom: "BOM",
 };
 
 /** Which impact bucket a change falls into: its own class, except `doc`, which shows
- *  under "Cosmetic" (non-electrical, non-placement) so no change is ever unreachable. */
-export function impactBucket(impact: ChangeImpact): ImpactBucket {
+ *  under "Cosmetic" (non-electrical, non-placement), and BOM rows, which get their
+ *  own bucket — so no change is ever unreachable. */
+export function impactBucket(impact: ChangeImpact, group?: ChangeGroup): ImpactBucket {
+  if (group === "bom") return "bom";
   return impact === "doc" ? "cosmetic" : impact;
 }
 
@@ -166,7 +196,7 @@ export interface ChangeGroupNode {
 export function groupChanges(changes: Change[]): ChangeGroupNode[] {
   const byBucket = new Map<ImpactBucket, Change[]>();
   for (const c of changes) {
-    const bucket = impactBucket(c.impact);
+    const bucket = impactBucket(c.impact, c.group);
     const list = byBucket.get(bucket);
     if (list) list.push(c);
     else byBucket.set(bucket, [c]);
@@ -207,6 +237,11 @@ export function hasSchematicAnchor(c: Change): boolean {
 /** Does a change land on the PCB canvas? */
 export function hasPcbAnchor(c: Change): boolean {
   return !!c.anchors.pcb;
+}
+
+/** Does a change land on the BOM table? */
+export function hasBomAnchor(c: Change): boolean {
+  return !!c.anchors.bom;
 }
 
 /** The union of PCB layers the changes land on — the "relevant layers" the diff view

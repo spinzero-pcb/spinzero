@@ -201,6 +201,30 @@ export const pcbNav: PcbNavigator = {
   revealChange: noop,
 };
 
+/** BOM-table bridge (visual diff §8): stepping onto a `group: "bom"` change switches
+ *  to the BOM view and lands on the change's table row (scroll + flash). The BomTab
+ *  is mounted only while its view is up, so a flash requested during the view switch
+ *  is held in `pending` and consumed by `register` on mount. */
+export const bomNav = {
+  pending: null as string | null,
+  handler: null as ((key: string) => void) | null,
+  /** Scroll + flash the row whose anchor key this is (queued until the tab mounts). */
+  flashRow(key: string) {
+    if (this.handler) this.handler(key);
+    else this.pending = key;
+  },
+  /** BomTab registers on mount; a queued flash fires immediately. Returns unregister. */
+  register(fn: (key: string) => void): () => void {
+    this.handler = fn;
+    const queued = this.pending;
+    this.pending = null;
+    if (queued) fn(queued);
+    return () => {
+      if (this.handler === fn) this.handler = null;
+    };
+  },
+};
+
 /** Measure-tool bridge: PcbGlView owns the ephemeral measurement (in refs), the app
  *  keymap drives Esc / Ctrl+C / Space. `escape` clears an in-progress measurement,
  *  returning true when it consumed the Esc so the caller knows not to also exit the mode. */
