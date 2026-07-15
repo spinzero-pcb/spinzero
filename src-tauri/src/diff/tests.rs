@@ -1369,10 +1369,166 @@ fn value_change_carries_per_side_emphasis() {
     b.components.insert("C134".into(), comp_full("10nF", "C_0402", "", 1, "u1"));
 
     let doc = diff_bundles(&bundle(a), &bundle(b), &no_source_diff());
-    assert_eq!(doc.changes.len(), 1, "{:?}", doc.changes);
-    let c = &doc.changes[0];
+    // The value edit also derives a BOM-line row (plan §8); the component row is one.
+    let comps: Vec<_> = doc.changes.iter().filter(|c| c.group == Group::Component).collect();
+    assert_eq!(comps.len(), 1, "{:?}", doc.changes);
+    let c = comps[0];
     assert_eq!(c.emph_a.as_deref(), Some("1nF"));
     assert_eq!(c.emph_b.as_deref(), Some("10nF"));
     // Same symbol uuid on both sides: no duplicate A anchor.
     assert!(c.anchors.schematic_a.is_none());
+}
+
+// ------------------------------------------------------------------- BOM diff (§8)
+
+/// The Group::Bom rows of a doc.
+fn bom_rows(doc: &DiffDoc) -> Vec<&Change> {
+    doc.changes.iter().filter(|c| c.group == Group::Bom).collect()
+}
+
+#[test]
+fn bom_line_added_and_removed() {
+    let mut a = empty_indexes();
+    a.components.insert("R1".into(), comp("10k", "R_0402", false));
+    a.components.insert("D3".into(), comp("LED", "LED_0603", false));
+    let mut b = empty_indexes();
+    b.components.insert("R1".into(), comp("10k", "R_0402", false));
+    b.components.insert("U9".into(), comp("TPS562", "SOT-23", false));
+
+    let doc = diff_bundles(&bundle(a), &bundle(b), &no_source_diff());
+    let rows = bom_rows(&doc);
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    let added = rows.iter().find(|c| c.kind == Kind::Added).expect("added line");
+    assert!(added.title.contains("TPS562") && added.title.contains("added"), "{}", added.title);
+    assert!(added.detail.contains("U9"), "names the designator: {}", added.detail);
+    let anch = added.anchors.bom.as_ref().expect("bom anchor");
+    assert_eq!((anch.qty_a, anch.qty_b), (0, 1));
+    assert_eq!(anch.designators, vec!["U9".to_string()]);
+    let removed = rows.iter().find(|c| c.kind == Kind::Removed).expect("removed line");
+    assert!(removed.title.contains("LED"), "{}", removed.title);
+    assert_eq!(removed.side, Side::A);
+}
+
+#[test]
+fn bom_qty_change_names_responsible_designators() {
+    // The 10k line grows from 2 to 4 fitted parts: one qty row, "+2: R33, R34".
+    let mut a = empty_indexes();
+    for r in ["R1", "R2"] {
+        a.components.insert(r.into(), comp("10k", "R_0402", false));
+    }
+    let mut b = empty_indexes();
+    for r in ["R1", "R2", "R33", "R34"] {
+        b.components.insert(r.into(), comp("10k", "R_0402", false));
+    }
+
+    let doc = diff_bundles(&bundle(a), &bundle(b), &no_source_diff());
+    let rows = bom_rows(&doc);
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    let c = rows[0];
+    assert!(c.title.contains("qty 2 → 4"), "{}", c.title);
+    assert!(c.detail.contains("+2: R33, R34"), "{}", c.detail);
+    let anch = c.anchors.bom.as_ref().unwrap();
+    assert_eq!(anch.added, vec!["R33".to_string(), "R34".to_string()]);
+    assert!(anch.removed.is_empty());
+}
+
+#[test]
+fn bom_value_change_folds_to_one_changed_line() {
+    // R7+R8 change value 10k → 4k7: high designator overlap folds the A-only and
+    // B-only lines into ONE modified row (line identity migrates), not remove+add.
+    let mut a = empty_indexes();
+    a.components.insert("R7".into(), comp("10k", "R_0402", false));
+    a.components.insert("R8".into(), comp("10k", "R_0402", false));
+    let mut b = empty_indexes();
+    b.components.insert("R7".into(), comp("4k7", "R_0402", false));
+    b.components.insert("R8".into(), comp("4k7", "R_0402", false));
+
+    let doc = diff_bundles(&bundle(a), &bundle(b), &no_source_diff());
+    let rows = bom_rows(&doc);
+    assert_eq!(rows.len(), 1, "one changed line, not remove+add: {rows:?}");
+    let c = rows[0];
+    assert_eq!(c.kind, Kind::Modified);
+    assert!(c.title.contains("10k") && c.title.contains("4k7"), "{}", c.title);
+    assert!(c.detail.contains("value 10k → 4k7"), "{}", c.detail);
+    assert_eq!(c.anchors.bom.as_ref().unwrap().designators, vec!["R7".to_string(), "R8".to_string()]);
+}
+
+#[test]
+fn bom_designator_move_between_surviving_lines() {
+    // R7 moves from the 10k line to the 4k7 line; both lines exist on both sides.
+    // Exactly one BOM row (the move) — the qty deltas it fully explains are folded.
+    let mut a = empty_indexes();
+    a.components.insert("R1".into(), comp("10k", "R_0402", false));
+    a.components.insert("R7".into(), comp("10k", "R_0402", false));
+    a.components.insert("R3".into(), comp("4k7", "R_0402", false));
+    let mut b = empty_indexes();
+    b.components.insert("R1".into(), comp("10k", "R_0402", false));
+    b.components.insert("R7".into(), comp("4k7", "R_0402", false));
+    b.components.insert("R3".into(), comp("4k7", "R_0402", false));
+
+    let doc = diff_bundles(&bundle(a), &bundle(b), &no_source_diff());
+    let rows = bom_rows(&doc);
+    assert_eq!(rows.len(), 1, "just the move: {rows:?}");
+    let c = rows[0];
+    assert!(c.title.contains("R7") && c.title.contains("10k") && c.title.contains("4k7"), "{}", c.title);
+    assert!(c.title.contains("moved"), "{}", c.title);
+}
+
+#[test]
+fn bom_dnp_flip_called_out() {
+    let mut a = empty_indexes();
+    a.components.insert("C2".into(), comp("100n", "C_0402", false));
+    let mut b = empty_indexes();
+    b.components.insert("C2".into(), comp("100n", "C_0402", true));
+
+    let doc = diff_bundles(&bundle(a), &bundle(b), &no_source_diff());
+    let rows = bom_rows(&doc);
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert!(rows[0].title.contains("C2") && rows[0].title.contains("DNP"), "{}", rows[0].title);
+    assert_eq!(rows[0].kind, Kind::Modified);
+}
+
+#[test]
+fn bom_reannotation_produces_no_churn() {
+    // R12 → R15 re-annotation (same value/fp): the rename map canonicalizes the
+    // designator, so the BOM sees zero difference.
+    let mut a = empty_indexes();
+    a.components.insert("R12".into(), comp("10k", "R_0402", false));
+    let mut b = empty_indexes();
+    b.components.insert("R15".into(), comp("10k", "R_0402", false));
+
+    let doc = diff_bundles(&bundle(a), &bundle(b), &no_source_diff());
+    assert!(bom_rows(&doc).is_empty(), "{:?}", doc.changes);
+}
+
+#[test]
+fn bom_rows_do_not_inflate_stats() {
+    // A value change = 1 component row + 1 derived BOM row, but the stats count the
+    // design change once (BOM rows are restatements).
+    let mut a = empty_indexes();
+    a.components.insert("C14".into(), comp("100n", "C_0402", false));
+    let mut b = empty_indexes();
+    b.components.insert("C14".into(), comp("1u", "C_0402", false));
+
+    let doc = diff_bundles(&bundle(a), &bundle(b), &no_source_diff());
+    assert_eq!(bom_rows(&doc).len(), 1, "{:?}", doc.changes);
+    assert_eq!(doc.stats.electrical, 1, "BOM row not counted");
+}
+
+#[test]
+fn bom_fp_short_matches_bomline_footprint() {
+    // Component footprints carry the library prefix; BomLine.footprint does not.
+    // The anchor's footprint must be the short form so the frontend key matches.
+    let mut a = empty_indexes();
+    let mut b = empty_indexes();
+    a.components.insert("R1".into(), comp("10k", "Resistor_SMD:R_0402_1005Metric", false));
+    b.components.insert("R1".into(), comp("10k", "Resistor_SMD:R_0402_1005Metric", false));
+    b.components.insert("R2".into(), comp("10k", "Resistor_SMD:R_0402_1005Metric", false));
+
+    let doc = diff_bundles(&bundle(a), &bundle(b), &no_source_diff());
+    let rows = bom_rows(&doc);
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    let anch = rows[0].anchors.bom.as_ref().unwrap();
+    assert_eq!(anch.footprint, "R_0402_1005Metric");
+    assert!(anch.key.contains("R_0402_1005Metric") && !anch.key.contains("Resistor_SMD"));
 }

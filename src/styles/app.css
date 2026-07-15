@@ -1711,6 +1711,57 @@ button {
 .bom-table tbody tr:not(.dnp) td.dim { color: var(--fg-1); }
 .bom-table tbody tr.dnp td { color: var(--fg-2); }
 .bom-empty { padding: var(--sp-3); color: var(--fg-2); }
+
+/* Sort indicator + header affordance (theme-aware; no hardcoded colours). */
+.bom-sort-arrow { color: var(--accent); }
+.bom-table th:hover { color: var(--fg-0); }
+
+/* ---------- BOM diff mode (visual-diff plan §8) ---------- */
+/* Row tinting reuses the diff semantics the schematic/PCB overlays use:
+   added = green, removed = red, changed = amber (tokens.css --diff-* vars). */
+.bom-table tbody tr.bom-added { background: var(--ok-dim); box-shadow: inset 2px 0 0 var(--diff-add); }
+.bom-table tbody tr.bom-changed { background: var(--warn-dim); box-shadow: inset 2px 0 0 var(--diff-change); }
+.bom-table tbody tr.bom-removed { background: var(--err-dim); box-shadow: inset 2px 0 0 var(--diff-remove); }
+/* Removed lines are shown from revision A, struck-through (not in this build). */
+.bom-table tbody tr.bom-removed td { text-decoration: line-through; color: var(--fg-2); }
+.bom-table tbody tr.bom-removed td.bom-status-cell { text-decoration: none; }
+
+.bom-status-cell { white-space: nowrap; }
+.bom-status {
+  display: inline-block;
+  padding: 0 var(--sp-1);
+  border-radius: var(--radius-1);
+  font-size: var(--fs-0);
+  font-weight: 600;
+  line-height: 1.6;
+}
+.bom-status-ok { background: var(--ok-dim); color: var(--ok); }
+.bom-status-err { background: var(--err-dim); color: var(--err); }
+.bom-status-warn { background: var(--warn-dim); color: var(--warn); }
+
+/* Designator chips in tinted rows — each links to the underlying component change. */
+.bom-dsg-chip {
+  display: inline-block;
+  margin: 0 var(--sp-1) 2px 0;
+  padding: 0 var(--sp-1);
+  background: var(--bg-2);
+  color: var(--fg-0);
+  border: 1px solid var(--border-1);
+  border-radius: var(--radius-1);
+  font: inherit;
+  font-size: var(--fs-0);
+  cursor: pointer;
+}
+.bom-dsg-chip:hover { border-color: var(--accent); color: var(--accent); }
+
+.bom-csv-btn { flex: none; white-space: nowrap; }
+
+/* Stepper landing: pulse the row the focused BOM change anchors to. */
+@keyframes bom-row-flash {
+  0%, 60% { background: var(--accent-dim); }
+  100% { background: transparent; }
+}
+.bom-table tbody tr.bom-flash { animation: bom-row-flash 1.5s ease-out; }
 .dim { color: var(--fg-2); }
 
 /* ---------- PCB view (WS8 / items 4,7,8,13) ---------- */
