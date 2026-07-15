@@ -128,6 +128,43 @@ describe("computeDiffFlags ownership", () => {
     expect(f.a.maskSize).toBe(DIFF_OWNED_BASE + 1);
   });
 
+  it("a changed via belongs to the per-net via row, not the layer's track row", () => {
+    const b = board();
+    b.tracks.seg = { xy: [0, 0, 12, 0], w: [0.25], layer: [0], net: [1] }; // rerouted
+    b.vias = [{ x: 14, y: 0, size: 0.6, drill: 0.3, net: 1, layers: [0, 1] }]; // moved
+    const changes = [
+      change({
+        id: "ch_0000",
+        group: "routing",
+        anchors: { pcb: { layers: ["F.Cu"], net: "/VBUS" } },
+      }),
+      change({
+        id: "ch_0001",
+        group: "routing",
+        anchors: { pcb: { layers: ["F.Cu", "B.Cu"], net: "/VBUS", vias: true } },
+      }),
+    ];
+    const f = computeDiffFlags(board(), b, changes);
+    expect([...f.a.seg]).toEqual([DIFF_OWNED_BASE]); // track row keeps the segment
+    expect([...f.a.vias]).toEqual([DIFF_OWNED_BASE + 1]); // via row owns the via
+    expect([...f.b.vias]).toEqual([DIFF_OWNED_BASE + 1]);
+  });
+
+  it("falls back to per-layer track rows for vias in older docs (no via row)", () => {
+    const b = board();
+    b.vias = [{ x: 14, y: 0, size: 0.6, drill: 0.3, net: 1, layers: [0, 1] }];
+    const changes = [
+      change({
+        id: "ch_0000",
+        group: "routing",
+        anchors: { pcb: { layers: ["B.Cu"], net: "/VBUS" } },
+      }),
+    ];
+    const f = computeDiffFlags(board(), b, changes);
+    expect([...f.a.vias]).toEqual([DIFF_OWNED_BASE]); // matched via its B.Cu span
+    expect([...f.b.vias]).toEqual([DIFF_OWNED_BASE]);
+  });
+
   it("gates zone tinting on a semantic zone row (refill jitter stays unflagged)", () => {
     const zoneA = { layer: 0, net: 1, filled: true, pts: [0, 0, 20, 0, 20, 20, 0, 20] };
     const zoneB = { layer: 0, net: 1, filled: true, pts: [0, 0, 20.001, 0, 20, 20, 0, 20] };

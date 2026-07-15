@@ -111,8 +111,10 @@ function flagAbsent(mine: string[], other: string[]): Uint16Array {
 /** Lookup tables from the semantic change list, keyed the same way diff.rs keys its
  *  groups. Values are the change's flag code (index + DIFF_OWNED_BASE). */
 interface OwnerIndex {
-  /** (layer\0net) → routing change. */
+  /** (layer\0net) → routing (track) change. */
   routing: Map<string, number>;
+  /** net → via change (the engine emits ONE per-net via row spanning the stack). */
+  viaNet: Map<string, number>;
   /** (layer\0net) → zone change. */
   zone: Map<string, number>;
   /** refdes → placement/component change (placement wins — a moved footprint's pads
@@ -126,12 +128,14 @@ interface OwnerIndex {
 }
 
 function buildOwnerIndex(changes: Change[]): OwnerIndex {
-  const idx: OwnerIndex = { routing: new Map(), zone: new Map(), comp: new Map(), silk: new Map(), text: [] };
+  const idx: OwnerIndex = { routing: new Map(), viaNet: new Map(), zone: new Map(), comp: new Map(), silk: new Map(), text: [] };
   const key = (layer: string, net: string) => `${layer}\u{0}${net}`;
   changes.forEach((c, i) => {
     const code = i + DIFF_OWNED_BASE;
     const pcb = c.anchors.pcb;
-    if (c.group === "routing" && pcb?.layers?.[0] != null) {
+    if (c.group === "routing" && pcb?.vias) {
+      idx.viaNet.set(pcb.net ?? "", code);
+    } else if (c.group === "routing" && pcb?.layers?.[0] != null) {
       idx.routing.set(key(pcb.layers[0], pcb.net ?? ""), code);
     } else if (c.group === "zone" && pcb?.layers?.[0] != null) {
       idx.zone.set(key(pcb.layers[0], pcb.net ?? ""), code);
@@ -172,15 +176,17 @@ function assignOwners(g: PcbGeometry, flags: Omit<DiffFlags, "maskSize">, owners
   }
   for (let i = 0; i < flags.vias.length; i++) {
     if (!flags.vias[i]) continue;
-    // A via spans several copper layers; the Rust engine emits one routing row per
-    // (layer, net) it appears under — any of them owns the via.
+    // The engine emits ONE per-net via row (spanning the stack); fall back to the
+    // net's per-layer track rows for docs from older engine versions.
     const v = g.vias[i];
-    let code = DIFF_ORPHAN;
-    for (const li of v.layers) {
-      const hit = owners.routing.get(key(layer(li), net(v.net)));
-      if (hit != null) {
-        code = hit;
-        break;
+    let code = owners.viaNet.get(net(v.net)) ?? DIFF_ORPHAN;
+    if (code === DIFF_ORPHAN) {
+      for (const li of v.layers) {
+        const hit = owners.routing.get(key(layer(li), net(v.net)));
+        if (hit != null) {
+          code = hit;
+          break;
+        }
       }
     }
     flags.vias[i] = code;

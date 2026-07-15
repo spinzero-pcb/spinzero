@@ -457,6 +457,38 @@ fn routing_setdiff_groups_per_layer_net() {
 }
 
 #[test]
+fn moved_via_is_one_per_net_row_spanning_the_stack() {
+    // A GND via moved 2 mm. One user action must read as ONE row — the old per-layer
+    // via keying emitted a phantom "+1 −1 segments" row on every copper layer it
+    // spanned, and the overlay could hand the via primitive to only one of them.
+    let make = |x: f64| Geometry {
+        layers: vec![
+            GeomLayer { name: "F.Cu".into(), role: "copper".into() },
+            GeomLayer { name: "In1.Cu".into(), role: "copper".into() },
+            GeomLayer { name: "B.Cu".into(), role: "copper".into() },
+        ],
+        nets: vec![String::new(), "GND".into()],
+        vias: vec![GeomVia { x, y: 5.0, size: 0.6, net: 1, layers: vec![0, 1, 2] }],
+        ..Default::default()
+    };
+    let mut a = bundle(empty_indexes());
+    a.geometry = Some(make(10.0));
+    let mut b = bundle(empty_indexes());
+    b.geometry = Some(make(12.0));
+
+    let doc = diff_bundles(&a, &b, &changed(&["board.kicad_pcb"]));
+    let r: Vec<_> = doc.changes.iter().filter(|c| c.group == Group::Routing).collect();
+    assert_eq!(r.len(), 1, "one per-net via row, got {r:?}");
+    assert_eq!(r[0].kind, Kind::Modified);
+    assert!(r[0].title.contains("GND") && r[0].title.contains("via"), "{}", r[0].title);
+    assert!(r[0].title.contains("+1") && r[0].title.contains("1"), "counts: {}", r[0].title);
+    let pcb = r[0].anchors.pcb.as_ref().expect("pcb anchor");
+    assert!(pcb.vias, "marked as the net's via row");
+    assert_eq!(pcb.net.as_deref(), Some("GND"));
+    assert_eq!(pcb.layers, vec!["F.Cu", "In1.Cu", "B.Cu"], "stack-order layer union");
+}
+
+#[test]
 fn zone_area_delta_with_threshold() {
     // A GND pour on B.Cu grows well past the 1 mm² noise floor → one zone change; a
     // sub-threshold jitter on another pour is ignored.

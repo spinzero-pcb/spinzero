@@ -42,6 +42,9 @@ export interface PcbAnchor {
   layers?: string[];
   comp?: string;
   net?: string;
+  /** True for the routing row that owns the net's changed VIAS (a via spans several
+   *  copper layers, so it can't belong to any per-layer track row). Absent = false. */
+  vias?: boolean;
 }
 
 export interface ChangeAnchors {

@@ -170,6 +170,11 @@ pub struct PcbAnchor {
     pub comp: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub net: Option<String>,
+    /// True for a routing row that owns the net's changed VIAS (not tracks). A via
+    /// spans several copper layers, so it can't belong to any single per-layer track
+    /// row — the overlay matches via primitives to this row by net instead.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub vias: bool,
 }
 
 // ================================================= geometry IR (deserialize side)
@@ -1198,6 +1203,7 @@ fn comp_anchors(bundle: &Bundle, refdes: &str) -> Anchors {
                 layers,
                 comp: Some(refdes.to_string()),
                 net: None,
+                vias: false,
             });
         }
     }
@@ -1507,7 +1513,7 @@ fn net_anchors(bundle: &Bundle, name: &str) -> Anchors {
     // PCB anchor: the net name carries the landing (the renderer lands via netBBox).
     if let Some(g) = bundle.geometry.as_ref() {
         if g.nets.iter().any(|nn| nn == name) {
-            anchors.pcb = Some(PcbAnchor { bbox: None, layers: Vec::new(), comp: None, net: Some(name.to_string()) });
+            anchors.pcb = Some(PcbAnchor { bbox: None, layers: Vec::new(), comp: None, net: Some(name.to_string()), vias: false });
         }
     }
     anchors
@@ -1719,6 +1725,7 @@ fn diff_placement(a: &Geometry, b: &Geometry, out: &mut Vec<Change>) {
                     layers,
                     comp: Some(cb.reference.clone()),
                     net: None,
+                    vias: false,
                 }),
             },
             side: Side::Both,
@@ -1752,11 +1759,15 @@ fn side_short(layer: &Option<String>) -> String {
 
 // ============================================================ routing diff
 
-/// Copper track/via set-diff, grouped per (layer, net): identity = a content hash of
-/// the primitive tuple, so a moved track reads as removed+added — correct for review —
-/// but the per-(layer,net) grouping keeps it one row ("rerouted: +N −M"). (plan §2)
+/// Copper track/via set-diff: identity = a content hash of the primitive tuple, so a
+/// moved track reads as removed+added — correct for review — grouped so one user
+/// action stays one row (plan §2). Tracks group per (layer, net) ("rerouted: +N −M
+/// segments"); vias group per net across the WHOLE stack, because one via spans
+/// several copper layers — the old per-layer keying turned one moved via into a
+/// phantom "+1 −1 segments" row on every layer it crossed, and the overlay could hand
+/// the via primitive to only one of them (the rest owned nothing and lit no copper).
 fn diff_routing(a: &Geometry, b: &Geometry, out: &mut Vec<Change>) {
-    // Per (layer-name, net-name) buckets of primitive hashes on each side. Layer/net
+    // Per (layer-name, net-name) buckets of track hashes on each side. Layer/net
     // are resolved to names here so the two boards' index tables (which can differ)
     // compare by identity, not by raw index.
     let hashes_a = routing_hashes(a);
@@ -1809,6 +1820,94 @@ fn diff_routing(a: &Geometry, b: &Geometry, out: &mut Vec<Change>) {
                     layers: vec![layer],
                     comp: None,
                     net: net_anchor,
+                    vias: false,
+                }),
+            },
+            side: Side::Both,
+        });
+    }
+
+    diff_vias(a, b, out);
+}
+
+/// Via set-diff per net: one row per net whose via set changed, anchored to the union
+/// of copper layers the changed vias span (so focusing the row reveals every layer the
+/// via stitches). See `diff_routing` for why vias can't live in the per-layer rows.
+fn diff_vias(a: &Geometry, b: &Geometry, out: &mut Vec<Change>) {
+    let vias_a = via_hashes(a);
+    let vias_b = via_hashes(b);
+
+    let mut nets: BTreeSet<String> = BTreeSet::new();
+    nets.extend(vias_a.keys().cloned());
+    nets.extend(vias_b.keys().cloned());
+
+    for net in nets {
+        let empty = Vec::new();
+        let va = vias_a.get(&net).unwrap_or(&empty);
+        let vb = vias_b.get(&net).unwrap_or(&empty);
+        let ha: HashSet<u64> = va.iter().map(|(h, _)| *h).collect();
+        let hb: HashSet<u64> = vb.iter().map(|(h, _)| *h).collect();
+        let added: Vec<_> = vb.iter().filter(|(h, _)| !ha.contains(h)).collect();
+        let removed: Vec<_> = va.iter().filter(|(h, _)| !hb.contains(h)).collect();
+        if added.is_empty() && removed.is_empty() {
+            continue;
+        }
+        // Layer anchor: the stack-order union of layers the CHANGED vias span, so the
+        // row's focus isolation shows every affected layer, not just one.
+        let changed_layers: HashSet<&str> = added
+            .iter()
+            .chain(&removed)
+            .flat_map(|(_, ls)| ls.iter().map(String::as_str))
+            .collect();
+        let layers: Vec<String> = b
+            .layers
+            .iter()
+            .chain(&a.layers)
+            .map(|l| l.name.as_str())
+            .filter(|n| changed_layers.contains(n))
+            .collect::<Vec<_>>()
+            .into_iter()
+            .fold(Vec::new(), |mut acc, n| {
+                if !acc.iter().any(|x: &String| x == n) {
+                    acc.push(n.to_string());
+                }
+                acc
+            });
+        let net_anchor = (!net.is_empty()).then(|| net.clone());
+        let net_disp = if net.is_empty() { "(no net)".to_string() } else { net.clone() };
+        let noun = if added.len().max(removed.len()) == 1 { "via" } else { "vias" };
+        let (kind, verb) = if !added.is_empty() && !removed.is_empty() {
+            (Kind::Modified, "changed")
+        } else if !added.is_empty() {
+            (Kind::Added, "added")
+        } else {
+            (Kind::Removed, "removed")
+        };
+        let mut bits = Vec::new();
+        if !added.is_empty() {
+            bits.push(format!("+{}", added.len()));
+        }
+        if !removed.is_empty() {
+            bits.push(format!("−{}", removed.len()));
+        }
+        out.push(Change {
+            id: String::new(),
+            emph_a: None,
+            emph_b: None,
+            group: Group::Routing,
+            kind,
+            impact: Impact::Electrical,
+            title: format!("{net_disp} {noun} {verb} ({})", bits.join(" ")),
+            detail: String::new(),
+            anchors: Anchors {
+                schematic: None,
+                schematic_a: None,
+                pcb: Some(PcbAnchor {
+                    bbox: None,
+                    layers,
+                    comp: None,
+                    net: net_anchor,
+                    vias: true,
                 }),
             },
             side: Side::Both,
@@ -1816,9 +1915,10 @@ fn diff_routing(a: &Geometry, b: &Geometry, out: &mut Vec<Change>) {
     }
 }
 
-/// (layer-name, net-name) -> set of primitive content hashes (tracks + vias). Layer &
-/// net indices are dereferenced to names for cross-board identity. Coordinates are
-/// already rounded 1e-4 by the extractor, so a stable string hash is exact.
+/// (layer-name, net-name) -> set of track content hashes (segments + arcs; vias are
+/// `via_hashes`'s job). Layer & net indices are dereferenced to names for cross-board
+/// identity. Coordinates are already rounded 1e-4 by the extractor, so a stable
+/// string hash is exact.
 fn routing_hashes(g: &Geometry) -> HashMap<(String, String), HashSet<u64>> {
     let mut m: HashMap<(String, String), HashSet<u64>> = HashMap::new();
     let ln = |i: u16| g.layers.get(i as usize).map(|l| l.name.clone()).unwrap_or_default();
@@ -1848,15 +1948,22 @@ fn routing_hashes(g: &Geometry) -> HashMap<(String, String), HashSet<u64>> {
         let h = hash_prim("arc", &layer, &net, coords, *w);
         m.entry((layer, net)).or_default().insert(h);
     }
-    // vias: one row per copper layer spanned (keyed under each layer so a via that
-    // appears/moves shows on every affected layer's group).
+    m
+}
+
+/// net-name -> each via's (content hash, spanned layer names). The hash folds the
+/// whole layer span (a via re-stitched to different layers is a change) and mirrors
+/// the overlay's via identity (`glDiff.buildKeys`).
+fn via_hashes(g: &Geometry) -> HashMap<String, Vec<(u64, Vec<String>)>> {
+    let mut m: HashMap<String, Vec<(u64, Vec<String>)>> = HashMap::new();
+    let ln = |i: u16| g.layers.get(i as usize).map(|l| l.name.clone()).unwrap_or_default();
+    let nn = |i: u32| g.nets.get(i as usize).cloned().unwrap_or_default();
     for v in &g.vias {
         let net = nn(v.net);
-        for &li in &v.layers {
-            let layer = ln(li);
-            let h = hash_prim("via", &layer, &net, &[v.x, v.y, v.size], 0.0);
-            m.entry((layer, net.clone())).or_default().insert(h);
-        }
+        let layers: Vec<String> = v.layers.iter().map(|&li| ln(li)).collect();
+        let span = layers.join("+");
+        let h = hash_prim("via", &span, &net, &[v.x, v.y, v.size], 0.0);
+        m.entry(net).or_default().push((h, layers));
     }
     m
 }
@@ -1934,6 +2041,7 @@ fn diff_zones(a: &Geometry, b: &Geometry, out: &mut Vec<Change>) {
                     layers: vec![layer],
                     comp: None,
                     net: (!net.is_empty()).then(|| net.clone()),
+                    vias: false,
                 }),
             },
             side: Side::Both,
@@ -2118,7 +2226,7 @@ fn diff_graphics_and_text(a: &Geometry, b: &Geometry, comp_delta: &CompDelta, ou
                 anchors: Anchors {
                     schematic: None,
                     schematic_a: None,
-                    pcb: Some(PcbAnchor { bbox: Some(bbox), layers: vec![layer], comp: None, net: None }),
+                    pcb: Some(PcbAnchor { bbox: Some(bbox), layers: vec![layer], comp: None, net: None, vias: false }),
                 },
                 side: Side::Both,
             });
@@ -2173,7 +2281,7 @@ fn diff_graphics_and_text(a: &Geometry, b: &Geometry, comp_delta: &CompDelta, ou
             anchors: Anchors {
                 schematic: None,
                 schematic_a: None,
-                pcb: Some(PcbAnchor { bbox: None, layers: vec![layer], comp: None, net: None }),
+                pcb: Some(PcbAnchor { bbox: None, layers: vec![layer], comp: None, net: None, vias: false }),
             },
             side: Side::Both,
         });
@@ -2319,6 +2427,7 @@ fn pcb_point_anchor(layer: &str, at: [f64; 2]) -> Anchors {
             layers: vec![layer.to_string()],
             comp: None,
             net: None,
+            vias: false,
         }),
     }
 }
@@ -2388,7 +2497,9 @@ pub fn diff_key(cache_key_a: &str, cache_key_b: &str) -> String {
     // so without this a cached diff.json would keep serving the old shape.
     // 5: manufactured-layer impact reclass, footprint art/text folds into its
     //    component row, layer-function nouns ("Courtyard changed", not "Silk").
-    const DIFF_ENGINE_VERSION: &str = "5";
+    // 6: via changes get one per-net row (`vias` anchor marker) instead of folding
+    //    into every spanned layer's "segments" row.
+    const DIFF_ENGINE_VERSION: &str = "6";
     let mut h = blake3::Hasher::new();
     h.update(DIFF_ENGINE_VERSION.as_bytes());
     h.update(b" ");
