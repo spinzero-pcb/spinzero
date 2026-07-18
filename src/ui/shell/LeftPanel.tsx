@@ -40,8 +40,10 @@ export function LeftPanel() {
       </div>
       {showingChanges ? <ChangesPanel /> : <ReviewPanel />}
       {/* Pinned to the bottom of the rail (batch1): a persistent update notice in place
-          of the old transient toast. Renders nothing unless an update is downloaded. */}
-      {!diffActive && <UpdateBanner />}
+          of the old transient toast. Renders nothing unless an update is downloaded, so
+          it stays mounted through diff mode too — it's the only surface that announces a
+          ready update, and a long compare session must not hide it. */}
+      <UpdateBanner />
     </>
   );
 }
