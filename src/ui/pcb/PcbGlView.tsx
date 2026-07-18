@@ -15,12 +15,12 @@ import { ContextMenu, type MenuItem } from "../ContextMenu";
 import { IconClose, IconComment, IconCopy, IconFit, IconRuler, IconSheet, IconTrash } from "../icons";
 import type { CommentAnchor } from "../../lib/types";
 import type { PcbGeometry, PcbTextDef } from "../../lib/pcbGeometry";
-import { PcbGlRenderer, netLabelRows, type BBox, type Camera, type DiffFlags, type ObjectState } from "./glRenderer";
+import { DIFF_HATCH_PERIOD_CSS, PcbGlRenderer, netLabelRows, type BBox, type Camera, type DiffFlags, type ObjectState } from "./glRenderer";
 import { buildDiffVisibility, changeExtent, computeDiffFlags, DIFF_OWNED_BASE, unionExtent } from "./glDiff";
 import type { Change } from "../../lib/diff";
 import { isTypingTarget } from "../../lib/keymap";
 import { useDiffStore } from "../../stores/diffStore";
-import { resolveCssColor } from "./glColor";
+import { resolveCssColor, PCB_DIFF_BASE_FALLBACK } from "./glColor";
 import { registerRenderProbe } from "../../lib/renderProbe";
 import { parseMarkup, type MarkupRun } from "./textMarkup";
 import { knockoutMargin, layoutStrokeText, traceStrokeText } from "./strokeFont";
@@ -57,9 +57,6 @@ const DIFF_LAYER_MIX = 1.0;
  *  same-spot restyle (thickened track) stands out against it. */
 const DIFF_ADDED_ALPHA = 0.85;
 
-/** Crosshatch period for the removed-TEXT overlay pass, matching the GL shader's
- *  removed-copper texture (glRenderer: 7 css px, cuts keep a faint ghost). */
-const HATCH_PERIOD_CSS = 7;
 
 /** Prepare the reusable scratch canvas for the removed-text pass: sized to the view,
  *  cleared, with the same css-px transform as the overlay context. Returns null when
@@ -94,7 +91,7 @@ function compositeHatched(ctx: CanvasRenderingContext2D, sctx: CanvasRenderingCo
   sctx.setTransform(1, 0, 0, 1, 0, 0);
   sctx.globalCompositeOperation = "destination-out";
   sctx.strokeStyle = "rgba(0,0,0,0.75)"; // cut to a faint ghost, not fully out
-  const period = HATCH_PERIOD_CSS * dpr; // spacing along an axis, like gl_FragCoord.x+y
+  const period = DIFF_HATCH_PERIOD_CSS * dpr; // spacing along an axis, like gl_FragCoord.x+y
   sctx.lineWidth = 0.22 * period * 0.7071; // the shader's band width, made perpendicular
   sctx.beginPath();
   for (let o = -H; o < W; o += period) {
@@ -873,7 +870,7 @@ export function PcbGlView({ visible }: { visible: boolean }) {
     const diffDoc = diff && rA ? useDiffStore.getState() : null;
     const vis = diffDoc?.doc ? buildDiffVisibility(diffDoc.doc.changes, diffDoc.hiddenChangeIds) : null;
     const blinkOn = blinkRef.current;
-    const diffGrey = rootStyle.getPropertyValue("--pcb-diff-base").trim() || "#8b8f98";
+    const diffGrey = rootStyle.getPropertyValue("--pcb-diff-base").trim() || PCB_DIFF_BASE_FALLBACK;
     for (let i = 0; i < r.texts.length; i++) {
       const spotlit = diff && vis ? diff.flagsB.texts[i] > 0 && vis[diff.flagsB.texts[i]] > 0 : false;
       if (spotlit && blinkOn && blinkA.current) continue; // added: B phase only
