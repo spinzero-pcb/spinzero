@@ -387,6 +387,10 @@ export function PcbGlView({ visible }: { visible: boolean }) {
   /** Memoised per-change extents (world mm), keyed by change id; dropped whole when
    *  the diff-data object identity changes (flags rebuilt). */
   const extentMemo = useRef<{ data: object; boxes: Map<string, BBox | null> } | null>(null);
+  /** The GPU visibility mask, cached from the visibility effect so drawOverlay's
+   *  per-frame text pass reads it instead of rebuilding it every frame (blink/pulse keep
+   *  the loop hot). Rebuilt only when hiddenChangeIds / the doc change. */
+  const diffVisRef = useRef<Uint8Array | null>(null);
   const [diffEpoch, setDiffEpoch] = useState(0);
   const diffOnRef = useRef(false);
   diffOnRef.current = diffActive;
@@ -868,7 +872,10 @@ export function PcbGlView({ visible }: { visible: boolean }) {
     const diff = diffOnRef.current ? diffDataRef.current : null;
     const rA = rendererARef.current;
     const diffDoc = diff && rA ? useDiffStore.getState() : null;
-    const vis = diffDoc?.doc ? buildDiffVisibility(diffDoc.doc.changes, diffDoc.hiddenChangeIds) : null;
+    // The mask is maintained by the visibility effect (keyed on hiddenChangeIds/doc), so
+    // read the cached ref rather than rebuilding a Uint8Array + walking every change on
+    // each frame — the pulse/blink loop can run this dozens of times a second.
+    const vis = diffDoc?.doc ? diffVisRef.current : null;
     const blinkOn = blinkRef.current;
     const diffGrey = rootStyle.getPropertyValue("--pcb-diff-base").trim() || PCB_DIFF_BASE_FALLBACK;
     for (let i = 0; i < r.texts.length; i++) {
@@ -1196,6 +1203,7 @@ export function PcbGlView({ visible }: { visible: boolean }) {
       if (diff) {
         const d = useDiffStore.getState();
         const vis = d.doc ? buildDiffVisibility(d.doc.changes, d.hiddenChangeIds) : null;
+        diffVisRef.current = vis; // keep the drawOverlay cache in step with the rebuild
         created.setDiffVisibility(vis);
         createdA?.setDiffVisibility(vis);
       }
@@ -1292,6 +1300,7 @@ export function PcbGlView({ visible }: { visible: boolean }) {
     const doc = useDiffStore.getState().doc;
     if (!doc) return;
     const vis = buildDiffVisibility(doc.changes, diffHiddenIds);
+    diffVisRef.current = vis;
     rendererRef.current?.setDiffVisibility(vis);
     rendererARef.current?.setDiffVisibility(vis);
     dirty.current = true;
