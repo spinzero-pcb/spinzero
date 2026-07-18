@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useDiffStore } from "../../stores/diffStore";
 import {
   filterChanges,
@@ -63,23 +63,39 @@ export function ChangesPanel() {
   const ordered = useMemo(() => orderedChanges(visible), [visible]);
   const focusIdx = ordered.findIndex((c) => c.id === focusedId);
 
+  // Remember where the focused change sat, so if it leaves the filtered list (e.g. it's
+  // ticked reviewed under the Pending filter) the stepper can resume from that spot
+  // instead of jumping back to the top.
+  const lastFocusIdxRef = useRef(0);
+  useEffect(() => {
+    if (focusIdx >= 0) lastFocusIdxRef.current = focusIdx;
+  }, [focusIdx]);
+
   // Step within the *visible* (filtered) sequence — the same set the "Change N of M"
   // header counts — so an active filter never steps onto a hidden change. (The store's
   // next/prev walk the unfiltered doc; the panel owns the filter, so it owns the walk.)
-  function stepVisible(dir: 1 | -1) {
-    if (ordered.length === 0) return;
-    const cur = ordered.findIndex((c) => c.id === focusedId);
-    const idx =
-      cur < 0
-        ? dir > 0
-          ? 0
-          : ordered.length - 1
-        : Math.max(0, Math.min(ordered.length - 1, cur + dir));
-    focusChange(ordered[idx].id);
-  }
+  const stepVisible = useCallback(
+    (dir: 1 | -1) => {
+      if (ordered.length === 0) return;
+      const cur = ordered.findIndex((c) => c.id === focusedId);
+      const clamp = (i: number) => Math.max(0, Math.min(ordered.length - 1, i));
+      let idx: number;
+      if (cur >= 0) {
+        idx = clamp(cur + dir);
+      } else {
+        // The focused change left the filtered list (removing it shifts later rows down
+        // into its slot). Resume from its old position: +1 lands on the row that took its
+        // place, -1 on the one before — not a jump back to index 0.
+        idx = clamp(dir > 0 ? lastFocusIdxRef.current : lastFocusIdxRef.current - 1);
+      }
+      focusChange(ordered[idx].id);
+    },
+    [ordered, focusedId, focusChange],
+  );
 
   // ←/→ and J/K walk the stepper (guarded against stealing keys while typing in the
-  // search box / any input — follows the App.tsx isTypingTarget pattern).
+  // search box / any input — follows the App.tsx isTypingTarget pattern). Re-subscribes
+  // only when stepVisible's inputs change, not on every render.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (isTypingTarget(e)) return;
@@ -94,7 +110,7 @@ export function ChangesPanel() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  });
+  }, [stepVisible]);
 
   // On entering diff mode, auto-focus the first change so the canvas opens ON a change
   // (centred + tinted) instead of a blank whole-sheet fit, and keeps it active (batch 2).
