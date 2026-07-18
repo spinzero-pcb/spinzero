@@ -144,11 +144,21 @@ export function DiffSchematicA() {
       }
     }
 
-    // Follow B's camera every frame; reload when B's sheet changes.
+    // Follow B's camera every frame; reload when B's sheet changes. Only WRITE the
+    // transform when it actually moved — an idle review session would otherwise keep the
+    // compositor busy rewriting the same string 60×/s over a full schematic SVG.
+    let lastX = NaN,
+      lastY = NaN,
+      lastS = NaN;
     const tick = () => {
       if (camBridge.epoch !== loadedEpoch.current) void syncSheet();
       const c = camBridge.cam;
-      world.style.transform = `translate(${c.x}px,${c.y}px) scale(${c.s})`;
+      if (c.x !== lastX || c.y !== lastY || c.s !== lastS) {
+        world.style.transform = `translate(${c.x}px,${c.y}px) scale(${c.s})`;
+        lastX = c.x;
+        lastY = c.y;
+        lastS = c.s;
+      }
       raf = requestAnimationFrame(tick);
     };
 
