@@ -266,26 +266,19 @@ pub struct GeomComp {
 
 #[derive(Deserialize, Default, Clone)]
 pub struct GeomTracks {
+    /// Straight segments — `xy` packed 4 per element `[x1,y1,x2,y2]`.
     #[serde(default)]
-    pub seg: GeomSegCol,
+    pub seg: GeomTrackCol,
+    /// Arcs — `xy` packed 6 per element `[sx,sy,mx,my,ex,ey]`.
     #[serde(default)]
-    pub arc: GeomArcCol,
+    pub arc: GeomTrackCol,
 }
 
+/// A struct-of-arrays column of track primitives (segments or arcs — identical shape,
+/// only the `xy` stride differs, so one struct serves both `seg` and `arc`). `xy` holds
+/// the packed coordinates; `w`/`layer`/`net` are one entry per primitive.
 #[derive(Deserialize, Default, Clone)]
-pub struct GeomSegCol {
-    #[serde(default)]
-    pub xy: Vec<f64>,
-    #[serde(default)]
-    pub w: Vec<f64>,
-    #[serde(default)]
-    pub layer: Vec<u16>,
-    #[serde(default)]
-    pub net: Vec<u32>,
-}
-
-#[derive(Deserialize, Default, Clone)]
-pub struct GeomArcCol {
+pub struct GeomTrackCol {
     #[serde(default)]
     pub xy: Vec<f64>,
     #[serde(default)]
@@ -1910,29 +1903,20 @@ fn routing_hashes(g: &Geometry) -> HashMap<(String, String), HashSet<u64>> {
     let ln = |i: u16| g.layers.get(i as usize).map(|l| l.name.clone()).unwrap_or_default();
     let nn = |i: u32| g.nets.get(i as usize).cloned().unwrap_or_default();
 
-    // straight segments: [x1,y1,x2,y2] per seg.
-    for (i, w) in g.tracks.seg.w.iter().enumerate() {
-        let o = i * 4;
-        if o + 4 > g.tracks.seg.xy.len() {
-            break;
+    // seg = [x1,y1,x2,y2] (stride 4), arc = [sx,sy,mx,my,ex,ey] (stride 6). Same column
+    // shape, so one loop parameterized by (kind, stride) covers both.
+    for (kind, col, stride) in [("seg", &g.tracks.seg, 4), ("arc", &g.tracks.arc, 6)] {
+        for (i, w) in col.w.iter().enumerate() {
+            let o = i * stride;
+            if o + stride > col.xy.len() {
+                break;
+            }
+            let layer = ln(*col.layer.get(i).unwrap_or(&0));
+            let net = nn(*col.net.get(i).unwrap_or(&0));
+            let coords = &col.xy[o..o + stride];
+            let h = hash_prim(kind, &layer, &net, coords, *w);
+            m.entry((layer, net)).or_default().insert(h);
         }
-        let layer = ln(*g.tracks.seg.layer.get(i).unwrap_or(&0));
-        let net = nn(*g.tracks.seg.net.get(i).unwrap_or(&0));
-        let coords = &g.tracks.seg.xy[o..o + 4];
-        let h = hash_prim("seg", &layer, &net, coords, *w);
-        m.entry((layer, net)).or_default().insert(h);
-    }
-    // arcs: [sx,sy,mx,my,ex,ey] per arc.
-    for (i, w) in g.tracks.arc.w.iter().enumerate() {
-        let o = i * 6;
-        if o + 6 > g.tracks.arc.xy.len() {
-            break;
-        }
-        let layer = ln(*g.tracks.arc.layer.get(i).unwrap_or(&0));
-        let net = nn(*g.tracks.arc.net.get(i).unwrap_or(&0));
-        let coords = &g.tracks.arc.xy[o..o + 6];
-        let h = hash_prim("arc", &layer, &net, coords, *w);
-        m.entry((layer, net)).or_default().insert(h);
     }
     m
 }

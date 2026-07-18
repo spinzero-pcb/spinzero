@@ -395,7 +395,7 @@ fn placement_side_flip() {
 
 fn geom_with_seg(_net_name: &str, xy: [f64; 4]) -> GeomTracks {
     GeomTracks {
-        seg: GeomSegCol {
+        seg: GeomTrackCol {
             xy: xy.to_vec(),
             w: vec![0.25],
             layer: vec![0],
