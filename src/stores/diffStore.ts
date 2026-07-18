@@ -66,6 +66,11 @@ interface DiffState {
   exitDiff: () => void;
   swap: () => Promise<void>;
   focusChange: (id: string) => void;
+  /** Land a change on the PCB canvas: switch to the PCB view, isolate the change's
+   *  layer(s), and frame its own extent. The diff-owned landing (revealChange never
+   *  un-hides layers, unlike pcbNav.reveal's net path). Shared by focusChange's PCB
+   *  branch and the diff cross-probe (X). Does NOT change focus/solo state. */
+  revealChangeOnPcb: (change: Change) => void;
   markSeen: (id: string, seen?: boolean) => void;
   markGroupSeen: (ids: string[], seen?: boolean) => void;
   /** Fetch an A-side sheet SVG (cache-relative path), memoised per session. */
@@ -274,16 +279,20 @@ export const useDiffStore = create<DiffState>((set, get) => ({
       // AND notifies the A-island so both sides paint the same change in lockstep.
       diffPaint.focus(change);
     } else if (pcb) {
-      useViewStore.getState().setView("pcb");
-      diffPaint.clearA(); // no schematic side to show
-      // Isolate the layer(s) this change lives on so the compare shows just that copper
-      // over grey — the one-visible-change case of the shift-click rule, so it uses the
-      // same applyLayerUnion (Edge.Cuts rides along to frame the copper; single copper
-      // layer becomes active). revealChange (unlike pcbNav.reveal's net path) never
-      // un-hides layers, so the isolation sticks and it frames the change's OWN extent.
-      applyLayerUnion([change]);
-      pcbNav.revealChange(change);
+      get().revealChangeOnPcb(change);
     }
+  },
+
+  revealChangeOnPcb: (change) => {
+    useViewStore.getState().setView("pcb");
+    diffPaint.clearA(); // PCB landing — the schematic A-island isn't shown
+    // Isolate the layer(s) this change lives on so the compare shows just that copper
+    // over grey — the one-visible-change case of the shift-click rule, so it uses the
+    // same applyLayerUnion (Edge.Cuts rides along to frame the copper; single copper
+    // layer becomes active). revealChange (unlike pcbNav.reveal's net path) never
+    // un-hides layers, so the isolation sticks and it frames the change's OWN extent.
+    applyLayerUnion([change]);
+    pcbNav.revealChange(change);
   },
 
   markSeen: (id, seen = true) =>

@@ -240,23 +240,13 @@ export default function App() {
             const hasPcb = !!change?.anchors.pcb;
             if (change && hasSch && hasPcb) {
               const { view: v } = useViewStore.getState();
-              // Re-focus targeting the other canvas: focusChange prefers schematic, so
-              // flip the view first, then let the anchor land it.
+              // Re-focus targeting the other canvas. focusChange prefers schematic, so
+              // each direction uses the diff-owned landing for the side we want:
+              // revealChangeOnPcb isolates the changed layer and frames the change's own
+              // extent (pcbNav.reveal's net path would un-hide layers and frame the whole
+              // net, undoing the isolation); focusChange re-runs the schematic landing.
               if (v === "schematic") {
-                setView("pcb");
-                const anchor = (() => {
-                  const p = change.anchors.pcb!;
-                  if (p.net) return { type: "net" as const, ref: p.net };
-                  if (p.comp) return { type: "component" as const, ref: p.comp };
-                  if (p.bbox)
-                    return {
-                      type: "region" as const,
-                      ref: change.id,
-                      rect: { x: p.bbox[0], y: p.bbox[1], w: p.bbox[2], h: p.bbox[3] },
-                    };
-                  return null;
-                })();
-                if (anchor) pcbNav.reveal(anchor);
+                diff.revealChangeOnPcb(change);
               } else {
                 setView("schematic");
                 diff.focusChange(change.id); // re-runs schematic landing + tint
