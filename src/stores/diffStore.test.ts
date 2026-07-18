@@ -176,9 +176,10 @@ describe("diffStore enter/exit/step/seen", () => {
       active: null,
     });
     await useDiffStore.getState().enterDiff("rA", "rB");
-    // Focusing isolates the change's own layer…
+    // Focusing isolates the change's own layer (Edge.Cuts rides along to frame it —
+    // the one-visible-change case of the same rule shift-click uses)…
     useDiffStore.getState().focusChange("ch_1"); // routing on In2.Cu
-    expect(usePcbViewStore.getState().hidden).toEqual(new Set(["F.Cu", "B.Cu", "Edge.Cuts"]));
+    expect(usePcbViewStore.getState().hidden).toEqual(new Set(["F.Cu", "B.Cu"]));
     // …and shift-clicking in a change on ANOTHER layer must reveal that layer too,
     // or the GPU mask shows it into a hidden layer and nothing appears.
     useDiffStore.getState().toggleChangeHidden("ch_0"); // component on F.Cu

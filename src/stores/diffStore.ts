@@ -276,11 +276,12 @@ export const useDiffStore = create<DiffState>((set, get) => ({
     } else if (pcb) {
       useViewStore.getState().setView("pcb");
       diffPaint.clearA(); // no schematic side to show
-      // Isolate the layer(s) this change lives on: make it active and hide every other
-      // layer, so the compare shows just that layer's copper over grey. revealChange
-      // (unlike pcbNav.reveal's net path) never un-hides layers, so the isolation
-      // sticks — and it frames the change's OWN extent, not the whole net.
-      isolateLayer(pcb.layers);
+      // Isolate the layer(s) this change lives on so the compare shows just that copper
+      // over grey — the one-visible-change case of the shift-click rule, so it uses the
+      // same applyLayerUnion (Edge.Cuts rides along to frame the copper; single copper
+      // layer becomes active). revealChange (unlike pcbNav.reveal's net path) never
+      // un-hides layers, so the isolation sticks and it frames the change's OWN extent.
+      applyLayerUnion([change]);
       pcbNav.revealChange(change);
     }
   },
@@ -377,18 +378,4 @@ function applyLayerUnion(changes: Change[]) {
   pv.setHidden(pv.known.filter((l) => !keep.has(l)));
   const copper = union.filter((l) => l.endsWith(".Cu"));
   pv.setActive(copper.length === 1 ? copper[0] : null);
-}
-
-/** Isolate the layer(s) a PCB change lives on: make the first active and hide every
- *  other known layer, so the compare renders only that layer's copper. No-op when no
- *  layer is known. The pre-diff view is restored on exit (priorPcbView). */
-function isolateLayer(layers: string[] | undefined) {
-  const layer = layers?.[0];
-  if (!layer) return;
-  const pv = usePcbViewStore.getState();
-  const keep = new Set(layers);
-  // Hide all known layers except the change's own — `known` is the full layer table
-  // (populated by resetForLayers when the board loads).
-  pv.setHidden(pv.known.filter((l) => !keep.has(l)));
-  pv.setActive(layer);
 }
