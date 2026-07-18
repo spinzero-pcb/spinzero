@@ -970,6 +970,10 @@ fn diff_components(a: &Bundle, b: &Bundle, out: &mut Vec<Change>) -> CompDelta {
     // Fold re-annotations: a removed R12 + added R15 with equal (value, footprint) and
     // ~equal placement is ONE rename, not add+remove. Match greedily in sorted order so
     // the pairing is deterministic; each side's candidate is consumed once.
+    // Positions are read O(1) from a per-bundle reference→(x,y) index built once here,
+    // not by re-scanning geometry.components for every (ra, rb) candidate pair.
+    let pos_a = comp_pos_index(a);
+    let pos_b = comp_pos_index(b);
     let mut consumed_b: HashSet<&String> = HashSet::new();
     let mut folded_a: HashSet<&String> = HashSet::new();
     for ra in &only_a {
@@ -982,7 +986,10 @@ fn diff_components(a: &Bundle, b: &Bundle, out: &mut Vec<Change>) -> CompDelta {
             let comp_b = &cb[*rb];
             if comp_a.value == comp_b.value
                 && comp_a.fp == comp_b.fp
-                && placements_match(a, b, ra, rb)
+                && placements_match(
+                    pos_a.get(ra.as_str()).copied(),
+                    pos_b.get(rb.as_str()).copied(),
+                )
             {
                 best = Some(*rb);
                 break;
@@ -1156,18 +1163,24 @@ fn set_schematic_a(anchors: &mut Anchors, a_side: Anchors) {
 /// Two refdes occupy ~the same board position (for re-annotation folding). If neither
 /// side has PCB geometry, position is unknown → treat as matching (value+fp equality
 /// alone then carries the fold, which is the schematic-only case).
-fn placements_match(a: &Bundle, b: &Bundle, ra: &str, rb: &str) -> bool {
-    let pa = comp_pos(a, ra);
-    let pb = comp_pos(b, rb);
+fn placements_match(pa: Option<(f64, f64)>, pb: Option<(f64, f64)>) -> bool {
     match (pa, pb) {
         (Some((xa, ya)), Some((xb, yb))) => (xa - xb).abs() < POS_EPS_MM && (ya - yb).abs() < POS_EPS_MM,
         _ => true,
     }
 }
 
-fn comp_pos(bundle: &Bundle, refdes: &str) -> Option<(f64, f64)> {
-    let g = bundle.geometry.as_ref()?;
-    g.components.iter().find(|c| c.reference == refdes).map(|c| (c.x, c.y))
+/// Build reference → (x, y) once per bundle so re-annotation matching is an O(1) lookup
+/// per candidate pair instead of a linear scan of geometry.components. First occurrence
+/// wins, matching the old `find()`'s first-hit behaviour on a duplicated refdes.
+fn comp_pos_index(bundle: &Bundle) -> HashMap<&str, (f64, f64)> {
+    let mut m: HashMap<&str, (f64, f64)> = HashMap::new();
+    if let Some(g) = bundle.geometry.as_ref() {
+        for c in &g.components {
+            m.entry(c.reference.as_str()).or_insert((c.x, c.y));
+        }
+    }
+    m
 }
 
 fn comp_summary(c: &crate::design::CompLite) -> String {
