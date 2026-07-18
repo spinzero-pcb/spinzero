@@ -367,6 +367,11 @@ export function PcbGlView({ visible }: { visible: boolean }) {
   const diffHideZones = useDiffStore((s) => s.hideZones);
   const diffHiddenIds = useDiffStore((s) => s.hiddenChangeIds);
   const diffFocusedId = useDiffStore((s) => s.focusedChangeId);
+  // Identity of the current comparison — the diff-inputs effect must re-bake geomA + the
+  // owner flags when a NEW doc lands even if diffActive/indexes are unchanged (else the
+  // GPU codes go stale against the new changeset).
+  const diffDoc = useDiffStore((s) => s.doc);
+  const diffCacheKeyA = useDiffStore((s) => s.cacheKeyA);
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const labelCanvasRef = useRef<HTMLCanvasElement>(null);
@@ -1158,8 +1163,10 @@ export function PcbGlView({ visible }: { visible: boolean }) {
     return () => {
       cancelled = true;
     };
+    // diffDoc + diffCacheKeyA key the effect to the diff SESSION: a re-prepared doc (or a
+    // new A side) re-bakes the flags/geomA even when diffActive and indexes don't change.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [diffActive, indexes, getPcbGeometry]);
+  }, [diffActive, indexes, getPcbGeometry, diffDoc, diffCacheKeyA]);
 
   // ---- create / dispose renderer -----------------------------------------
   useEffect(() => {
