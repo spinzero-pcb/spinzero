@@ -89,6 +89,26 @@ pub struct Change {
     pub emph_b: Option<String>,
 }
 
+impl Default for Change {
+    /// The defaulted shape every construction site shares: no id yet (assigned last,
+    /// by ordinal), no detail, no emphasis, both-sided, empty anchors. Sites fill in
+    /// the signal fields (group/kind/impact/title/anchors) and `..Default::default()`.
+    fn default() -> Self {
+        Change {
+            id: String::new(),
+            group: Group::Component,
+            kind: Kind::Modified,
+            impact: Impact::Cosmetic,
+            title: String::new(),
+            detail: String::new(),
+            anchors: Anchors::default(),
+            side: Side::Both,
+            emph_a: None,
+            emph_b: None,
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
 #[serde(rename_all = "lowercase")]
 pub enum Group {
@@ -858,9 +878,6 @@ fn diff_sch_graphics(
                 anchors.schematic_a = Some(SchematicAnchor { sheet: sheet_num, uuids: a_uuids });
             }
             raw.push(Change {
-                id: String::new(),
-                emph_a: None,
-                emph_b: None,
                 group: Group::Sheet,
                 kind,
                 impact: Impact::Cosmetic,
@@ -868,6 +885,7 @@ fn diff_sch_graphics(
                 detail,
                 anchors,
                 side,
+                ..Default::default()
             });
         }
     }
@@ -913,9 +931,6 @@ fn graphical_edit_fallback(
             .map(|s| s.name.clone())
             .unwrap_or_else(|| num.to_string());
         raw.push(Change {
-            id: String::new(),
-            emph_a: None,
-            emph_b: None,
             group: Group::Sheet,
             kind: Kind::Modified,
             impact: Impact::Cosmetic,
@@ -927,6 +942,7 @@ fn graphical_edit_fallback(
                 pcb: None,
             },
             side: Side::Both,
+            ..Default::default()
         });
     }
 }
@@ -988,9 +1004,6 @@ fn diff_components(a: &Bundle, b: &Bundle, out: &mut Vec<Change>) -> CompDelta {
             let mut anchors = comp_anchors(b, rb);
             set_schematic_a(&mut anchors, comp_anchors(a, ra));
             out.push(Change {
-                id: String::new(),
-                emph_a: None,
-                emph_b: None,
                 group: Group::Component,
                 kind: Kind::Renamed,
                 impact: Impact::Cosmetic,
@@ -998,6 +1011,7 @@ fn diff_components(a: &Bundle, b: &Bundle, out: &mut Vec<Change>) -> CompDelta {
                 detail: format!("same value {} / footprint {}", disp(&comp_a.value), disp(&comp_a.fp)),
                 anchors,
                 side: Side::Both,
+                ..Default::default()
             });
         }
     }
@@ -1010,9 +1024,6 @@ fn diff_components(a: &Bundle, b: &Bundle, out: &mut Vec<Change>) -> CompDelta {
         delta.added.insert(rb.to_string());
         let c = &cb[*rb];
         out.push(Change {
-            id: String::new(),
-            emph_a: None,
-            emph_b: None,
             group: Group::Component,
             kind: Kind::Added,
             impact: Impact::Electrical,
@@ -1020,6 +1031,7 @@ fn diff_components(a: &Bundle, b: &Bundle, out: &mut Vec<Change>) -> CompDelta {
             detail: comp_summary(c),
             anchors: comp_anchors(b, rb),
             side: Side::B,
+            ..Default::default()
         });
     }
     for ra in &only_a {
@@ -1033,9 +1045,6 @@ fn diff_components(a: &Bundle, b: &Bundle, out: &mut Vec<Change>) -> CompDelta {
         delta.removed.insert(ra.to_string());
         let c = &ca[*ra];
         out.push(Change {
-            id: String::new(),
-            emph_a: None,
-            emph_b: None,
             group: Group::Component,
             kind: Kind::Removed,
             impact: Impact::Electrical,
@@ -1043,6 +1052,7 @@ fn diff_components(a: &Bundle, b: &Bundle, out: &mut Vec<Change>) -> CompDelta {
             detail: comp_summary(c),
             anchors: comp_anchors(a, ra),
             side: Side::A,
+            ..Default::default()
         });
     }
 
@@ -1079,9 +1089,6 @@ fn diff_components(a: &Bundle, b: &Bundle, out: &mut Vec<Change>) -> CompDelta {
                 let mut anchors = comp_anchors(b, r);
                 set_schematic_a(&mut anchors, comp_anchors(a, r));
                 out.push(Change {
-                    id: String::new(),
-                    emph_a: None,
-                    emph_b: None,
                     group: Group::Component,
                     kind: Kind::Moved,
                     impact: Impact::Cosmetic,
@@ -1089,6 +1096,7 @@ fn diff_components(a: &Bundle, b: &Bundle, out: &mut Vec<Change>) -> CompDelta {
                     detail: String::new(),
                     anchors,
                     side: Side::Both,
+                    ..Default::default()
                 });
             }
         }
@@ -1127,7 +1135,6 @@ fn diff_components(a: &Bundle, b: &Bundle, out: &mut Vec<Change>) -> CompDelta {
         let mut anchors = comp_anchors(b, r);
         set_schematic_a(&mut anchors, comp_anchors(a, r));
         out.push(Change {
-            id: String::new(),
             emph_a: emph.0,
             emph_b: emph.1,
             group: Group::Component,
@@ -1137,6 +1144,7 @@ fn diff_components(a: &Bundle, b: &Bundle, out: &mut Vec<Change>) -> CompDelta {
             detail,
             anchors,
             side: Side::Both,
+            ..Default::default()
         });
     }
     delta
@@ -1261,9 +1269,6 @@ fn diff_nets(a: &Bundle, b: &Bundle, comps: &CompDelta, out: &mut Vec<Change>) {
         let mut anchors = net_anchors(b, rb);
         set_schematic_a(&mut anchors, net_anchors(a, ra));
         out.push(Change {
-            id: String::new(),
-            emph_a: None,
-            emph_b: None,
             group: Group::Net,
             kind: Kind::Renamed,
             impact: Impact::Electrical,
@@ -1271,6 +1276,7 @@ fn diff_nets(a: &Bundle, b: &Bundle, comps: &CompDelta, out: &mut Vec<Change>) {
             detail: format!("same {n_pins} pin{}", plural(n_pins)),
             anchors,
             side: Side::Both,
+            ..Default::default()
         });
     }
 
@@ -1282,9 +1288,6 @@ fn diff_nets(a: &Bundle, b: &Bundle, comps: &CompDelta, out: &mut Vec<Change>) {
         let n = &nb[*rb];
         let cnt = n.terminals.len();
         out.push(Change {
-            id: String::new(),
-            emph_a: None,
-            emph_b: None,
             group: Group::Net,
             kind: Kind::Added,
             impact: Impact::Electrical,
@@ -1292,6 +1295,7 @@ fn diff_nets(a: &Bundle, b: &Bundle, comps: &CompDelta, out: &mut Vec<Change>) {
             detail: format!("{cnt} pin{}", plural(cnt)),
             anchors: net_anchors(b, rb),
             side: Side::B,
+            ..Default::default()
         });
     }
     for ra in &only_a {
@@ -1301,9 +1305,6 @@ fn diff_nets(a: &Bundle, b: &Bundle, comps: &CompDelta, out: &mut Vec<Change>) {
         let n = &na[*ra];
         let cnt = n.terminals.len();
         out.push(Change {
-            id: String::new(),
-            emph_a: None,
-            emph_b: None,
             group: Group::Net,
             kind: Kind::Removed,
             impact: Impact::Electrical,
@@ -1311,6 +1312,7 @@ fn diff_nets(a: &Bundle, b: &Bundle, comps: &CompDelta, out: &mut Vec<Change>) {
             detail: format!("{cnt} pin{}", plural(cnt)),
             anchors: net_anchors(a, ra),
             side: Side::A,
+            ..Default::default()
         });
     }
 
@@ -1358,9 +1360,6 @@ fn diff_nets(a: &Bundle, b: &Bundle, comps: &CompDelta, out: &mut Vec<Change>) {
             set_schematic_a(&mut anchors, net_anchors(a, &from));
         }
         out.push(Change {
-            id: String::new(),
-            emph_a: None,
-            emph_b: None,
             group: Group::Net,
             kind: Kind::Modified,
             impact: Impact::Electrical,
@@ -1368,6 +1367,7 @@ fn diff_nets(a: &Bundle, b: &Bundle, comps: &CompDelta, out: &mut Vec<Change>) {
             detail: String::new(),
             anchors,
             side: Side::Both,
+            ..Default::default()
         });
     }
 
@@ -1405,9 +1405,6 @@ fn diff_nets(a: &Bundle, b: &Bundle, comps: &CompDelta, out: &mut Vec<Change>) {
             bits.push(format!("−{removed}"));
         }
         out.push(Change {
-            id: String::new(),
-            emph_a: None,
-            emph_b: None,
             group: Group::Net,
             kind: Kind::Modified,
             impact: Impact::Electrical,
@@ -1419,6 +1416,7 @@ fn diff_nets(a: &Bundle, b: &Bundle, comps: &CompDelta, out: &mut Vec<Change>) {
                 anchors
             },
             side: Side::Both,
+            ..Default::default()
         });
     }
 }
@@ -1530,9 +1528,6 @@ fn diff_sheets(a: &Bundle, b: &Bundle, out: &mut Vec<Change>) {
     for (name, num) in &names_b {
         if !names_a.contains_key(name) {
             out.push(Change {
-                id: String::new(),
-                emph_a: None,
-                emph_b: None,
                 group: Group::Sheet,
                 kind: Kind::Added,
                 impact: Impact::Doc,
@@ -1544,15 +1539,13 @@ fn diff_sheets(a: &Bundle, b: &Bundle, out: &mut Vec<Change>) {
                     pcb: None,
                 },
                 side: Side::B,
+                ..Default::default()
             });
         }
     }
     for (name, num) in &names_a {
         if !names_b.contains_key(name) {
             out.push(Change {
-                id: String::new(),
-                emph_a: None,
-                emph_b: None,
                 group: Group::Sheet,
                 kind: Kind::Removed,
                 impact: Impact::Doc,
@@ -1564,6 +1557,7 @@ fn diff_sheets(a: &Bundle, b: &Bundle, out: &mut Vec<Change>) {
                     pcb: None,
                 },
                 side: Side::A,
+                ..Default::default()
             });
         }
     }
@@ -1589,9 +1583,6 @@ fn diff_docs(a: &Bundle, b: &Bundle, out: &mut Vec<Change>) {
     for (label, old, new) in fields {
         if old != new {
             out.push(Change {
-                id: String::new(),
-                emph_a: None,
-                emph_b: None,
                 group: Group::Doc,
                 kind: Kind::Modified,
                 impact: Impact::Doc,
@@ -1599,6 +1590,7 @@ fn diff_docs(a: &Bundle, b: &Bundle, out: &mut Vec<Change>) {
                 detail: String::new(),
                 anchors: Anchors::default(),
                 side: Side::Both,
+                ..Default::default()
             });
         }
     }
@@ -1709,9 +1701,6 @@ fn diff_placement(a: &Geometry, b: &Geometry, out: &mut Vec<Change>) {
         }
         let layers = side_b.into_iter().collect();
         out.push(Change {
-            id: String::new(),
-            emph_a: None,
-            emph_b: None,
             group: Group::Placement,
             kind: Kind::Moved,
             impact: Impact::Placement,
@@ -1729,6 +1718,7 @@ fn diff_placement(a: &Geometry, b: &Geometry, out: &mut Vec<Change>) {
                 }),
             },
             side: Side::Both,
+            ..Default::default()
         });
     }
 }
@@ -1804,9 +1794,6 @@ fn diff_routing(a: &Geometry, b: &Geometry, out: &mut Vec<Change>) {
             bits.push(format!("−{removed}"));
         }
         out.push(Change {
-            id: String::new(),
-            emph_a: None,
-            emph_b: None,
             group: Group::Routing,
             kind,
             impact: Impact::Electrical,
@@ -1824,6 +1811,7 @@ fn diff_routing(a: &Geometry, b: &Geometry, out: &mut Vec<Change>) {
                 }),
             },
             side: Side::Both,
+            ..Default::default()
         });
     }
 
@@ -1891,9 +1879,6 @@ fn diff_vias(a: &Geometry, b: &Geometry, out: &mut Vec<Change>) {
             bits.push(format!("−{}", removed.len()));
         }
         out.push(Change {
-            id: String::new(),
-            emph_a: None,
-            emph_b: None,
             group: Group::Routing,
             kind,
             impact: Impact::Electrical,
@@ -1911,6 +1896,7 @@ fn diff_vias(a: &Geometry, b: &Geometry, out: &mut Vec<Change>) {
                 }),
             },
             side: Side::Both,
+            ..Default::default()
         });
     }
 }
@@ -2025,9 +2011,6 @@ fn diff_zones(a: &Geometry, b: &Geometry, out: &mut Vec<Change>) {
             (Kind::Modified, "shrank on")
         };
         out.push(Change {
-            id: String::new(),
-            emph_a: None,
-            emph_b: None,
             group: Group::Zone,
             kind,
             impact: Impact::Placement,
@@ -2045,6 +2028,7 @@ fn diff_zones(a: &Geometry, b: &Geometry, out: &mut Vec<Change>) {
                 }),
             },
             side: Side::Both,
+            ..Default::default()
         });
     }
 }
@@ -2215,9 +2199,6 @@ fn diff_graphics_and_text(a: &Geometry, b: &Geometry, comp_delta: &CompDelta, ou
     for (kind, rows) in [(Kind::Modified, paired), (Kind::Moved, moves)] {
         for (title, detail, layer, bbox) in rows {
             out.push(Change {
-                id: String::new(),
-                emph_a: None,
-                emph_b: None,
                 group: Group::Text,
                 kind,
                 impact: impact_of(&layer),
@@ -2229,6 +2210,7 @@ fn diff_graphics_and_text(a: &Geometry, b: &Geometry, comp_delta: &CompDelta, ou
                     pcb: Some(PcbAnchor { bbox: Some(bbox), layers: vec![layer], comp: None, net: None, vias: false }),
                 },
                 side: Side::Both,
+                ..Default::default()
             });
         }
     }
@@ -2270,9 +2252,6 @@ fn diff_graphics_and_text(a: &Geometry, b: &Geometry, comp_delta: &CompDelta, ou
             format!("{noun} changed on {layer} ({})", bits.join(" "))
         };
         out.push(Change {
-            id: String::new(),
-            emph_a: None,
-            emph_b: None,
             group,
             kind: Kind::Modified,
             impact,
@@ -2284,6 +2263,7 @@ fn diff_graphics_and_text(a: &Geometry, b: &Geometry, comp_delta: &CompDelta, ou
                 pcb: Some(PcbAnchor { bbox: None, layers: vec![layer], comp: None, net: None, vias: false }),
             },
             side: Side::Both,
+            ..Default::default()
         });
     }
 }
@@ -2363,9 +2343,6 @@ fn push_text_addremove(out: &mut Vec<Change>, g: &Geometry, idxs: &[usize], kind
     };
     for (layer, role, text, at) in items {
         out.push(Change {
-            id: String::new(),
-            emph_a: None,
-            emph_b: None,
             group: Group::Text,
             kind,
             impact: layer_impact(&layer, &role),
@@ -2373,6 +2350,7 @@ fn push_text_addremove(out: &mut Vec<Change>, g: &Geometry, idxs: &[usize], kind
             detail: String::new(),
             anchors: pcb_point_anchor(&layer, at),
             side,
+            ..Default::default()
         });
     }
 }
