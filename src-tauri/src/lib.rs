@@ -707,9 +707,28 @@ fn pcb_source_file(hashes: &std::collections::BTreeMap<String, String>) -> Optio
 /// (short-circuits to an empty diff when the cache keys are equal), runs the pure
 /// engine, writes `diff.json` to the machine-local diff cache, GCs it, and returns
 /// the doc + both cache keys + labels. Read-only: no viewer state changes.
+///
+/// The body is multi-second on a cold cache (two extractions + a full board diff), so
+/// the command is `async` and runs it on a blocking thread — the webview event loop and
+/// all other IPC (incl. the "Preparing comparison…" spinner) stay responsive.
 #[tauri::command]
-fn prepare_diff(state: State<AppState>, rev_a: String, rev_b: String) -> Result<DiffHandle, String> {
+async fn prepare_diff(
+    state: State<'_, AppState>,
+    rev_a: String,
+    rev_b: String,
+) -> Result<DiffHandle, String> {
     let handle = current_project(&state)?;
+    tauri::async_runtime::spawn_blocking(move || prepare_diff_blocking(&handle, rev_a, rev_b))
+        .await
+        .map_err(|e| format!("prepare_diff task: {e}"))?
+}
+
+/// The synchronous body of [`prepare_diff`], run on a blocking thread.
+fn prepare_diff_blocking(
+    handle: &Arc<ProjectHandle>,
+    rev_a: String,
+    rev_b: String,
+) -> Result<DiffHandle, String> {
     // Same staging-dir race as set_active_extraction: prepare_diff materializes both
     // revisions' caches (ensure_revision_cache below), which shares cache/<key>.tmp with a
     // live crunch. Don't start while one runs.
@@ -745,9 +764,16 @@ fn prepare_diff(state: State<AppState>, rev_a: String, rev_b: String) -> Result<
     // Materialize both bundles' caches up front, even when the diff doc itself is
     // served from cache below: the frontend reads both sides' artifacts by cache key
     // right after this returns, and the bundle cache GCs independently of the diff
-    // cache, so a cached doc must not outlive its bundles. (A re-extract is ~1 s.)
-    let cache_dir_a = ensure_revision_cache(&handle, &resolved_a)?;
-    let cache_dir_b = ensure_revision_cache(&handle, &resolved_b)?;
+    // cache, so a cached doc must not outlive its bundles. The two caches key off
+    // disjoint dirs, so extract them in parallel — on a cold cache this is ~1 s instead
+    // of ~1 s + ~1 s back-to-back.
+    let (res_a, res_b) = std::thread::scope(|s| {
+        let ta = s.spawn(|| ensure_revision_cache(handle, &resolved_a));
+        let tb = s.spawn(|| ensure_revision_cache(handle, &resolved_b));
+        (ta.join(), tb.join())
+    });
+    let cache_dir_a = res_a.map_err(|_| "extraction A panicked".to_string())??;
+    let cache_dir_b = res_b.map_err(|_| "extraction B panicked".to_string())??;
 
     // Serve a cached diff.json when both bundles are unchanged. The changeset is a
     // pure function of the two source-identical bundles, but the row labels/revs are
