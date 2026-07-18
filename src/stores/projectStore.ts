@@ -43,7 +43,11 @@ interface ProjectState {
     class?: string | null;
   }) => Promise<void>;
   relinkDesignPath: (newDesignPath: string) => Promise<void>;
-  setActiveExtraction: (id: string | null) => Promise<void>;
+  /** Pin the viewer to a revision. Resolves `true` when the switch landed, `false` when
+   *  it was skipped (a switch/update was already in flight) or the IPC failed — so a
+   *  caller like the diff enter can detect a silent no-op instead of proceeding on the
+   *  wrong revision. */
+  setActiveExtraction: (id: string | null) => Promise<boolean>;
   updateDesignFiles: (id: string) => Promise<void>;
   labelExtraction: (id: string, label: string | null) => Promise<void>;
   setTag: (id: string, name: string, message?: string | null) => Promise<void>;
@@ -212,7 +216,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   // Pure viewer switch: the design folder on disk is never touched, so there is
   // nothing to confirm. Writing files back is the separate updateDesignFiles action.
   setActiveExtraction: async (id) => {
-    if (get().busy) return; // don't overlap another switch/update
+    if (get().busy) return false; // don't overlap another switch/update — caller sees the no-op
     set({ busy: true });
     try {
       await ipc.setActiveExtraction(id);
@@ -222,8 +226,10 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       sel.setHighlights([], "sch");
       sel.setSelection(null, "sch");
       await Promise.all([get().refreshIndex(), useDesignStore.getState().load()]);
+      return true;
     } catch (e) {
       useToastStore.getState().push({ kind: "error", title: "Couldn’t switch revision", message: String(e) });
+      return false;
     } finally {
       set({ busy: false });
     }
