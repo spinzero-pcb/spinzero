@@ -188,6 +188,13 @@ export function Canvas() {
     // the schematic is a half-width B pane, so reserving the full gutter there shrinks
     // the landing until a change reads as "zoomed out to fit". Drop it while diffing.
     const gutter = () => (useDiffStore.getState().active ? 0 : CARD_GUTTER);
+    // True while the camera sits at a plain whole-sheet fit (boot, sheet switch, or an
+    // explicit Fit) and nothing else has moved it. While true, a stage resize re-runs
+    // the fit: the boot fit can measure a not-yet-settled layout (window still
+    // restoring/maximizing, panels still mounting), which left the sheet small and
+    // left-anchored with dead space (feedback 2.PNG). Any pan/zoom/landing clears it,
+    // so a resize never fights a camera the user (or a jump) has placed.
+    let atFit = false;
     function fitSheet() {
       const r = stage.getBoundingClientRect();
       const usableW = r.width - gutter();
@@ -195,8 +202,10 @@ export function Canvas() {
       tgt.current.s = s;
       tgt.current.x = PAD;
       tgt.current.y = PAD + ((r.height - 2 * PAD) - vb.current[3] * s) / 2;
+      atFit = true;
     }
     function centerOn(ux: number, uy: number, viewW: number) {
+      atFit = false;
       const r = stage.getBoundingClientRect();
       const usableW = r.width - gutter();
       const s = Math.min(60, Math.max(0.2, usableW / viewW));
@@ -636,6 +645,7 @@ export function Canvas() {
     }
     async function restore(h: HistEntry) {
       await loadSheet(h.sheet);
+      atFit = false;
       tgt.current = { ...h.cam };
       highlights.current = [...h.highlights];
       renderHighlights();
@@ -847,6 +857,7 @@ export function Canvas() {
       // the cursor on rapid scroll. ns still grows from tgt.s, so zoom speed is unchanged.
       const c = cam.current;
       const ratio = ns / c.s;
+      atFit = false;
       tgt.current.x = mx - (mx - c.x) * ratio;
       tgt.current.y = my - (my - c.y) * ratio;
       tgt.current.s = ns;
@@ -882,6 +893,7 @@ export function Canvas() {
       if (!drag) return;
       if (drag.box) { updateRubber(drag.px, drag.py, e.clientX, e.clientY); return; }
       if (drag.text) return;
+      atFit = false;
       tgt.current.x = drag.ox + e.clientX - drag.px;
       tgt.current.y = drag.oy + e.clientY - drag.py;
       cam.current.x = tgt.current.x;
@@ -1191,6 +1203,7 @@ export function Canvas() {
       const my = r.height / 2;
       const ns = Math.min(60, Math.max(0.2, tgt.current.s * factor));
       const ratio = ns / tgt.current.s;
+      atFit = false;
       tgt.current.x = mx - (mx - tgt.current.x) * ratio;
       tgt.current.y = my - (my - tgt.current.y) * ratio;
       tgt.current.s = ns;
@@ -1299,6 +1312,7 @@ export function Canvas() {
     // wheel-zoom (factor about the cursor, in *this* canvas's screen space) here so
     // panning/zooming either side moves both (§4).
     camBridge.drive = (dx, dy, zoomFactor, anchorX, anchorY) => {
+      atFit = false;
       if (dx || dy) {
         tgt.current.x += dx;
         tgt.current.y += dy;
@@ -1335,6 +1349,7 @@ export function Canvas() {
         comments: commentAnchors.current.length,
         badges: badgeAnchors.current.length,
         overviewOpen: overviewRef.current,
+        atFit, // camera sits at a plain whole-sheet fit (resize keeps it fitted)
       };
     });
 
@@ -1392,6 +1407,19 @@ export function Canvas() {
     };
 
     // -------------------------------------------------------------- boot
+    // Keep a plain whole-sheet fit fitted as the stage changes size. The boot fit can
+    // run against a not-yet-settled layout (the window still restoring/maximizing,
+    // panels still mounting), which left the sheet small and off-centre with dead
+    // space around it (feedback 2.PNG) — and entering/leaving diff mode resizes the
+    // stage too. Only re-fits while `atFit` holds, so it never overrides a camera the
+    // user (or a landing/jump) has placed.
+    const ro = new ResizeObserver(() => {
+      if (!atFit || !curSvg.current) return;
+      if (stage.clientWidth <= 0 || stage.clientHeight <= 0) return; // hidden view
+      fitSheet();
+    });
+    ro.observe(stage);
+
     // Open the root sheet by default (KiCad's top-level page, the lowest sheet
     // number). The design JSON lists sheets root-first, so sheets[0] is the root;
     // the min-num scan is a guard in case that order ever changes.
@@ -1434,6 +1462,7 @@ export function Canvas() {
 
     return () => {
       cancelAnimationFrame(raf);
+      ro.disconnect();
       for (const id of visRafs) cancelAnimationFrame(id); // stop any pending whenVisible poll
       unsubCompose();
       unregisterProbe();

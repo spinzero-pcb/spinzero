@@ -412,6 +412,12 @@ export function PcbGlView({ visible }: { visible: boolean }) {
   // Whether the camera has framed the board at least once (the `fitted` probe field);
   // cleared when a new geometry loads (needsFit set), set true once fit() runs.
   const fitted = useRef(false);
+  // True while the camera still sits at a plain whole-board fit and nothing else has
+  // moved it. While true, a canvas resize re-runs the fit — the first fit can land on
+  // a not-yet-settled layout (window still restoring/maximizing, panels mounting) and
+  // under-zoom the board (feedback 2.PNG). Any pan/zoom/reveal clears it, so a resize
+  // never overrides a camera the user has placed.
+  const atFit = useRef(false);
   // Net-name strings actually drawn on the last overlay frame (the `netLabels` probe
   // field). drawOverlay culls by zoom + collision, so this is the placed set, not all
   // candidates from renderer.netLabels().
@@ -487,6 +493,7 @@ export function PcbGlView({ visible }: { visible: boolean }) {
       scale: Math.min(cw / bw, ch / bh) * 0.9,
     };
     fitted.current = true;
+    atFit.current = true;
     dirty.current = true;
   };
 
@@ -494,6 +501,7 @@ export function PcbGlView({ visible }: { visible: boolean }) {
    *  the world point AT the centre, so scaling alone keeps it fixed. Clamped to the
    *  same MIN_SCALE–MAX_SCALE px/mm range as the wheel. */
   const zoomBy = (factor: number) => {
+    atFit.current = false;
     cam.current.scale = Math.max(MIN_SCALE, Math.min(cam.current.scale * factor, MAX_SCALE));
     dirty.current = true;
   };
@@ -514,6 +522,7 @@ export function PcbGlView({ visible }: { visible: boolean }) {
     const bw = Math.max(b.maxx - b.minx, 2);
     const bh = Math.max(b.maxy - b.miny, 2);
     const scale = Math.min(Math.min(cw / bw, ch / bh) * 0.6, 60);
+    atFit.current = false;
     cam.current = { x: (b.minx + b.maxx) / 2, y: (b.miny + b.maxy) / 2, scale };
     pendingReveal.current = null;
     needsFit.current = false; // an explicit reveal supersedes the first-reveal fit
@@ -1424,6 +1433,9 @@ export function PcbGlView({ visible }: { visible: boolean }) {
         if (canvas.width !== w || canvas.height !== h) {
           canvas.width = w;
           canvas.height = h;
+          // A camera still at a plain whole-board fit tracks the resize (the first
+          // fit may have measured a not-yet-settled layout); a placed camera doesn't.
+          if (atFit.current) fit();
           dirty.current = true;
         }
         if (dirty.current && w > 0 && h > 0) {
@@ -1654,6 +1666,7 @@ export function PcbGlView({ visible }: { visible: boolean }) {
     const dx = e.clientX - d.x;
     const dy = e.clientY - d.y;
     if (Math.abs(dx) + Math.abs(dy) > 3) d.moved = true;
+    atFit.current = false;
     cam.current.x -= dx / cam.current.scale;
     cam.current.y -= dy / cam.current.scale;
     d.x = e.clientX;
@@ -1684,6 +1697,7 @@ export function PcbGlView({ visible }: { visible: boolean }) {
       const my = e.clientY - rect.top - rect.height / 2;
       const wx = cam.current.x + mx / cam.current.scale;
       const wy = cam.current.y + my / cam.current.scale;
+      atFit.current = false;
       cam.current.scale *= Math.exp(-e.deltaY * 0.0015);
       cam.current.scale = Math.max(MIN_SCALE, Math.min(cam.current.scale, MAX_SCALE));
       cam.current.x = wx - mx / cam.current.scale;
