@@ -187,7 +187,7 @@ export const useDiffStore = create<DiffState>((set, get) => ({
         hiddenChangeIds: new Set(),
       });
       // The Changes tab auto-activates on enter; the panel appears only in diff mode.
-      useReviewStore.getState().setLeftTab("review");
+      useReviewStore.getState().setLeftTab("changes");
       // Overview by default: EVERY change tinted, the PCB view isolated to the union
       // of layers the changes land on. No change is focused (and no camera yank) until
       // the user steps/clicks — then that change solos (see focusChange).
@@ -217,6 +217,9 @@ export const useDiffStore = create<DiffState>((set, get) => ({
     diffSeq++; // invalidate any in-flight prepare (a swap's) so it can't land stale state
     // Drop ALL comparison state — exiting diff mode is just dropping this store.
     diffPaint.clearA();
+    // The Changes tab disappears with diff mode; fall the rail back to Review so a later
+    // re-mount (or the activity bar) doesn't reflect a tab that no longer exists.
+    useReviewStore.getState().setLeftTab("review");
     // Restore the PCB layer view the changed-layer isolation replaced.
     if (priorPcbView) {
       const pv = usePcbViewStore.getState();
