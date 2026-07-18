@@ -583,6 +583,24 @@ export function PcbGlView({ visible }: { visible: boolean }) {
     return box;
   };
 
+  /** A change's frame rect (world mm): its own changed-primitive extent, else — until the
+   *  flags land — the anchor's bbox, else the comp/net extent on the renderer. Shared by
+   *  revealChange's camera landing and the accent-frame draw so the camera and the pulsing
+   *  highlight always frame the same rectangle. */
+  const boxForChange = (change: Change, r: PcbGlRenderer): BBox | null => {
+    const b = extentForChange(change.id);
+    if (b) return b;
+    const pcb = change.anchors.pcb;
+    if (!pcb) return null;
+    if (pcb.bbox) {
+      const [x, y, w, h] = pcb.bbox;
+      return { minx: x, miny: y, maxx: x + w, maxy: y + h };
+    }
+    if (pcb.comp) return r.compBBox(pcb.comp);
+    if (pcb.net) return r.netBBox(pcb.net);
+    return null;
+  };
+
   /** Land the camera on a focused change (diff mode). Prefers the change's own extent;
    *  falls back to the anchor's bbox/comp/net until the flags land. Deliberately does
    *  NOT un-hide layers (unlike revealAnchor's net path) — focusChange just isolated
@@ -590,15 +608,7 @@ export function PcbGlView({ visible }: { visible: boolean }) {
   const revealChange = (change: Change) => {
     const r = rendererRef.current;
     if (!r) return;
-    let b = extentForChange(change.id);
-    const pcb = change.anchors.pcb;
-    if (!b && pcb) {
-      if (pcb.bbox) {
-        const [x, y, w, h] = pcb.bbox;
-        b = { minx: x, miny: y, maxx: x + w, maxy: y + h };
-      } else if (pcb.comp) b = r.compBBox(pcb.comp);
-      else if (pcb.net) b = r.netBBox(pcb.net);
-    }
+    const b = boxForChange(change, r);
     if (b) applyReveal(b);
   };
 
@@ -1063,15 +1073,9 @@ export function PcbGlView({ visible }: { visible: boolean }) {
           if (!isFocused && !subsetActive) continue; // overview: only the focused frames
           // Frame rect: the change's OWN extent (just the changed primitives — a
           // rerouted stretch, not the whole net); until the flags land, the anchor's
-          // bbox, else the comp/net extent on B.
-          let fb: BBox | null = extentForChange(chg.id);
-          if (!fb) {
-            if (pcbA.bbox) {
-              const [bx, by, bw, bh] = pcbA.bbox;
-              fb = { minx: bx, miny: by, maxx: bx + bw, maxy: by + bh };
-            } else if (pcbA.comp) fb = r.compBBox(pcbA.comp);
-            else if (pcbA.net) fb = r.netBBox(pcbA.net);
-          }
+          // bbox, else the comp/net extent. Same cascade revealChange lands the camera
+          // on, so the frame and the camera always agree.
+          const fb = boxForChange(chg, r);
           if (!fb) continue;
           const pad = 6; // screen-px breathing room so the frame never sits on the copper
           const fx = sxOf(fb.minx) - pad;
