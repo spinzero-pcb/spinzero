@@ -757,7 +757,7 @@ fn prepare_diff(state: State<AppState>, rev_a: String, rev_b: String) -> Result<
 
     let doc = diff::diff_bundles(&bundle_a, &bundle_b, &source_diff);
     let path = write_diff_cache(&handle.project_dir, &dkey, &doc)?;
-    diff::gc(&handle.project_dir, 8);
+    diff::gc(&handle.project_dir, &dkey, 8); // keep the doc we just published + serve
 
     Ok(DiffHandle { doc, path, cache_key_a: key_a, cache_key_b: key_b, label_a, label_b })
 }

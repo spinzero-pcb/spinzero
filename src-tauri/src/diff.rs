@@ -2492,17 +2492,27 @@ pub fn diff_cache_path(project_dir: &Path, key: &str) -> PathBuf {
     diff_cache_root(project_dir).join(format!("{key}.json"))
 }
 
-/// Bound the diff cache: keep the newest `max_entries` files, delete the rest.
-/// Regenerable, so eviction is always safe. Best-effort; never errors. Mirrors
-/// `cache::gc`.
-pub fn gc(project_dir: &Path, max_entries: usize) {
+/// Bound the diff cache: keep `{keep}.json` plus the newest `max_entries` files, delete
+/// the rest. `keep` protects the doc just written and handed to the frontend, so a
+/// concurrent prepare_diff's gc (>`max_entries` distinct pairs compared) can't evict the
+/// file the caller is about to serve. Regenerable, so eviction is otherwise safe.
+/// Best-effort; never errors. Mirrors `cache::gc` (which keeps the same protection for
+/// bundle dirs).
+pub fn gc(project_dir: &Path, keep: &str, max_entries: usize) {
     let root = diff_cache_root(project_dir);
     let Ok(rd) = std::fs::read_dir(&root) else {
         return;
     };
+    let keep_file = format!("{keep}.json");
     let mut files: Vec<(std::time::SystemTime, PathBuf)> = Vec::new();
     for e in rd.flatten() {
         if !e.file_type().map(|t| t.is_file()).unwrap_or(false) {
+            continue;
+        }
+        // Only published `.json` docs are cache entries; leave a concurrent writer's
+        // short-lived `.json.tmp` alone (neither count it nor delete it out from under
+        // the rename).
+        if !e.file_name().to_string_lossy().ends_with(".json") {
             continue;
         }
         let mtime = e
@@ -2513,9 +2523,11 @@ pub fn gc(project_dir: &Path, max_entries: usize) {
     }
     files.sort_by(|a, b| b.0.cmp(&a.0)); // newest first
     for (i, (_, path)) in files.iter().enumerate() {
-        if i >= max_entries {
-            let _ = std::fs::remove_file(path);
+        let is_keep = path.file_name().map(|n| n == keep_file.as_str()).unwrap_or(false);
+        if is_keep || i < max_entries {
+            continue;
         }
+        let _ = std::fs::remove_file(path);
     }
 }
 
