@@ -1,10 +1,8 @@
 import { useEffect, useRef } from "react";
 import { useDesignStore } from "../../stores/designStore";
 import { useDiffStore } from "../../stores/diffStore";
-import { camBridge, diffPaint, emphasizeDiffText } from "./navigator";
+import { buildDiffOverlay, camBridge, diffPaint } from "./navigator";
 import { tintsA } from "../../lib/diff";
-
-const SVG_NS = "http://www.w3.org/2000/svg";
 
 /** The read-only A (older) schematic island for the side-by-side diff (§4). It renders
  *  the A-side SVG of whatever sheet the primary (B) Canvas currently shows, follows B's
@@ -36,14 +34,13 @@ export function DiffSchematicA() {
     const world = worldRef.current!;
     const island = islandRef.current!;
     const stage = stageRef.current!;
-    const esc = (s: string) =>
-      window.CSS && CSS.escape ? CSS.escape(s) : s.replace(/["\\]/g, "\\$&");
 
     let raf = 0;
     let disposed = false;
 
-    /** Clone the focused change's A-side uuids into a tinted overlay + scrim, mirroring
-     *  Canvas.paintDiff. Only removed/modified/renamed/moved changes exist on A. */
+    /** Clone the focused change's A-side uuids into a tinted overlay + scrim (via the
+     *  shared buildDiffOverlay, same DOM as Canvas.paintDiff). Only removed/modified/
+     *  renamed/moved changes exist on A. */
     function paintFocused() {
       const svg = curSvg.current;
       if (!svg) return;
@@ -53,47 +50,18 @@ export function DiffSchematicA() {
       // differ between revisions — a re-annotated symbol, a renamed net's old wires).
       const sch = change?.anchors.schematicA ?? change?.anchors.schematic;
       if (!change || !sch || !tintsA(change)) return;
-      const uuids = sch.uuids;
-      const vb = camBridge.vb;
-      const scrim = document.createElementNS(SVG_NS, "rect");
-      scrim.setAttribute("class", "hl-diff-scrim");
-      scrim.setAttribute("x", String(vb[0]));
-      scrim.setAttribute("y", String(vb[1]));
-      scrim.setAttribute("width", String(vb[2]));
-      scrim.setAttribute("height", String(vb[3]));
-      svg.appendChild(scrim);
-      if (uuids.length === 0) return;
-      // A side shows the OLD state: removed → red, modified/moved/renamed → amber.
-      // (Never green — added objects don't exist on the older revision.)
+      // A side shows the OLD state: removed → red, modified/moved/renamed → amber (never
+      // green — added objects don't exist on the older revision). emphA is the pre-edit
+      // text (e.g. the old value string), coloured red inside the clone.
       const role = change.kind === "removed" ? "err" : "warn";
-      const ov = document.createElementNS(SVG_NS, "g");
-      ov.setAttribute("class", `hl-diff hl-diff-${role} hl-diff-pulse`);
-      // Accumulate the tinted objects' world (mm) extent while cloning, so an A-only
-      // change can land the shared camera below.
-      let minX = Infinity,
-        minY = Infinity,
-        maxX = -Infinity,
-        maxY = -Infinity;
-      for (const u of uuids) {
-        const src = svg.querySelector(`g[data-uuid="${esc(u)}"]`) as SVGGraphicsElement | null;
-        if (!src) continue;
-        ov.appendChild(src.cloneNode(true));
-        try {
-          const b = src.getBBox();
-          if (b.width || b.height) {
-            minX = Math.min(minX, b.x);
-            minY = Math.min(minY, b.y);
-            maxX = Math.max(maxX, b.x + b.width);
-            maxY = Math.max(maxY, b.y + b.height);
-          }
-        } catch {
-          /* detached/hidden */
-        }
-      }
-      // A side shows the OLD state: colour the pre-edit text (e.g. the old value
-      // string) red inside the cloned overlay so the exact edit stands out.
-      emphasizeDiffText(ov, change.emphA, "hl-diff-emph-err");
-      svg.appendChild(ov);
+      const { minX, minY, maxX, maxY } = buildDiffOverlay(
+        svg,
+        camBridge.vb,
+        sch.uuids,
+        role,
+        change.emphA,
+        "hl-diff-emph-err",
+      );
       // An A-only change (a removed object) has no B-side geometry, so B deliberately
       // skips the camera landing (revealDiff `aOnly`). Land it here instead, from the A
       // extent — the shared camera works in the same world units. Objects present on B

@@ -10,7 +10,7 @@ import {
 import { sheetMatches, type Selection, type SheetRef } from "../../lib/design";
 import { isTypingTarget } from "../../lib/keymap";
 import { useViewStore } from "../../stores/viewStore";
-import { camBridge, canvasRestore, emphasizeDiffText, nav, type ChipComment } from "./navigator";
+import { buildDiffOverlay, camBridge, canvasRestore, nav, type ChipComment } from "./navigator";
 import { useDiffStore } from "../../stores/diffStore";
 import { relabelInstances } from "./relabel";
 import { useReviewStore } from "../../stores/reviewStore";
@@ -398,26 +398,10 @@ export function Canvas() {
       clearDiffPaint();
       const svg = curSvg.current;
       if (!svg) return;
-      // Dim the unchanged base (own scrim class, so it survives the highlight cycle).
-      const scrim = document.createElementNS(SVG_NS, "rect");
-      scrim.setAttribute("class", "hl-diff-scrim");
-      scrim.setAttribute("x", String(vb.current[0]));
-      scrim.setAttribute("y", String(vb.current[1]));
-      scrim.setAttribute("width", String(vb.current[2]));
-      scrim.setAttribute("height", String(vb.current[3]));
-      svg.appendChild(scrim);
-      if (uuids.length === 0) return;
-      const ov = document.createElementNS(SVG_NS, "g");
-      ov.setAttribute("class", `hl-diff hl-diff-${role} hl-diff-pulse`);
-      for (const u of uuids) {
-        const src = svg.querySelector(`g[data-uuid="${esc(u)}"]`) as SVGElement | null;
-        if (!src) continue;
-        ov.appendChild(src.cloneNode(true));
-      }
-      // B side shows the NEW state: colour the changed text (e.g. the value string)
-      // green inside the cloned overlay so the exact edit stands out.
-      emphasizeDiffText(ov, emph, "hl-diff-emph-ok");
-      svg.appendChild(ov);
+      // Same scrim + cloned-overlay DOM as the A island (buildDiffOverlay). B side shows
+      // the NEW state, so the changed text (e.g. the value string) is coloured green. The
+      // returned extent is unused here — B owns its camera landing via revealDiff.
+      buildDiffOverlay(svg, vb.current, uuids, role, emph, "hl-diff-emph-ok");
     }
     function clearDiffPaint() {
       curSvg.current?.querySelectorAll(".hl-diff, .hl-diff-scrim").forEach((n) => n.remove());
