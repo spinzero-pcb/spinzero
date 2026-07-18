@@ -1251,11 +1251,14 @@ fn diff_nets(a: &Bundle, b: &Bundle, comps: &CompDelta, out: &mut Vec<Change>) {
     // >= threshold is one rename. Score every candidate pair; take the highest, then
     // the next, greedily but deterministically (sorted candidate order breaks ties).
     let mut candidates: Vec<(String, &String, &String)> = Vec::new(); // (jac-key, a, b)
+    // tb depends only on rb — build each B-side terminal set once, not once per (ra, rb)
+    // pair (the inner loop otherwise rebuilds a fresh BTreeSet of formatted strings for
+    // every A candidate).
+    let tb_sets: Vec<BTreeSet<String>> = only_b.iter().map(|rb| terminal_set(&nb[*rb])).collect();
     for ra in &only_a {
         let ta = terminal_set_mapped(&na[*ra], &rename);
-        for rb in &only_b {
-            let tb = terminal_set(&nb[*rb]);
-            let j = jaccard(&ta, &tb);
+        for (rb, tb) in only_b.iter().zip(tb_sets.iter()) {
+            let j = jaccard(&ta, tb);
             if j >= NET_RENAME_JACCARD {
                 // Store 1-j zero-padded so ascending sort = best-first, then names.
                 candidates.push((format!("{:08.5}", 1.0 - j), *ra, *rb));
