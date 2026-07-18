@@ -42,9 +42,7 @@ const DOC: DiffDoc = {
 function reset() {
   useDiffStore.setState({
     active: false,
-    a: null,
     cacheKeyA: null,
-    b: null,
     cacheKeyB: null,
     doc: null,
     focusedChangeId: null,
@@ -116,8 +114,8 @@ describe("diffStore enter/exit/step/seen", () => {
 
     const s = useDiffStore.getState();
     expect(s.active).toBe(true);
-    expect(s.a?.rev).toBe("rA");
-    expect(s.b?.rev).toBe("rB");
+    expect(s.doc?.a.rev).toBe("rA");
+    expect(s.doc?.b.rev).toBe("rB");
     expect(s.cacheKeyA).toBe("keyA");
     expect(s.doc?.changes.length).toBe(3);
     // prepare_diff was called old → new.
@@ -143,7 +141,6 @@ describe("diffStore enter/exit/step/seen", () => {
     const s = useDiffStore.getState();
     expect(s.active).toBe(false);
     expect(s.doc).toBeNull();
-    expect(s.a).toBeNull();
     expect(s.cacheKeyA).toBeNull();
     expect(s.seen.size).toBe(0);
   });

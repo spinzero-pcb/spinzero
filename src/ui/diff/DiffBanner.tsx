@@ -12,8 +12,8 @@ const shortId = (id: string) => id.slice(0, 8);
  *  across sessions) and Zones (drop copper pours from the compare). */
 export function DiffBanner() {
   const active = useDiffStore((s) => s.active);
-  const a = useDiffStore((s) => s.a);
-  const b = useDiffStore((s) => s.b);
+  const a = useDiffStore((s) => s.doc?.a ?? null);
+  const b = useDiffStore((s) => s.doc?.b ?? null);
   const preparing = useDiffStore((s) => s.preparing);
   const swap = useDiffStore((s) => s.swap);
   const exitDiff = useDiffStore((s) => s.exitDiff);

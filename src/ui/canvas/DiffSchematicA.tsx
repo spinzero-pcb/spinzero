@@ -111,7 +111,7 @@ export function DiffSchematicA() {
       loadedEpoch.current = camBridge.epoch;
       if (!bSheet?.svg) {
         island.innerHTML = `<div class="diff-a-placeholder">No matching sheet on ${
-          useDiffStore.getState().a?.label ?? "the older revision"
+          useDiffStore.getState().doc?.a.label ?? "the older revision"
         }</div>`;
         curSvg.current = null;
         return;
@@ -138,7 +138,7 @@ export function DiffSchematicA() {
         if (disposed) return;
         // Sheet absent on A (added sheet) or read failed → placeholder, not a crash.
         island.innerHTML = `<div class="diff-a-placeholder">Sheet added on ${
-          useDiffStore.getState().b?.label ?? "the newer revision"
+          useDiffStore.getState().doc?.b.label ?? "the newer revision"
         }</div>`;
         curSvg.current = null;
       }

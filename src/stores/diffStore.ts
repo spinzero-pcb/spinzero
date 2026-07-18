@@ -4,7 +4,6 @@ import {
   pcbLayerUnion,
   type Change,
   type DiffDoc,
-  type DiffSide,
 } from "../lib/diff";
 import { parsePcbGeometry, type PcbGeometry } from "../lib/pcbGeometry";
 import { useProjectStore } from "./projectStore";
@@ -26,12 +25,12 @@ const BLINK_STORE_KEY = "diff.blink";
 interface DiffState {
   /** True while a comparison is active (diff mode) — view-global. */
   active: boolean;
-  /** Older / base side (A) + its cache key for lazy A-side artifact reads. */
-  a: DiffSide | null;
+  /** Cache key for lazy A-side (older / base) artifact reads. */
   cacheKeyA: string | null;
-  /** Newer / target side (B) — the pinned active revision. */
-  b: DiffSide | null;
+  /** Cache key for the B-side (newer / target — the pinned active revision). */
   cacheKeyB: string | null;
+  /** The comparison document. The two sides live on `doc.a` / `doc.b` — readers that
+   *  want the base/target metadata read those, not a mirrored copy on the store. */
   doc: DiffDoc | null;
   /** Blink the changed copper (added/removed pulse in opposite phases over the stable
    *  grey base). A remembered user preference (localStorage), not per-session. */
@@ -123,9 +122,7 @@ let diffSeq = 0;
 
 export const useDiffStore = create<DiffState>((set, get) => ({
   active: false,
-  a: null,
   cacheKeyA: null,
-  b: null,
   cacheKeyB: null,
   doc: null,
   blink: localStorage.getItem(BLINK_STORE_KEY) === "1",
@@ -171,8 +168,6 @@ export const useDiffStore = create<DiffState>((set, get) => ({
       if (token !== diffSeq) return; // superseded (exit or newer enter) — drop stale state
       set({
         active: true,
-        a: handle.doc.a,
-        b: handle.doc.b,
         cacheKeyA: handle.cache_key_a,
         cacheKeyB: handle.cache_key_b,
         doc: handle.doc,
@@ -198,7 +193,7 @@ export const useDiffStore = create<DiffState>((set, get) => ({
       // Un-pin: we may have switched the active revision to `newer` before the
       // prepare failed. Restore the previous pin (a failed swap goes back to the
       // still-valid B side; a failed first enter goes back to what the user had).
-      const restore = get().active ? (get().b?.rev ?? priorActive) : priorActive;
+      const restore = get().active ? (get().doc?.b.rev ?? priorActive) : priorActive;
       const proj = useProjectStore.getState();
       if (restore !== proj.activeExtraction) {
         void proj.setActiveExtraction(restore);
@@ -225,9 +220,7 @@ export const useDiffStore = create<DiffState>((set, get) => ({
     }
     set({
       active: false,
-      a: null,
       cacheKeyA: null,
-      b: null,
       cacheKeyB: null,
       doc: null,
       focusedChangeId: null,
@@ -249,11 +242,11 @@ export const useDiffStore = create<DiffState>((set, get) => ({
   },
 
   swap: async () => {
-    const { a, b, active } = get();
-    if (!active || !a || !b) return;
+    const { doc, active } = get();
+    if (!active || !doc) return;
     // Flip direction verbatim: the new B (old A) becomes the pinned active revision.
     // Normalization must be bypassed — it would re-derive old→new and undo the flip.
-    await get().enterDiff(b.rev, a.rev, { normalize: false });
+    await get().enterDiff(doc.b.rev, doc.a.rev, { normalize: false });
   },
 
   focusChange: (id) => {
