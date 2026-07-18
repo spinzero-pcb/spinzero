@@ -725,6 +725,7 @@ fn prepare_diff(state: State<AppState>, rev_a: String, rev_b: String) -> Result<
         .ok_or_else(|| format!("unknown revision {rev_b}"))?;
     let rev_meta_a = resolved_a.revision().clone();
     let rev_meta_b = resolved_b.revision().clone();
+    log::info!("prepare_diff: {} → {}", rev_meta_a.id, rev_meta_b.id);
 
     let key_a = cache::cache_key(&rev_meta_a.source_hashes);
     let key_b = cache::cache_key(&rev_meta_b.source_hashes);
@@ -734,6 +735,7 @@ fn prepare_diff(state: State<AppState>, rev_a: String, rev_b: String) -> Result<
     // Both bundles are extracted at the current EXTRACTOR_CACHE_EPOCH, so equal cache
     // keys ⇒ byte-identical bundles ⇒ empty diff. Short-circuit before any extraction.
     if key_a == key_b {
+        log::info!("prepare_diff: revisions are byte-identical — empty diff");
         let doc = diff::empty_doc(&rev_meta_a.id, &label_a, &rev_meta_b.id, &label_b);
         let dkey = diff::diff_key(&key_a, &key_b);
         let path = write_diff_cache(&handle.project_dir, &dkey, &doc)?;
@@ -754,6 +756,7 @@ fn prepare_diff(state: State<AppState>, rev_a: String, rev_b: String) -> Result<
     let cache_path = diff::diff_cache_path(&handle.project_dir, &dkey);
     if let Ok(text) = fs::read_to_string(&cache_path) {
         if let Ok(mut doc) = serde_json::from_str::<diff::DiffDoc>(&text) {
+            log::info!("prepare_diff: served cached diff.json ({} changes)", doc.changes.len());
             doc.a = diff::DiffSide { rev: rev_meta_a.id.clone(), label: label_a.clone() };
             doc.b = diff::DiffSide { rev: rev_meta_b.id.clone(), label: label_b.clone() };
             return Ok(DiffHandle {
@@ -775,6 +778,7 @@ fn prepare_diff(state: State<AppState>, rev_a: String, rev_b: String) -> Result<
     let source_diff = rawstore::diff_source_hashes(&rev_meta_a.source_hashes, &rev_meta_b.source_hashes);
 
     let doc = diff::diff_bundles(&bundle_a, &bundle_b, &source_diff);
+    log::info!("prepare_diff: computed {} changes", doc.changes.len());
     let path = write_diff_cache(&handle.project_dir, &dkey, &doc)?;
     diff::gc(&handle.project_dir, &dkey, 8); // keep the doc we just published + serve
 
@@ -797,10 +801,18 @@ fn load_diff_bundle(
         None => None,
     };
     // Schematic geometry is best-effort: a parse failure (or an older cache without the
-    // artifact) simply leaves the diff engine on its one-row-per-sheet fallback.
-    let sch_geometry = extras
-        .sch_geometry_json
-        .and_then(|text| serde_json::from_str::<diff::SchGeometry>(&text).ok());
+    // artifact) simply leaves the diff engine on its one-row-per-sheet fallback. Log the
+    // fallback branch so a corrupt geometry.json is distinguishable from an old cache in a
+    // bug report (mirrors the extractor's 'schematic geometry skipped').
+    let sch_geometry = extras.sch_geometry_json.and_then(|text| {
+        match serde_json::from_str::<diff::SchGeometry>(&text) {
+            Ok(g) => Some(g),
+            Err(e) => {
+                log::info!("diff: schematic geometry skipped for {} ({e})", rev.id);
+                None
+            }
+        }
+    });
     Ok(diff::Bundle {
         rev: rev.id.clone(),
         label,
