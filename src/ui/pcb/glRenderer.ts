@@ -32,6 +32,9 @@ const PLATE_RING_MM = 0.03;
 /** Crosshatch period (css px) for the removed-copper diff texture — shared with the
  *  Canvas2D removed-TEXT overlay pass (PcbGlView) so both hatch at the same density. */
 export const DIFF_HATCH_PERIOD_CSS = 7;
+/** Default recolour for the "changed-only" diff pass, restored each render when the
+ *  caller omits `diffColor` (so the field never sticks across calls). */
+const DEFAULT_DIFF_COLOR: RGB = [1, 0, 0];
 
 export interface Camera {
   /** World point (mm) at the viewport centre. */
@@ -1434,7 +1437,7 @@ export class PcbGlRenderer {
 
   /** Live diff-pass state for the current render call (set by render(opts)). */
   private diffPass: 0 | 1 | 2 = 0;
-  private diffColor: RGB = [1, 0, 0];
+  private diffColor: RGB = DEFAULT_DIFF_COLOR;
   private diffMix = 0;
   /** Crosshatch period in device px for the current pass (0 = solid). */
   private diffHatchPx = 0;
@@ -1543,7 +1546,9 @@ export class PcbGlRenderer {
     // fine enough that pads/zones read as a weave rather than banding.
     this.diffHatchPx = opts?.diffHatch ? DIFF_HATCH_PERIOD_CSS * this.dpr : 0;
     this.diffAlpha = opts?.diffAlpha ?? 1;
-    if (opts?.diffColor) this.diffColor = opts.diffColor;
+    // Reset each call like the other per-call diff fields — never let a prior frame's
+    // diffColor stick when this frame omits it.
+    this.diffColor = opts?.diffColor ?? DEFAULT_DIFF_COLOR;
     gl.viewport(0, 0, w, h);
     if (opts?.clear !== false) {
       gl.clearColor(0, 0, 0, 0);
