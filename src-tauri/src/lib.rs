@@ -537,9 +537,11 @@ fn checkout_to_disk(
 
     let mut captured = None;
     if !clean {
-        // Capture the dirty working tree FIRST so it is never lost.
+        // Capture the dirty working tree FIRST so it is never lost. Its parent is the
+        // folder's own last captured state (the hash gate), not the viewed revision —
+        // the edits were made on top of what was on disk.
         let git = project::git_info(design_path);
-        let parent = handle.effective_resolved().map(|r| r.revision().id.clone());
+        let parent = sidecar::design_parent_id(handle);
         let cp = checkpoints::snapshot_local(
             &handle.project_dir,
             design_path,
@@ -570,6 +572,15 @@ fn checkout_to_disk(
 fn list_extractions(state: State<AppState>) -> Result<Vec<project::ExtractionMeta>, String> {
     let handle = current_project(&state)?;
     Ok(handle.list_extractions_meta())
+}
+
+/// The revision id the KiCad design folder currently corresponds to (the history
+/// graph's "KiCad files" marker). Independent of the viewer's active revision —
+/// this is exactly the divergence the marker exists to show.
+#[tauri::command]
+fn get_design_head(state: State<AppState>) -> Result<Option<String>, String> {
+    let handle = current_project(&state)?;
+    Ok(sidecar::design_head_id(&handle))
 }
 
 #[tauri::command]
@@ -1244,6 +1255,7 @@ pub fn run() {
             set_active_extraction,
             update_design_files,
             list_extractions,
+            get_design_head,
             label_extraction,
             tag_revision,
             untag_revision,

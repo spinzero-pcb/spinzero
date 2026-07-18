@@ -1056,6 +1056,12 @@ button {
   border-radius: var(--radius-1);
   align-self: center;
 }
+/* "KiCad files" marker: where the on-disk design actually is — distinct from
+   "viewing" (accent) so their divergence is legible at a glance. */
+.rev-kicad-tag {
+  background: var(--warn-dim);
+  color: var(--warn);
+}
 /* version-control badges: local checkpoint, hidden tombstone, git-tag-style refs */
 .rev-badge {
   text-transform: uppercase;

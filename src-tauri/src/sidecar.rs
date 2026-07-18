@@ -62,6 +62,25 @@ fn last_crunch_hashes(project_dir: &Path) -> Option<BTreeMap<String, String>> {
     serde_json::from_value(v.get("source_hashes")?.clone()).ok()
 }
 
+/// The revision the KiCad design folder currently corresponds to: the hash-gate
+/// state (the folder's content at the last crunch/checkout on this machine) matched
+/// against history. None when nothing has been crunched yet or the gate matches no
+/// surviving revision. This is the history graph's "KiCad files" marker.
+pub fn design_head_id(project: &ProjectHandle) -> Option<String> {
+    last_crunch_hashes(&project.project_dir)
+        .and_then(|prev| project.find_rev_id_by_hashes(&prev))
+}
+
+/// The parent for a new checkpoint of the live design folder: the revision the folder
+/// actually descends from ([`design_head_id`]) — NOT the revision the viewer shows.
+/// Merely viewing an old version never touches the disk, so an edit made in KiCad
+/// descends from the folder's own last captured state; parenting it on the viewed
+/// revision would draw a branch that never happened. Fallback (first crunch, or the
+/// gate matches nothing after a GC / torn checkout): the effective revision.
+pub fn design_parent_id(project: &ProjectHandle) -> Option<String> {
+    design_head_id(project).or_else(|| project.effective_extraction_id())
+}
+
 pub fn save_last_crunch_hashes(project_dir: &Path, hashes: &BTreeMap<String, String>) {
     let path = last_crunch_path(project_dir);
     if let Some(parent) = path.parent() {
@@ -300,11 +319,11 @@ fn crunch_kicad_revision(
     // Auto-crunches append a machine-local checkpoint (private WIP) — the user later
     // Publishes a chosen one into the synced history. The very first crunch of a
     // brand-new project auto-publishes a root so the shared history is never empty.
-    // The parent is the effective revision at crunch time (a prior checkpoint or the
-    // last published revision), read before the snapshot mutates the log.
+    // The parent is what the design folder actually descended from (the hash-gate
+    // state, read before this crunch overwrites it) — never the viewed revision.
     let git = project::git_info(design_path);
     let author = project::author_slug();
-    let parent = project.effective_resolved().map(|r| r.revision().id.clone());
+    let parent = design_parent_id(project);
     let cp = checkpoints::snapshot_local(project_dir, design_path, hashes, &author, &git, parent.as_deref())
         .map_err(|e| CrunchError { stage: "snapshot".into(), stderr_tail: e })?;
     let rev = if trigger == "create" && rawstore::latest_revision(project_dir).is_none() {
@@ -405,6 +424,75 @@ pub(crate) fn rename_retry(from: &Path, to: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicBool, AtomicU64};
+
+    fn handle_for(dir: &Path) -> ProjectHandle {
+        ProjectHandle {
+            project_dir: dir.to_path_buf(),
+            name: "t".into(),
+            class: None,
+            design_path: Mutex::new(None),
+            design_tool: Mutex::new("kicad".into()),
+            active_extraction: Mutex::new(None),
+            status: Mutex::new(Default::default()),
+            crunch_running: AtomicBool::new(false),
+            crunch_pending: AtomicBool::new(false),
+            watcher_stop: AtomicBool::new(false),
+            watcher_suspended: AtomicBool::new(false),
+            watcher_gen: AtomicU64::new(0),
+        }
+    }
+
+    // The bug this guards against: user views an OLD revision in the app while the
+    // KiCad folder sits on a NEWER one; an edit in KiCad must parent on what the
+    // folder actually contained (the hash-gate state), not on the viewed revision.
+    #[test]
+    fn crunch_parent_follows_the_design_folder_not_the_viewer() {
+        let proj = std::env::temp_dir()
+            .join(format!("spinzero_parent_test_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&proj);
+        let src = proj.join("src");
+        fs::create_dir_all(&src).unwrap();
+
+        fs::write(src.join("a.kicad_sch"), b"v1").unwrap();
+        let h1 = source_hashes(&src);
+        let cp_a = crate::checkpoints::snapshot_local(
+            &proj, &src, &h1, "a", &project::GitInfo::default(), None,
+        )
+        .unwrap();
+        fs::write(src.join("a.kicad_sch"), b"v2").unwrap();
+        let h2 = source_hashes(&src);
+        let cp_b = crate::checkpoints::snapshot_local(
+            &proj, &src, &h2, "a", &project::GitInfo::default(), Some(&cp_a.id),
+        )
+        .unwrap();
+
+        // Disk (hash gate) is at B, but the viewer shows A.
+        save_last_crunch_hashes(&proj, &h2);
+        let handle = handle_for(&proj);
+        *handle.active_extraction.lock_safe() = Some(cp_a.id.clone());
+
+        assert_eq!(design_head_id(&handle).as_deref(), Some(cp_b.id.as_str()));
+        assert_eq!(
+            design_parent_id(&handle).as_deref(),
+            Some(cp_b.id.as_str()),
+            "the next checkpoint parents on the folder's state, not the viewed revision"
+        );
+
+        // Gate matching nothing (e.g. torn checkout re-seed) → fall back to effective.
+        let mut unknown = BTreeMap::new();
+        unknown.insert("a.kicad_sch".to_string(), "0".repeat(64));
+        save_last_crunch_hashes(&proj, &unknown);
+        assert_eq!(design_head_id(&handle), None);
+        assert_eq!(
+            design_parent_id(&handle).as_deref(),
+            Some(cp_a.id.as_str()),
+            "fallback is the effective (viewed) revision"
+        );
+
+        let _ = fs::remove_dir_all(&proj);
+        let _ = fs::remove_dir_all(crate::checkpoints::checkpoints_root(&proj));
+    }
 
     // The cross-handle crunch guard (fix for the dev double-open "os error 3" race):
     // the same project dir can't be claimed twice at once, different projects are

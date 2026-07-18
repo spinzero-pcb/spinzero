@@ -53,6 +53,9 @@ export const ipc = {
   crunchNow: () => invoke<void>("crunch_now"),
   getCrunchStatus: () => invoke<CrunchStatus>("get_crunch_status"),
   listExtractions: () => invoke<ExtractionMeta[]>("list_extractions"),
+  /** The revision the KiCad design folder currently corresponds to (the history
+   *  graph's "KiCad files" marker) — independent of the viewer's active revision. */
+  getDesignHead: () => invoke<string | null>("get_design_head"),
   labelExtraction: (id: string, label: string | null) =>
     invoke<void>("label_extraction", { id, label }),
   /** Select the revision the viewer shows (null = latest). Pure viewer switch —

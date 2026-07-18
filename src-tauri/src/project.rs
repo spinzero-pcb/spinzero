@@ -548,12 +548,22 @@ impl ProjectHandle {
     /// true, a checkout can overwrite the working tree without losing anything (a
     /// "clean" tree); when false there are un-captured edits and the checkout must warn.
     pub fn source_is_captured(&self, live: &BTreeMap<String, String>) -> bool {
+        self.find_rev_id_by_hashes(live).is_some()
+    }
+
+    /// The id of the revision/checkpoint whose content equals `hashes`, if any.
+    /// Ids are content-derived (same hashing in both stores), so a published
+    /// revision and its local twin resolve to the same id.
+    pub fn find_rev_id_by_hashes(&self, hashes: &BTreeMap<String, String>) -> Option<String> {
         crate::rawstore::list_revisions(&self.project_dir)
-            .iter()
-            .any(|r| &r.source_hashes == live)
-            || crate::checkpoints::list_checkpoints(&self.project_dir)
-                .iter()
-                .any(|r| &r.source_hashes == live)
+            .into_iter()
+            .find(|r| &r.source_hashes == hashes)
+            .or_else(|| {
+                crate::checkpoints::list_checkpoints(&self.project_dir)
+                    .into_iter()
+                    .find(|r| &r.source_hashes == hashes)
+            })
+            .map(|r| r.id)
     }
 
     /// The effective revision id served to the viewer. None if nothing has been

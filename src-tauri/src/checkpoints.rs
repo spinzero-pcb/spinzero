@@ -95,6 +95,10 @@ pub fn snapshot_local(
     if let Some(existing) = find_checkpoint(project_dir, &id) {
         return Ok(existing);
     }
+    // Never record a revision as its own parent (a forced re-crunch of content that
+    // already exists as a synced revision — but not as a local checkpoint — would
+    // otherwise self-loop the DAG).
+    let parent = parent.filter(|p| *p != id);
     let lamport = rawstore::next_lamport(&root_dir, CHECKPOINTS_PREFIX);
     rawstore::append_create_event(
         &checkpoints_log(&root_dir),
@@ -326,6 +330,24 @@ mod tests {
         assert_eq!(find_checkpoint(&proj, &cp.id).unwrap().label.as_deref(), Some("bringup v2"));
         set_label_local(&proj, "alice", &cp.id, None).unwrap();
         assert_eq!(find_checkpoint(&proj, &cp.id).unwrap().label, None);
+        let _ = fs::remove_dir_all(&proj);
+        let _ = fs::remove_dir_all(checkpoints_root(&proj));
+    }
+
+    #[test]
+    fn snapshot_never_records_itself_as_parent() {
+        let proj = temp_project("selfparent");
+        let src = proj.join("src");
+        fs::create_dir_all(&src).unwrap();
+        fs::write(src.join("a.kicad_sch"), b"v1").unwrap();
+        let cp1 = snapshot_local(&proj, &src, &hashes(&src), "a", &GitInfo::default(), None).unwrap();
+        // Re-snapshotting identical content with itself as the candidate parent (a
+        // forced re-crunch whose local twin was deleted) must not self-loop the DAG.
+        delete_local(&proj, &cp1.id).unwrap();
+        let cp2 =
+            snapshot_local(&proj, &src, &hashes(&src), "a", &GitInfo::default(), Some(&cp1.id)).unwrap();
+        assert_eq!(cp2.id, cp1.id, "content id is stable");
+        assert!(cp2.parents.is_empty(), "self-parent dropped");
         let _ = fs::remove_dir_all(&proj);
         let _ = fs::remove_dir_all(checkpoints_root(&proj));
     }

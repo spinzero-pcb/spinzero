@@ -22,6 +22,9 @@ interface ProjectState {
   extractions: ExtractionMeta[];
   /** The extraction shown in the viewer; null = latest/live. */
   activeExtraction: string | null;
+  /** The revision the KiCad design folder currently matches (null = unknown) —
+   *  shown as the "KiCad files" marker so viewing-vs-disk divergence is visible. */
+  designHead: string | null;
   /** Read-only mode: the project's design folder is missing on this machine. */
   designPathMissing: boolean;
   busy: boolean;
@@ -108,6 +111,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   layers: [],
   extractions: [],
   activeExtraction: null,
+  designHead: null,
   designPathMissing: false,
   busy: false,
   errorMsg: null,
@@ -136,7 +140,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     set({ busy: true, errorMsg: null });
     try {
       resetForNewProject();
-      set({ summary: null, sheets: [], layers: [], extractions: [] });
+      set({ summary: null, sheets: [], layers: [], extractions: [], designHead: null });
       const project = await ipc.openProject(projectDir);
       set(adopt(project));
       // A failed recents refresh must not report the (already-open) project as failed —
@@ -177,7 +181,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     set({ busy: true, errorMsg: null });
     try {
       resetForNewProject();
-      set({ summary: null, sheets: [], layers: [], extractions: [] });
+      set({ summary: null, sheets: [], layers: [], extractions: [], designHead: null });
       const project = await ipc.createProject(args);
       set({ ...adopt(project), recents: await ipc.getRecentProjects() });
       // First extraction runs in the background; the design loads off the crunch
@@ -304,16 +308,17 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     const dir = get().project?.project_dir;
     for (let attempt = 0; attempt < 6; attempt++) {
       try {
-        const [summary, sheets, layers, extractions] = await Promise.all([
+        const [summary, sheets, layers, extractions, designHead] = await Promise.all([
           ipc.getProjectSummary(),
           ipc.listSheets(),
           ipc.listLayers(),
           ipc.listExtractions(),
+          ipc.getDesignHead(),
         ]);
         // The user may have switched projects while we awaited; a stale iteration of this
         // loop (it can run up to ~10s) must not overwrite the new project's rows.
         if (get().project?.project_dir !== dir) return;
-        set({ summary, sheets, layers, extractions: extractions.map(normalizeExtraction) });
+        set({ summary, sheets, layers, extractions: extractions.map(normalizeExtraction), designHead });
         if (summary && sheets.length > 0) {
           void useSelectionStore.getState().loadPinned(); // item 22: per-project highlights
           return;

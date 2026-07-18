@@ -35,6 +35,7 @@ export function HistoryGraph() {
 
   const extractions = useProjectStore((s) => s.extractions);
   const activeExtraction = useProjectStore((s) => s.activeExtraction);
+  const designHead = useProjectStore((s) => s.designHead);
   const setActiveExtraction = useProjectStore((s) => s.setActiveExtraction);
   const updateDesignFiles = useProjectStore((s) => s.updateDesignFiles);
   const designPathMissing = useProjectStore((s) => s.designPathMissing);
@@ -333,6 +334,17 @@ export function HistoryGraph() {
                         <>
                           <span className="dag-name">{rowText(r)}</span>
                           {r.id === activeId && <span className="rev-latest-tag">viewing</span>}
+                          {/* Where the on-disk KiCad files actually are — may differ from
+                              "viewing" (view-only switches never touch the disk), and new
+                              edits made in KiCad will branch from HERE. */}
+                          {r.id === designHead && (
+                            <span
+                              className="rev-latest-tag rev-kicad-tag"
+                              title="The KiCad files on disk match this revision — edits made in KiCad will continue from here"
+                            >
+                              KiCad files
+                            </span>
+                          )}
                           {localOnly && <span className="rev-badge rev-local">local</span>}
                           {r.hidden && <span className="rev-badge rev-hidden-badge">deleted</span>}
                           {r.tags.map((t) => (
