@@ -34,6 +34,7 @@ import { isTypingTarget, resolveKey } from "./lib/keymap";
 import type { Selection } from "./lib/design";
 import { ipc, onCrunchEvent } from "./lib/ipc";
 import { checkForUpdates } from "./lib/updater";
+import { IconFullscreen, IconFullscreenExit } from "./ui/icons";
 
 /** Cross-probing into the PCB activates the copper layer that carries the
  *  selection (net: most routed length; component/pin: its board side). */
@@ -79,6 +80,8 @@ export default function App() {
   const loadSettings = useSettingsStore((s) => s.load);
   const view = useViewStore((s) => s.view);
   const setView = useViewStore((s) => s.setView);
+  const fullscreen = useViewStore((s) => s.fullscreen);
+  const toggleFullscreen = useViewStore((s) => s.toggleFullscreen);
   const loadReviews = useReviewStore((s) => s.load);
   const diffActive = useDiffStore((s) => s.active);
   const [palette, setPalette] = useState<null | "search" | "commands">(null);
@@ -194,6 +197,13 @@ export default function App() {
           sel.setSelection(null, "pcb");
           return;
         }
+      }
+      // Esc leaves full screen once the view-local Esc handlers above have had their
+      // turn (clearing a selection/measurement takes priority over exiting).
+      if (e.key === "Escape" && useViewStore.getState().fullscreen) {
+        e.preventDefault();
+        useViewStore.getState().setFullscreen(false);
+        return;
       }
       const action = resolveKey(e, keymap ?? "kicad");
       if (!action) return;
@@ -338,7 +348,11 @@ export default function App() {
   }
 
   return (
-    <div className={`app ${view === "bom" ? "app--bom" : ""}`}>
+    <div
+      className={`app ${view === "bom" ? "app--bom" : ""} ${
+        fullscreen ? "app--fullscreen" : ""
+      }`}
+    >
       <MenuBar />
       <ActivityBar />
       <aside className="side-panel">
@@ -381,6 +395,15 @@ export default function App() {
               {v.label}
             </button>
           ))}
+          <button
+            className={`view-fullscreen-btn ${fullscreen ? "on" : ""}`}
+            title={fullscreen ? "Exit full screen (Esc)" : "Full screen"}
+            aria-label={fullscreen ? "Exit full screen" : "Full screen"}
+            aria-pressed={fullscreen}
+            onClick={() => toggleFullscreen()}
+          >
+            {fullscreen ? <IconFullscreenExit size={16} /> : <IconFullscreen size={16} />}
+          </button>
         </div>
         <div className={`canvas-area ${view === "pcb" ? "pcb" : ""} ${diffActive ? "diffing" : ""}`}>
           {/* Diff-mode banner (visual-diff §3): view-global — sits above whichever

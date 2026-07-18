@@ -48,6 +48,21 @@ button {
   grid-template-columns: var(--activitybar-w) var(--sidepanel-w) 1fr 0;
 }
 
+/* Full-screen mode collapses the left rail (activity bar + review/changes panel)
+   so the canvas takes the freed width. The elements stay mounted (their state
+   survives the toggle) but are clipped to zero width. The right panel is kept. */
+.app--fullscreen {
+  grid-template-columns: 0 0 1fr var(--rightpanel-w);
+}
+.app--fullscreen.app--bom {
+  grid-template-columns: 0 0 1fr 0;
+}
+.app--fullscreen .activity-bar,
+.app--fullscreen .side-panel {
+  overflow: hidden;
+  border-right: none;
+}
+
 /* ---------- top menu bar (File menu) ---------- */
 
 .menu-bar {
@@ -1370,6 +1385,18 @@ button {
 
 .view-tab:hover { color: var(--fg-0); }
 .view-tab.active { color: var(--fg-0); border-bottom-color: var(--accent); }
+
+/* Full-screen toggle sits at the far right of the tab strip. */
+.view-fullscreen-btn {
+  margin-left: auto;
+  display: grid;
+  place-items: center;
+  width: 30px;
+  color: var(--fg-2);
+  border-radius: var(--radius-1);
+}
+.view-fullscreen-btn:hover { color: var(--fg-0); background: var(--bg-3); }
+.view-fullscreen-btn.on { color: var(--accent); }
 
 .view-fill {
   position: absolute;
