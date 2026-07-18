@@ -16,7 +16,7 @@ import { IconClose, IconComment, IconCopy, IconFit, IconRuler, IconSheet, IconTr
 import type { CommentAnchor } from "../../lib/types";
 import type { PcbGeometry, PcbTextDef } from "../../lib/pcbGeometry";
 import { DIFF_HATCH_PERIOD_CSS, PcbGlRenderer, netLabelRows, type BBox, type Camera, type DiffFlags, type ObjectState } from "./glRenderer";
-import { buildDiffVisibility, changeExtent, computeDiffFlags, DIFF_OWNED_BASE, unionExtent } from "./glDiff";
+import { buildDiffVisibility, changeCode, changeExtent, computeDiffFlags, unionExtent } from "./glDiff";
 import type { Change } from "../../lib/diff";
 import { isTypingTarget } from "../../lib/keymap";
 import { useDiffStore } from "../../stores/diffStore";
@@ -578,7 +578,7 @@ export function PcbGlView({ visible }: { visible: boolean }) {
     const k = doc?.changes.findIndex((c) => c.id === id) ?? -1;
     let box: BBox | null = null;
     if (k >= 0) {
-      const code = k + DIFF_OWNED_BASE;
+      const code = changeCode(k);
       box = unionExtent(
         changeExtent(data.geomA, data.flagsA, code),
         changeExtent(data.geomB, data.flagsB, code),

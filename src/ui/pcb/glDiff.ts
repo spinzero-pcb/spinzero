@@ -37,6 +37,13 @@ export const DIFF_ORPHAN = 1;
 /** First flag value that encodes an owning change (`changes[flag - DIFF_OWNED_BASE]`). */
 export const DIFF_OWNED_BASE = 2;
 
+/** The single definition of the flag-code ↔ change positional contract: `changes[index]`
+ *  is owned by this code. The owner index, the visibility mask, and the extent lookup all
+ *  go through here so the encoding lives in exactly one place. */
+export function changeCode(index: number): number {
+  return index + DIFF_OWNED_BASE;
+}
+
 /** Fixed-point encode of an mm coordinate (extractor rounds to 1e-4). */
 const q = (v: number) => Math.round(v * 1e4);
 
@@ -131,7 +138,7 @@ function buildOwnerIndex(changes: Change[]): OwnerIndex {
   const idx: OwnerIndex = { routing: new Map(), viaNet: new Map(), zone: new Map(), comp: new Map(), silk: new Map(), text: [] };
   const key = (layer: string, net: string) => `${layer}\u{0}${net}`;
   changes.forEach((c, i) => {
-    const code = i + DIFF_OWNED_BASE;
+    const code = changeCode(i);
     const pcb = c.anchors.pcb;
     if (c.group === "routing" && pcb?.vias) {
       idx.viaNet.set(pcb.net ?? "", code);
@@ -150,7 +157,7 @@ function buildOwnerIndex(changes: Change[]): OwnerIndex {
   // Placement rows overwrite component rows for the same refdes (see OwnerIndex.comp).
   changes.forEach((c, i) => {
     const ref = c.anchors.pcb?.comp;
-    if (c.group === "placement" && ref) idx.comp.set(ref, i + DIFF_OWNED_BASE);
+    if (c.group === "placement" && ref) idx.comp.set(ref, changeCode(i));
   });
   return idx;
 }
@@ -284,7 +291,7 @@ export function buildDiffVisibility(changes: Change[], hidden: ReadonlySet<strin
   const vis = new Uint8Array(DIFF_OWNED_BASE + changes.length);
   vis[DIFF_ORPHAN] = hidden.size === 0 ? 1 : 0;
   changes.forEach((c, i) => {
-    vis[i + DIFF_OWNED_BASE] = hidden.has(c.id) ? 0 : 1;
+    vis[changeCode(i)] = hidden.has(c.id) ? 0 : 1;
   });
   return vis;
 }
