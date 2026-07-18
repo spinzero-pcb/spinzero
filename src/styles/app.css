@@ -1877,6 +1877,25 @@ button {
   border: 1px solid rgba(0, 0, 0, 0.4);
 }
 
+/* ---------- Net Classes panel ---------- */
+.pcb-nc-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 2px var(--sp-1) var(--sp-1);
+  font-size: var(--fs-0);
+}
+.pcb-nc-clear {
+  font-size: var(--fs-0);
+  padding: 1px var(--sp-2);
+}
+.pcb-ncrow .tree-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.pcb-ncrow .pcb-nc-count { flex: none; font-variant-numeric: tabular-nums; }
+.pcb-ncrow.on {
+  background: var(--accent-dim);
+  color: var(--fg-0);
+}
+
 /* The Appearance panel now lives in the global RIGHT shell column (outside the
    canvas area), so the floating card no longer needs to clear it. */
 

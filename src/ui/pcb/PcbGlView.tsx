@@ -7,6 +7,8 @@ import {
   type Highlight,
 } from "../../stores/selectionStore";
 import { usePcbViewStore } from "../../stores/pcbViewStore";
+import { useNetClassStore } from "../../stores/netClassStore";
+import { listNetClasses, netClassColor } from "../../lib/netClasses";
 import { useReviewStore } from "../../stores/reviewStore";
 import { useMeasureStore } from "../../stores/measureStore";
 import { useViewStore } from "../../stores/viewStore";
@@ -357,6 +359,7 @@ export function PcbGlView({ visible }: { visible: boolean }) {
   const resetForLayers = usePcbViewStore((s) => s.resetForLayers);
   const highlights = useSelectionStore((s) => s.highlights);
   const pinned = useSelectionStore((s) => s.pinned);
+  const netClassSel = useNetClassStore((s) => s.selected);
   // Comment mode (C): a crosshair signals you can click an object to anchor a comment.
   const armed = useReviewStore((s) => s.armed);
   // Measure mode (Ctrl+Shift+M): crosshair + click-A/click-B ruler on the overlay.
@@ -443,8 +446,11 @@ export function PcbGlView({ visible }: { visible: boolean }) {
   const edgeIndex = useRef<EdgeIndex | null>(null);
 
   // New design may change the layer set; reset hides/active (shared with SVG view).
+  // Also drop any net-class isolation — its snapshot refers to the old layer set,
+  // so restoring it would clobber the fresh defaults (reset() leaves layers alone).
   useEffect(() => {
     resetForLayers(indexes?.layers.map((l) => l.name) ?? []);
+    useNetClassStore.getState().reset();
   }, [indexes, resetForLayers]);
 
   // ---- selection → renderer mask -----------------------------------------
@@ -454,6 +460,23 @@ export function PcbGlView({ visible }: { visible: boolean }) {
     const combined = [...sel.pinned.filter((p) => !isSel(p)), ...sel.highlights];
     const nets: { id: number; color: [number, number, number]; emphasize: boolean }[] = [];
     const comps: { id: number; color: [number, number, number] }[] = [];
+    // Net-class highlights first, so an explicit click/pin (below) wins on overlap
+    // (the mask is last-write-per-net). Each class recolours its nets in its own
+    // colour (emphasize:false — a flat class tint, not the native-layer emphasis).
+    const classSel = useNetClassStore.getState().selected;
+    if (classSel.length) {
+      const idx = useDesignStore.getState().indexes;
+      const ordered = listNetClasses(idx).map((c) => c.name);
+      const colorByClass = new Map(
+        classSel.map((name) => [name, resolveCssColor(netClassColor(name, ordered))]),
+      );
+      for (const [name, net] of Object.entries(idx?.nets ?? {})) {
+        const color = colorByClass.get(net.class || "Default");
+        if (!color) continue;
+        const i = r.netIndexByName.get(name);
+        if (i != null) nets.push({ id: i, color, emphasize: false });
+      }
+    }
     for (const h of combined) {
       // resolveCssColor handles hex, rgb() and var(--x) so any future colour source is
       // safe (the old hex-only parser fell back to white on anything else).
@@ -1324,6 +1347,16 @@ export function PcbGlView({ visible }: { visible: boolean }) {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [highlights, pinned]);
+
+  // Net-class selection changes the recolour mask (and the isolation store already
+  // drove the layer hides) — resync the renderer without touching the camera.
+  useEffect(() => {
+    const r = rendererRef.current;
+    if (!r) return;
+    syncSelection(r);
+    dirty.current = true;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [netClassSel]);
 
   // First reveal fits; later reveals keep the camera.
   useEffect(() => {

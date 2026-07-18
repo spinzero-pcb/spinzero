@@ -23,6 +23,7 @@ import { usePcbViewStore } from "./stores/pcbViewStore";
 import { useCrunchStore } from "./stores/crunchStore";
 import { useDesignStore } from "./stores/designStore";
 import { useSelectionStore } from "./stores/selectionStore";
+import { useNetClassStore } from "./stores/netClassStore";
 import { useSettingsStore } from "./stores/settingsStore";
 import { useViewStore, type MainView } from "./stores/viewStore";
 import { useReviewStore } from "./stores/reviewStore";
@@ -191,10 +192,12 @@ export default function App() {
       // highlights survive — they're deliberate, persistent marks.
       if (e.key === "Escape" && useViewStore.getState().view === "pcb") {
         const sel = useSelectionStore.getState();
-        if (sel.highlights.length || sel.selection) {
+        const nc = useNetClassStore.getState();
+        if (sel.highlights.length || sel.selection || nc.selected.length) {
           e.preventDefault();
           sel.setHighlights([], "pcb");
           sel.setSelection(null, "pcb");
+          nc.clear(); // also drops net-class isolation + restores the layer view
           return;
         }
       }

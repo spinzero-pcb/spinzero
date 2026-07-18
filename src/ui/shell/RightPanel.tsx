@@ -3,8 +3,11 @@ import { useProjectStore } from "../../stores/projectStore";
 import { useViewStore } from "../../stores/viewStore";
 import { SheetsPanel } from "./SheetsPanel";
 import { AppearancePanel } from "../pcb/AppearancePanel";
+import { NetClassPanel } from "../pcb/NetClassPanel";
 import { isWorksheetLayer } from "../../stores/pcbViewStore";
-import { IconChevron, IconLayers, IconSheet } from "../icons";
+import { useDesignStore } from "../../stores/designStore";
+import { listNetClasses } from "../../lib/netClasses";
+import { IconChevron, IconLayers, IconSheet, IconTag } from "../icons";
 
 // The RIGHT panel is the per-view navigator/tools (docs/phase2-ui-plan.md §1):
 // `Sheets` on the schematic (moved off the old left Explorer), `Appearance` on the
@@ -46,6 +49,8 @@ export function RightPanel() {
   const sheets = useProjectStore((s) => s.sheets);
   const layers = useProjectStore((s) => s.layers);
   const view = useViewStore((s) => s.view);
+  const indexes = useDesignStore((s) => s.indexes);
+  const netClasses = view === "pcb" ? listNetClasses(indexes) : [];
 
   if (!project) return null;
 
@@ -71,6 +76,16 @@ export function RightPanel() {
             count={layers.filter((l) => !isWorksheetLayer(l)).length}
           >
             <AppearancePanel />
+          </Section>
+        )}
+        {view === "pcb" && netClasses.length > 0 && (
+          <Section
+            title="Net Classes"
+            icon={<IconTag size={13} />}
+            count={netClasses.length}
+            defaultOpen={false}
+          >
+            <NetClassPanel />
           </Section>
         )}
         {/* BOM has no right panel — the whole <aside> is hidden on BOM (see App.tsx). */}
