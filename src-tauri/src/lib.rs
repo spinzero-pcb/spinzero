@@ -177,6 +177,11 @@ fn unique_tmp_dir(prefix: &str, rev_id: &str) -> PathBuf {
     std::env::temp_dir().join(format!("{prefix}_{}_{}_{}", std::process::id(), rev_id, n))
 }
 
+/// Surfaced by the commands that would trigger a fresh extraction (viewer switch, diff
+/// prepare) while a crunch is staging into cache/<key>.tmp — blocking avoids the
+/// remove_dir_all race on the shared staging dir. The frontend toasts it verbatim.
+const EXTRACTION_BUSY: &str = "extraction in progress — try again in a moment";
+
 /// Ensure the runtime cache holds `rev`'s extracted bundle, extracting on a miss —
 /// from the live design folder when it still matches the revision, else by
 /// materializing the revision's raw source into a temp dir and extracting that.
@@ -464,6 +469,14 @@ async fn set_active_extraction(
     id: Option<String>,
 ) -> Result<(), String> {
     let handle = current_project(&state)?;
+    // A viewer switch to an un-cached revision re-extracts into cache/<key>.tmp — the same
+    // staging path a live crunch uses — so ensure_lazy's remove_dir_all would race the
+    // crunch (sidecar 'os error 3'). Bail while a crunch runs; the switch is retried once
+    // it settles. (Restores the 'Extraction in progress' guard the pure-viewer-switch path
+    // dropped; the crunch's own re-extract lands the latest revision anyway.)
+    if handle.crunch_running.load(Ordering::SeqCst) {
+        return Err(EXTRACTION_BUSY.into());
+    }
     if let Some(rid) = id.as_deref() {
         let resolved = handle.resolve_rev(rid).ok_or_else(|| format!("unknown revision {rid}"))?;
         view_resolved(&handle, Some(rid), &resolved)?;
@@ -697,6 +710,12 @@ fn pcb_source_file(hashes: &std::collections::BTreeMap<String, String>) -> Optio
 #[tauri::command]
 fn prepare_diff(state: State<AppState>, rev_a: String, rev_b: String) -> Result<DiffHandle, String> {
     let handle = current_project(&state)?;
+    // Same staging-dir race as set_active_extraction: prepare_diff materializes both
+    // revisions' caches (ensure_revision_cache below), which shares cache/<key>.tmp with a
+    // live crunch. Don't start while one runs.
+    if handle.crunch_running.load(Ordering::SeqCst) {
+        return Err(EXTRACTION_BUSY.into());
+    }
 
     let resolved_a = handle
         .resolve_rev(&rev_a)
