@@ -168,6 +168,14 @@ button {
   color: var(--fg-2);
   font-size: var(--fs-0);
 }
+/* Right-aligned shortcut hint on a menu entry (e.g. "Full Screen   F11"). */
+.menu-entry .menu-shortcut {
+  margin-left: auto;
+  padding-left: var(--sp-3);
+  color: var(--fg-2);
+  font-size: var(--fs-0);
+  font-family: var(--font-mono);
+}
 
 .menu-sub {
   position: absolute;
@@ -1236,6 +1244,44 @@ button {
 .about-link { font-size: var(--fs-1); color: var(--accent); text-decoration: none; cursor: pointer; }
 .about-link:hover { text-decoration: underline; }
 .about-actions { display: flex; justify-content: flex-end; gap: var(--sp-2); }
+
+/* Keyboard Shortcuts dialog. */
+.shortcuts-card { width: min(480px, 92vw); max-height: 82vh; overflow-y: auto; gap: var(--sp-3); }
+.shortcuts-group { display: flex; flex-direction: column; gap: 2px; }
+.shortcuts-scope {
+  font-size: var(--fs-0);
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--fg-2);
+  margin-bottom: 2px;
+}
+.shortcuts-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  padding: 3px 0;
+  font-size: var(--fs-1);
+}
+.shortcuts-action { color: var(--fg-1); min-width: 0; }
+.shortcuts-keys { display: flex; align-items: center; gap: var(--sp-2); flex: none; }
+.shortcuts-alt { display: inline-flex; align-items: center; gap: var(--sp-2); }
+.shortcuts-or { color: var(--fg-2); font-size: var(--fs-0); }
+.kbd-combo { display: inline-flex; gap: 3px; }
+.kbd {
+  font-family: var(--font-mono);
+  font-size: var(--fs-0);
+  background: var(--bg-3);
+  border: 1px solid var(--border-1);
+  border-bottom-width: 2px;
+  border-radius: var(--radius-1);
+  padding: 1px 5px;
+  color: var(--fg-0);
+  min-width: 16px;
+  text-align: center;
+}
+.shortcuts-note { margin-top: var(--sp-1); }
 
 /* Appearance dialog — accent-colour picker (reuses the .ctx-swatch swatches). */
 .accent-picker { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-2); padding: var(--sp-1) 0; }

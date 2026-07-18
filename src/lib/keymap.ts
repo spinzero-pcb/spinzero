@@ -11,7 +11,9 @@ export type KeyAction =
   | "crossProbe"
   | "zoomIn"
   | "zoomOut"
-  | "measure";
+  | "measure"
+  | "fullscreen"
+  | "shortcuts";
 
 /** True when the event targets a text-entry surface — keymaps must stay out. */
 export function isTypingTarget(e: KeyboardEvent): boolean {
@@ -38,10 +40,66 @@ export function resolveKey(e: KeyboardEvent, preset: KeymapPreset): KeyAction | 
   if ((e.ctrlKey || e.metaKey) && e.shiftKey && !e.altKey && k === "m") return "measure";
   if (e.ctrlKey || e.metaKey || e.altKey) return null;
 
+  // Full screen (F11) + the shortcuts cheat-sheet (?) are modifier-free single keys.
+  if (k === "f11") return "fullscreen";
+  if (k === "?") return "shortcuts";
+
   if (preset === "kicad" && k === "home") return "fit";
+
+  // Zoom: PgUp/PgDn (matches the PCB toolbar tooltips) and +/- for parity with KiCad.
+  // These were advertised on the toolbar but never wired — pressing them did nothing.
+  if (k === "pageup" || k === "+" || k === "=") return "zoomIn";
+  if (k === "pagedown" || k === "-") return "zoomOut";
 
   // Shared single keys.
   if (k === "x") return "crossProbe";
   if (k === "o") return "overview";
   return null;
+}
+
+// ---------------------------------------------------------------------------
+// Shortcut reference (single source of truth for the Keyboard Shortcuts dialog
+// and the menu hints). "Mod" renders as ⌘ on macOS, Ctrl elsewhere. Each entry
+// may list several alternative combos (e.g. PgUp OR +).
+// ---------------------------------------------------------------------------
+
+export type ShortcutScope = "Global" | "Schematic" | "PCB";
+
+export interface ShortcutDef {
+  /** Alternative key combos; each inner array is one combo of key tokens. */
+  combos: string[][];
+  action: string;
+  scope: ShortcutScope;
+}
+
+export const SHORTCUTS: ShortcutDef[] = [
+  { combos: [["Mod", "F"]], action: "Search nets & components", scope: "Global" },
+  { combos: [["Mod", "P"]], action: "Command palette", scope: "Global" },
+  { combos: [["X"]], action: "Cross-probe schematic ↔ PCB", scope: "Global" },
+  { combos: [["Home"]], action: "Fit to screen", scope: "Global" },
+  { combos: [["PgUp"], ["+"]], action: "Zoom in", scope: "Global" },
+  { combos: [["PgDn"], ["−"]], action: "Zoom out", scope: "Global" },
+  { combos: [["F11"]], action: "Toggle full screen", scope: "Global" },
+  { combos: [["Esc"]], action: "Clear selection / exit the current mode", scope: "Global" },
+  { combos: [["?"]], action: "Show this shortcuts list", scope: "Global" },
+
+  { combos: [["O"]], action: "Toggle the all-sheets overview", scope: "Schematic" },
+  { combos: [["Alt", "←"]], action: "Navigate back", scope: "Schematic" },
+  { combos: [["Alt", "→"]], action: "Navigate forward", scope: "Schematic" },
+
+  { combos: [["Mod", "Shift", "M"]], action: "Measure tool", scope: "PCB" },
+  { combos: [["C"]], action: "Comment mode", scope: "PCB" },
+  { combos: [["Space"]], action: "Measuring: start a new measurement at the cursor", scope: "PCB" },
+  { combos: [["Mod", "C"]], action: "Measuring: copy the readout", scope: "PCB" },
+];
+
+/** True on macOS — swaps the "Mod" token to ⌘ and reorders nothing else. */
+export function isMacPlatform(): boolean {
+  if (typeof navigator === "undefined") return false;
+  return /Mac|iPhone|iPad|iPod/.test(navigator.platform || navigator.userAgent || "");
+}
+
+/** Render a "Mod" token for the running platform (⌘ on macOS, Ctrl elsewhere). */
+export function modToken(mac = isMacPlatform()): string {
+  return mac ? "⌘" : "Ctrl";
 }

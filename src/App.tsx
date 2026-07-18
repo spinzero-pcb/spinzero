@@ -17,6 +17,7 @@ import { PropertiesCard } from "./ui/PropertiesCard";
 import { CheckoutConfirm } from "./ui/CheckoutConfirm";
 import { HistoryGraph } from "./ui/history/HistoryGraph";
 import { Toaster } from "./ui/Toaster";
+import { KeyboardShortcuts, useShortcutsDialog } from "./ui/shell/KeyboardShortcuts";
 import { useToastStore } from "./stores/toastStore";
 import { useProjectStore } from "./stores/projectStore";
 import { usePcbViewStore } from "./stores/pcbViewStore";
@@ -242,6 +243,12 @@ export default function App() {
             useMeasureStore.getState().toggle();
           }
           break;
+        case "fullscreen":
+          useViewStore.getState().toggleFullscreen();
+          break;
+        case "shortcuts":
+          useShortcutsDialog.getState().setOpen(true);
+          break;
         case "crossProbe": {
           // In diff mode, X toggles the FOCUSED change between its schematic and PCB
           // anchors (a both-anchored change is one entry — §5). Falls through to the
@@ -346,6 +353,7 @@ export default function App() {
         </div>
         <StatusBar />
         <Toaster />
+        <KeyboardShortcuts />
       </div>
     );
   }
@@ -464,6 +472,7 @@ export default function App() {
       <CheckoutConfirm />
       <HistoryGraph />
       <Toaster />
+      <KeyboardShortcuts />
     </div>
   );
 }
