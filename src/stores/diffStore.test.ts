@@ -47,7 +47,6 @@ function reset() {
     b: null,
     cacheKeyB: null,
     doc: null,
-    mode: "sideBySide",
     focusedChangeId: null,
     seen: new Set(),
     preparing: false,
@@ -147,28 +146,6 @@ describe("diffStore enter/exit/step/seen", () => {
     expect(s.a).toBeNull();
     expect(s.cacheKeyA).toBeNull();
     expect(s.seen.size).toBe(0);
-  });
-
-  it("next/prev walk the ordered change sequence", async () => {
-    mockIPC((cmd) => {
-      if (cmd === "prepare_diff")
-        return { doc: DOC, path: "p", cache_key_a: "keyA", cache_key_b: "keyB", label_a: "older", label_b: "newer" };
-      throw new Error(cmd);
-    });
-    await useDiffStore.getState().enterDiff("rA", "rB");
-    // Nothing focused on enter; the first `next` lands on the first ordered change.
-    // Ordered walk: ch_2 (comp, sheet1), ch_0 (comp, sheet2), ch_1 (routing).
-    expect(useDiffStore.getState().focusedChangeId).toBeNull();
-    useDiffStore.getState().next();
-    expect(useDiffStore.getState().focusedChangeId).toBe("ch_2");
-    useDiffStore.getState().next();
-    expect(useDiffStore.getState().focusedChangeId).toBe("ch_0");
-    useDiffStore.getState().next();
-    expect(useDiffStore.getState().focusedChangeId).toBe("ch_1");
-    useDiffStore.getState().next(); // clamps at the end
-    expect(useDiffStore.getState().focusedChangeId).toBe("ch_1");
-    useDiffStore.getState().prev();
-    expect(useDiffStore.getState().focusedChangeId).toBe("ch_0");
   });
 
   it("focusChange solos the change; showAllChanges restores the overview", async () => {

@@ -1,7 +1,6 @@
 import { create } from "zustand";
 import { ipc } from "../lib/ipc";
 import {
-  orderedChanges,
   pcbLayerUnion,
   type Change,
   type DiffDoc,
@@ -16,10 +15,9 @@ import { useToastStore } from "./toastStore";
 import { pcbNav, diffPaint } from "../ui/canvas/navigator";
 import type { ExtractionMeta } from "../lib/types";
 
-/** The side-by-side rendering mode. `combined` (single-canvas ghost overlay) is
- *  optional per plan §4 and NOT shipped in this change — the type keeps the door open
- *  but the store only ever holds `sideBySide`, and no dead toggle is rendered. */
-export type DiffMode = "sideBySide";
+// Rendering is side-by-side only. A `combined` (single-canvas ghost overlay) mode is
+// optional per plan §4 and NOT shipped in this change; when it lands it needs a stored
+// mode field + a toggle, but until then the store carries no dead state for it.
 
 /** localStorage key for the blink toggle — a remembered per-user preference (the
  *  same tier as BottomPanel's height; not project state). */
@@ -35,7 +33,6 @@ interface DiffState {
   b: DiffSide | null;
   cacheKeyB: string | null;
   doc: DiffDoc | null;
-  mode: DiffMode;
   /** Blink the changed copper (added/removed pulse in opposite phases over the stable
    *  grey base). A remembered user preference (localStorage), not per-session. */
   blink: boolean;
@@ -70,8 +67,6 @@ interface DiffState {
   exitDiff: () => void;
   swap: () => Promise<void>;
   focusChange: (id: string) => void;
-  next: () => void;
-  prev: () => void;
   markSeen: (id: string, seen?: boolean) => void;
   markGroupSeen: (ids: string[], seen?: boolean) => void;
   /** Fetch an A-side sheet SVG (cache-relative path), memoised per session. */
@@ -133,7 +128,6 @@ export const useDiffStore = create<DiffState>((set, get) => ({
   b: null,
   cacheKeyB: null,
   doc: null,
-  mode: "sideBySide",
   blink: localStorage.getItem(BLINK_STORE_KEY) === "1",
   hideZones: false,
   hiddenChangeIds: new Set(),
@@ -298,9 +292,6 @@ export const useDiffStore = create<DiffState>((set, get) => ({
     }
   },
 
-  next: () => step(get, set, +1),
-  prev: () => step(get, set, -1),
-
   markSeen: (id, seen = true) =>
     set((s) => {
       const next = new Set(s.seen);
@@ -378,23 +369,6 @@ export const useDiffStore = create<DiffState>((set, get) => ({
     return p;
   },
 }));
-
-/** Advance/retreat the stepper through the ordered change walk, focusing the target. */
-function step(
-  get: () => DiffState,
-  _set: (partial: Partial<DiffState>) => void,
-  dir: 1 | -1,
-) {
-  const { doc, focusedChangeId } = get();
-  if (!doc) return;
-  const order = orderedChanges(doc.changes);
-  if (order.length === 0) return;
-  const cur = order.findIndex((c) => c.id === focusedChangeId);
-  const nextIdx = cur < 0 ? (dir > 0 ? 0 : order.length - 1) : cur + dir;
-  const clamped = Math.max(0, Math.min(order.length - 1, nextIdx));
-  const target = order[clamped];
-  if (target) get().focusChange(target.id);
-}
 
 /** Show the union of layers the given changes land on ("relevant layers"), hiding the
  *  rest — the whole changeset on enter / show-all, the visible subset after shift-click
