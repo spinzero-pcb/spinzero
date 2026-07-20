@@ -165,13 +165,14 @@ export const useDiffStore = create<DiffState>((set, get) => ({
       const latestId = extractions[0]?.id ?? null;
       const activeNow = activeExtraction ?? latestId;
       if (activeNow !== newer) {
-        // setActiveExtraction silently no-ops while busy and swallows IPC errors, so a
-        // bare await could leave the canvases on the pre-diff revision while the diff
-        // doc/overview describe B (selections, cross-probe, comments anchored wrong).
-        // Bail on a failed pin into the error path rather than compare the wrong revision.
-        const pinned = await setActiveExtraction(newer);
-        if (token !== diffSeq) return; // superseded while pinning — drop this prepare
-        if (!pinned) throw new Error("couldn’t switch to the comparison revision");
+        await setActiveExtraction(newer);
+        // setActiveExtraction swallows failures (it toasts) and silently no-ops while
+        // `busy` — verify the pin actually landed, or the compare would render a B
+        // canvas showing a different revision than the doc claims.
+        const nowActive = useProjectStore.getState().activeExtraction ?? latestId;
+        if (nowActive !== newer) {
+          throw new Error("couldn’t switch the viewer to the newer revision — try again in a moment");
+        }
       }
       if (token !== diffSeq) return; // superseded while pinning — drop this prepare
 

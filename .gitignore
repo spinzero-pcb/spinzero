@@ -20,8 +20,6 @@ public/dev-geometry.json
 *.log
 *.code-workspace
 
-*.code-workspace
-
 docs/
 
 # --- Private working files: present locally, never in the public repo ---
