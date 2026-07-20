@@ -525,6 +525,58 @@ fn zone_area_delta_with_threshold() {
 }
 
 #[test]
+fn zone_reshape_at_constant_area() {
+    // A GND pour that re-flows around a re-routed track keeps its total area but shifts
+    // a copper notch. The area-delta test is blind to it; the shape (symmetric-diff)
+    // test must still flag one zone change. Same 10×10 square, but the 2×2 top-edge
+    // notch sits on the left in A and on the right in B → area delta 0, A △ B = 8 mm².
+    let make = |notch_x0: f64| Geometry {
+        layers: vec![GeomLayer { name: "F.Cu".into(), role: "copper".into() }],
+        nets: vec![String::new(), "GND".into()],
+        zones: vec![GeomZone {
+            layer: 0,
+            net: 1,
+            filled: true,
+            pts: vec![
+                0.0, 0.0, 10.0, 0.0, 10.0, 10.0, // bottom + right edge
+                notch_x0 + 2.0, 10.0, // step down into the notch
+                notch_x0 + 2.0, 8.0,
+                notch_x0, 8.0,
+                notch_x0, 10.0, // back up out of the notch
+                0.0, 10.0, // left edge
+            ],
+        }],
+        ..Default::default()
+    };
+    let mut a = bundle(empty_indexes());
+    a.geometry = Some(make(1.0)); // notch at x ∈ [1, 3]
+    let mut b = bundle(empty_indexes());
+    b.geometry = Some(make(7.0)); // notch at x ∈ [7, 9]
+
+    let doc = diff_bundles(&a, &b, &changed(&["board.kicad_pcb"]));
+    let z: Vec<_> = doc.changes.iter().filter(|c| c.group == Group::Zone).collect();
+    assert_eq!(z.len(), 1, "reshaped pour at constant area, got {z:?}");
+    assert_eq!(z[0].kind, Kind::Modified);
+    assert!(z[0].title.contains("GND") && z[0].title.contains("F.Cu"), "{}", z[0].title);
+    assert!(z[0].title.contains("reshaped"), "{}", z[0].title);
+    let pcb = z[0].anchors.pcb.as_ref().expect("pcb anchor");
+    assert_eq!(pcb.net.as_deref(), Some("GND"));
+    assert_eq!(pcb.layers, vec!["F.Cu"]);
+
+    // A pour that only nudged (sub-mm² symmetric difference) must NOT flag: shift the
+    // notch by 0.1 mm → A △ B ≈ 2 × (0.1 × 2) = 0.4 mm², below the floor.
+    let mut a2 = bundle(empty_indexes());
+    a2.geometry = Some(make(1.0));
+    let mut b2 = bundle(empty_indexes());
+    b2.geometry = Some(make(1.1));
+    let doc2 = diff_bundles(&a2, &b2, &changed(&["board.kicad_pcb"]));
+    assert!(
+        !doc2.changes.iter().any(|c| c.group == Group::Zone),
+        "sub-threshold reshape ignored"
+    );
+}
+
+#[test]
 fn sheet_add() {
     let mut a = empty_indexes();
     a.sheets = vec![sheet(1, "root"), sheet(2, "power")];

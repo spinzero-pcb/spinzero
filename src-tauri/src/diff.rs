@@ -428,7 +428,14 @@ const ANGLE_EPS_DEG: f64 = 0.01;
 const NET_RENAME_JACCARD: f64 = 0.7;
 
 /// Zone area deltas below this (mm²) are refill noise, not a change (plan §2, "~1 mm²").
+/// The same floor gates the shape (symmetric-difference) signal — copper that moved by
+/// less than a square millimetre isn't worth a row either.
 const ZONE_AREA_EPS_MM2: f64 = 1.0;
+
+/// Scanline spacing (mm) for the zone shape (symmetric-difference) estimate. Fine enough
+/// to resolve a track-width copper notch; the result only feeds the ~1 mm² threshold, so
+/// sub-notch precision isn't needed.
+const ZONE_SCAN_STEP_MM: f64 = 0.05;
 
 // ================================================================= entry point
 
@@ -1983,38 +1990,71 @@ fn hash_prim(kind: &str, layer: &str, net: &str, coords: &[f64], width: f64) -> 
 
 // ================================================================ zone diff
 
-/// Zone (copper pour) diff per (layer, net): filled-area delta with a noise threshold.
-/// Comparing fill polygons vertex-by-vertex is refill jitter, so we compare total area.
+/// Zone (copper pour) diff per (layer, net), on two signals both gated by the same
+/// ~1 mm² noise floor:
+///   • area delta — a pour added / removed / grown / shrunk.
+///   • shape      — a pour that kept its area but RE-FLOWED, e.g. around a re-routed
+///     track: the copper notch moves, so the total area barely changes yet the pour is
+///     genuinely different. Area-only comparison is blind to this (the bug this fixes).
+/// Comparing fill polygons vertex-by-vertex would trip on refill jitter, so the shape
+/// signal measures the actual differing area (A △ B) and holds it to the same floor.
 fn diff_zones(a: &Geometry, b: &Geometry, out: &mut Vec<Change>) {
-    let area_a = zone_areas(a);
-    let area_b = zone_areas(b);
+    let polys_a = zone_polys(a);
+    let polys_b = zone_polys(b);
+    let area = |m: &HashMap<(String, String), Vec<&[f64]>>, k: &(String, String)| {
+        m.get(k).map(|ps| ps.iter().map(|p| ring_area(p)).sum::<f64>()).unwrap_or(0.0)
+    };
 
     let mut keys: BTreeSet<(String, String)> = BTreeSet::new();
-    keys.extend(area_a.keys().cloned());
-    keys.extend(area_b.keys().cloned());
+    keys.extend(polys_a.keys().cloned());
+    keys.extend(polys_b.keys().cloned());
 
-    for (layer, net) in keys {
-        let aa = area_a.get(&(layer.clone(), net.clone())).copied().unwrap_or(0.0);
-        let ab = area_b.get(&(layer.clone(), net.clone())).copied().unwrap_or(0.0);
+    for key in keys {
+        let (layer, net) = key.clone();
+        let aa = area(&polys_a, &key);
+        let ab = area(&polys_b, &key);
         let delta = ab - aa;
-        if delta.abs() < ZONE_AREA_EPS_MM2 {
-            continue;
-        }
         let net_disp = if net.is_empty() { "(no net)".to_string() } else { net.clone() };
-        let (kind, verb) = if aa == 0.0 {
-            (Kind::Added, "added on")
-        } else if ab == 0.0 {
-            (Kind::Removed, "removed from")
-        } else if delta > 0.0 {
-            (Kind::Modified, "grew on")
+
+        let (kind, title) = if delta.abs() >= ZONE_AREA_EPS_MM2 {
+            // Area moved enough on its own — the classic add/remove/grow/shrink row.
+            let verb = if aa == 0.0 {
+                "added on"
+            } else if ab == 0.0 {
+                "removed from"
+            } else if delta > 0.0 {
+                "grew on"
+            } else {
+                "shrank on"
+            };
+            let kind = if aa == 0.0 {
+                Kind::Added
+            } else if ab == 0.0 {
+                Kind::Removed
+            } else {
+                Kind::Modified
+            };
+            (kind, format!("{net_disp} pour {verb} {layer} ({:+.0} mm²)", delta))
         } else {
-            (Kind::Modified, "shrank on")
+            // Area held steady — did the pour re-flow? Measure the moved copper. Both
+            // sides present here (a pour that only exists on one side has |delta| ≥ its
+            // whole area, caught above unless it's sub-threshold tiny — then symdiff is
+            // that same tiny area and stays below the floor too).
+            let moved = zone_symdiff_area(
+                polys_a.get(&key).map(Vec::as_slice).unwrap_or(&[]),
+                polys_b.get(&key).map(Vec::as_slice).unwrap_or(&[]),
+            );
+            if moved < ZONE_AREA_EPS_MM2 {
+                continue;
+            }
+            (Kind::Modified, format!("{net_disp} pour reshaped on {layer} (~{:.0} mm²)", moved))
         };
+
         out.push(Change {
             group: Group::Zone,
             kind,
             impact: Impact::Placement,
-            title: format!("{net_disp} pour {verb} {layer} ({:+.0} mm²)", delta),
+            title,
             detail: String::new(),
             anchors: Anchors {
                 schematic: None,
@@ -2033,18 +2073,150 @@ fn diff_zones(a: &Geometry, b: &Geometry, out: &mut Vec<Change>) {
     }
 }
 
-/// (layer-name, net-name) -> total filled area (mm²), summed over filled zones.
-fn zone_areas(g: &Geometry) -> HashMap<(String, String), f64> {
-    let mut m: HashMap<(String, String), f64> = HashMap::new();
+/// (layer-name, net-name) -> the filled fill polygons (each a flat `[x,y,…]` ring),
+/// borrowed from the geometry. Unfilled/keepout zones and rings with fewer than three
+/// points carry no measurable copper and are dropped.
+fn zone_polys(g: &Geometry) -> HashMap<(String, String), Vec<&[f64]>> {
+    let mut m: HashMap<(String, String), Vec<&[f64]>> = HashMap::new();
     for z in &g.zones {
-        if !z.filled {
+        if !z.filled || z.pts.len() < 6 {
             continue;
         }
         let layer = g.layers.get(z.layer as usize).map(|l| l.name.clone()).unwrap_or_default();
         let net = g.nets.get(z.net as usize).cloned().unwrap_or_default();
-        *m.entry((layer, net)).or_insert(0.0) += ring_area(&z.pts);
+        m.entry((layer, net)).or_default().push(z.pts.as_slice());
     }
     m
+}
+
+/// Estimated area (mm²) of the symmetric difference of two fill-polygon sets on one
+/// (layer, net) — the copper filled on exactly one side. Byte-identical polygons appear
+/// on both sides and cancel out of A △ B (fill islands never overlap within a net), so
+/// they're dropped first: a localized re-flow then only measures its own neighbourhood,
+/// and whole-board refill jitter (near-identical rings) nets close to zero. The
+/// remainder is integrated over horizontal scanlines — exact in x (each side's filled
+/// spans come from even-odd pairing of its edge crossings), sampled every
+/// `ZONE_SCAN_STEP_MM` in y.
+fn zone_symdiff_area(pa: &[&[f64]], pb: &[&[f64]]) -> f64 {
+    // Drop polygons present identically on both sides (multiset-aware).
+    let mut bcount: HashMap<u64, usize> = HashMap::new();
+    for p in pb {
+        *bcount.entry(poly_hash(p)).or_insert(0) += 1;
+    }
+    let mut ua: Vec<&[f64]> = Vec::new();
+    for &p in pa {
+        match bcount.get_mut(&poly_hash(p)) {
+            Some(c) if *c > 0 => *c -= 1, // cancels an identical B polygon
+            _ => ua.push(p),
+        }
+    }
+    let mut ub: Vec<&[f64]> = Vec::new();
+    for &p in pb {
+        if let Some(c) = bcount.get_mut(&poly_hash(p)) {
+            if *c > 0 {
+                *c -= 1;
+                ub.push(p);
+            }
+        }
+    }
+    if ua.is_empty() && ub.is_empty() {
+        return 0.0;
+    }
+
+    let (mut ymin, mut ymax) = (f64::INFINITY, f64::NEG_INFINITY);
+    for p in ua.iter().chain(ub.iter()) {
+        let mut i = 1;
+        while i < p.len() {
+            ymin = ymin.min(p[i]);
+            ymax = ymax.max(p[i]);
+            i += 2;
+        }
+    }
+    if ymax <= ymin {
+        return 0.0; // degenerate (zero-height) — no area to sweep
+    }
+
+    let step = ZONE_SCAN_STEP_MM;
+    let mut area = 0.0;
+    let mut y = ymin + step * 0.5;
+    while y < ymax {
+        area += span_symdiff_len(&scan_spans(&ua, y), &scan_spans(&ub, y)) * step;
+        y += step;
+    }
+    area
+}
+
+/// FNV-1a over a fill ring's fixed-point (1e-4 mm) coordinates — the same rounding the
+/// extractor and overlay use, so "identical polygon" means the same thing everywhere.
+fn poly_hash(pts: &[f64]) -> u64 {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for c in pts {
+        let q = (c * 1e4).round() as i64;
+        for &byte in &q.to_le_bytes() {
+            h ^= byte as u64;
+            h = h.wrapping_mul(0x100000001b3);
+        }
+    }
+    h
+}
+
+/// The sorted, pairwise-disjoint x-intervals filled by `polys` at height `y`. Every
+/// polygon is a simple ring and islands are mutually disjoint, so even-odd pairing of
+/// all edge crossings yields the filled spans directly. Edges are counted half-open in y
+/// (`(y1 > y) != (y2 > y)`) so a scanline grazing a shared vertex isn't double-counted.
+fn scan_spans(polys: &[&[f64]], y: f64) -> Vec<(f64, f64)> {
+    let mut xs: Vec<f64> = Vec::new();
+    for p in polys {
+        let n = p.len() / 2;
+        for i in 0..n {
+            let j = (i + 1) % n;
+            let (x1, y1) = (p[2 * i], p[2 * i + 1]);
+            let (x2, y2) = (p[2 * j], p[2 * j + 1]);
+            if (y1 > y) != (y2 > y) {
+                xs.push(x1 + (x2 - x1) * (y - y1) / (y2 - y1));
+            }
+        }
+    }
+    xs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let mut spans = Vec::with_capacity(xs.len() / 2);
+    let mut i = 0;
+    while i + 1 < xs.len() {
+        spans.push((xs[i], xs[i + 1]));
+        i += 2;
+    }
+    spans
+}
+
+/// Total length covered by exactly one of two span lists — the 1-D symmetric difference.
+fn span_symdiff_len(a: &[(f64, f64)], b: &[(f64, f64)]) -> f64 {
+    // Sweep interval endpoints; accumulate length while exactly one side is "inside".
+    let mut ev: Vec<(f64, i8)> = Vec::with_capacity((a.len() + b.len()) * 2);
+    for &(s, e) in a {
+        ev.push((s, 1));
+        ev.push((e, -1));
+    }
+    for &(s, e) in b {
+        ev.push((s, 2));
+        ev.push((e, -2));
+    }
+    ev.sort_by(|x, y| x.0.partial_cmp(&y.0).unwrap_or(std::cmp::Ordering::Equal));
+    let (mut da, mut db) = (0i32, 0i32);
+    let mut last = 0.0;
+    let mut total = 0.0;
+    let mut started = false;
+    for (x, d) in ev {
+        if started && (da > 0) != (db > 0) {
+            total += x - last;
+        }
+        if d.abs() == 1 {
+            da += d.signum() as i32;
+        } else {
+            db += d.signum() as i32;
+        }
+        last = x;
+        started = true;
+    }
+    total
 }
 
 /// Shoelace area of a flat `[x,y,…]` ring (absolute value, mm²).
@@ -2477,7 +2649,9 @@ pub fn diff_key(cache_key_a: &str, cache_key_b: &str) -> String {
     //    component row, layer-function nouns ("Courtyard changed", not "Silk").
     // 6: via changes get one per-net row (`vias` anchor marker) instead of folding
     //    into every spanned layer's "segments" row.
-    const DIFF_ENGINE_VERSION: &str = "6";
+    // 7: zones also diff on shape — a pour that re-flowed at constant area (e.g. around
+    //    a re-routed track) now emits a "reshaped" row the area-only test missed.
+    const DIFF_ENGINE_VERSION: &str = "7";
     let mut h = blake3::Hasher::new();
     h.update(DIFF_ENGINE_VERSION.as_bytes());
     h.update(b" ");
