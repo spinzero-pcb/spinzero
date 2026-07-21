@@ -94,7 +94,7 @@ fn bbox_of(pts: &[Pt]) -> [f64; 4] {
 /// from the component list — get geometry too). Point box at the origin when the
 /// library symbol carries no geometry.
 fn symbol_bbox(sch: &Schematic, sym: &SymbolInstance) -> [f64; 4] {
-    if let Some((min, max)) = sch.lib_for(sym).and_then(|l| l.bbox) {
+    if let Some((min, max)) = sch.lib_for(sym).and_then(|l| l.bbox_for_unit(sym.unit)) {
         let corners = [(min.x, min.y), (max.x, min.y), (max.x, max.y), (min.x, max.y)];
         let pts: Vec<Pt> = corners
             .iter()

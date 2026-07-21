@@ -218,6 +218,41 @@ pub struct LibSymbol {
     pub bbox: Option<(Pt, Pt)>,
 }
 
+impl LibSymbol {
+    /// Body extent for a placed instance of `unit`: only the geometry actually drawn
+    /// for that unit — the unit-common elements (`unit == 0`) plus the unit's own pins,
+    /// graphics and body text, mirroring the SVG renderer's `unit == 0 || unit == sym.unit`
+    /// filter. Falls back to the whole-symbol [`bbox`](Self::bbox) when the symbol
+    /// carries no unit-tagged geometry (so single-unit parts are unaffected).
+    ///
+    /// A multi-unit symbol's units (U12.A/.B/.C) are placed independently, but the
+    /// whole-symbol bbox spans every unit's geometry. Using it per instance means an
+    /// edit confined to one unit — moving a pin on U12.A — shifts the placed bbox of
+    /// *all* units, so the diff engine reports the untouched units as moved too. Scoping
+    /// the extent to the unit's own geometry keeps the change on the unit it belongs to.
+    pub fn bbox_for_unit(&self, unit: u32) -> Option<(Pt, Pt)> {
+        let on_unit = |u: u32| u == 0 || u == unit;
+        let mut pts: Vec<Pt> = Vec::new();
+        for p in self.pins.iter().filter(|p| on_unit(p.unit)) {
+            pts.push(Pt { x: p.at.x, y: p.at.y });
+        }
+        for g in self.graphics.iter().filter(|g| on_unit(g.unit)) {
+            // Mirror the whole-symbol scan (`collect_points`): a circle contributes its
+            // centre only, so a per-unit box never exceeds the whole-symbol box.
+            match &g.shape {
+                Shape::Rect { a, b, .. } => pts.extend([*a, *b]),
+                Shape::Poly { pts: p, .. } => pts.extend(p.iter().copied()),
+                Shape::Circle { center, .. } => pts.push(*center),
+                Shape::Arc { start, mid, end } => pts.extend([*start, *mid, *end]),
+            }
+        }
+        for t in self.texts.iter().filter(|t| on_unit(t.unit)) {
+            pts.push(Pt { x: t.at.x, y: t.at.y });
+        }
+        bbox_of(&pts).or(self.bbox)
+    }
+}
+
 /// A placed symbol instance on a sheet.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SymbolInstance {
@@ -1352,6 +1387,50 @@ mod tests {
         assert_eq!(sch.bus_entries.len(), 1);
         assert_eq!(sch.bus_entries[0].a, Pt { x: 20.0, y: 10.0 });
         assert_eq!(sch.bus_entries[0].b, Pt { x: 22.54, y: 7.46 });
+    }
+
+    #[test]
+    fn bbox_for_unit_is_scoped_to_the_unit_geometry() {
+        // A two-unit symbol: unit 1's pins sit near the origin, unit 2's far to the +x.
+        // A common (unit 0) graphic straddles both. The whole-symbol bbox spans everything;
+        // each unit's bbox must cover only that unit plus the common geometry.
+        let src = r#"
+        (kicad_sch
+          (lib_symbols
+            (symbol "Lib:DUAL"
+              (symbol "DUAL_0_1"
+                (rectangle (start -1 -1) (end 1 1)))
+              (symbol "DUAL_1_1"
+                (pin input line (at -5 5 0) (length 2) (name "A") (number "1")))
+              (symbol "DUAL_2_1"
+                (pin input line (at 50 -5 0) (length 2) (name "B") (number "2"))))))
+        "#;
+        let sch = Schematic::parse_str(src).unwrap();
+        let lib = &sch.lib_symbols[0];
+        let whole = lib.bbox.expect("whole-symbol bbox");
+        let u1 = lib.bbox_for_unit(1).expect("unit 1 bbox");
+        let u2 = lib.bbox_for_unit(2).expect("unit 2 bbox");
+
+        // Whole spans the -5..50 x range (both units); each unit is scoped.
+        assert_eq!(whole.0.x, -5.0);
+        assert_eq!(whole.1.x, 50.0);
+        // Unit 1: its pin at x=-5 plus the common rect (-1..1) → x in [-5, 1]. Unit 2's
+        // pin at x=50 must NOT be included.
+        assert_eq!(u1.0.x, -5.0);
+        assert_eq!(u1.1.x, 1.0);
+        // Unit 2: common rect (-1..1) plus its pin at x=50 → x in [-1, 50]. Unit 1's pin
+        // at x=-5 must NOT be included.
+        assert_eq!(u2.0.x, -1.0);
+        assert_eq!(u2.1.x, 50.0);
+    }
+
+    #[test]
+    fn bbox_for_unit_matches_whole_for_single_unit_symbol() {
+        // When a symbol's geometry all lives on unit 0/1, the placed unit-1 box equals
+        // the whole-symbol box — single-unit parts are unaffected by the per-unit path.
+        let sch = Schematic::parse_str(SAMPLE).unwrap();
+        let lib = sch.lib_symbol("Device:C").unwrap();
+        assert_eq!(lib.bbox_for_unit(1), lib.bbox);
     }
 
     #[test]
