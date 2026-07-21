@@ -847,6 +847,7 @@ fn load_diff_bundle(
         geometry,
         sch_geometry,
         pcb_file: pcb_source_file(&rev.source_hashes),
+        comp_params: extras.comp_params,
     })
 }
 

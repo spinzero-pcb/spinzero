@@ -10,7 +10,7 @@
 //! `PCBREVIEW_CACHE_DIR` when set — the dev override that lets the canvas run against
 //! an already-crunched `output/` bundle with no re-crunch.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -205,6 +205,11 @@ pub struct DiffBundleExtras {
     /// Raw contents of `schematics/geometry.json` (per-element schematic geometry),
     /// when the extraction emitted it. `None` for older caches → the diff falls back.
     pub sch_geometry_json: Option<String>,
+    /// Per-component (refdes → the symbol's full property map) so the diff engine can
+    /// report edits to arbitrary fields (Package, Tolerance, Automotive Grade, …) that
+    /// aren't first-class on `CompLite`. Backend-only: keeps these off the viewer
+    /// payload while still letting the changeset flag them.
+    pub comp_params: HashMap<String, BTreeMap<String, String>>,
 }
 
 /// Load a bundle's diff extras from its cache dir. Best-effort on the geometry (a
@@ -238,7 +243,22 @@ pub fn load_diff_extras(cache: &Path) -> Result<DiffBundleExtras, String> {
     let geometry_json = read_rel("pcb_geometry");
     let sch_geometry_json = read_rel("schematic_geometry");
 
-    Ok(DiffBundleExtras { sheet_files, geometry_json, sch_geometry_json })
+    // Per-component property maps (backend-only): keyed by designator, carrying every
+    // symbol property so the diff can flag edits to fields `CompLite` doesn't surface.
+    let mut comp_params: HashMap<String, BTreeMap<String, String>> = HashMap::new();
+    if let Some(arr) = d.get("components").and_then(|c| c.as_array()) {
+        for c in arr {
+            let Some(designator) = str_at(c, "designator") else { continue };
+            let Some(params) = c.get("parameters").and_then(|p| p.as_object()) else { continue };
+            let map: BTreeMap<String, String> = params
+                .iter()
+                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                .collect();
+            comp_params.insert(designator.to_string(), map);
+        }
+    }
+
+    Ok(DiffBundleExtras { sheet_files, geometry_json, sch_geometry_json, comp_params })
 }
 
 /// KiCad design-JSON → viewer payload.

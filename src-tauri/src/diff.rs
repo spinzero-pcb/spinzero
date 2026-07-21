@@ -404,6 +404,10 @@ pub struct Bundle {
     pub sch_geometry: Option<SchGeometry>,
     /// The `.kicad_pcb` source file name, for PCB-pass pruning.
     pub pcb_file: Option<String>,
+    /// Per-component (refdes → full property map). Lets the component pass flag edits
+    /// to arbitrary symbol fields (Package, Tolerance, Automotive Grade, …) that aren't
+    /// first-class on `CompLite`. Empty for older caches.
+    pub comp_params: HashMap<String, std::collections::BTreeMap<String, String>>,
 }
 
 // ============================================================ tuning constants
@@ -962,6 +966,22 @@ pub struct CompDelta {
     pub removed: HashSet<String>,
 }
 
+/// True for symbol properties the component pass already reports elsewhere (as a
+/// dedicated field row or the DNP flip), plus KiCad-internal `ki_*` library metadata
+/// and pure-documentation fields — none of which should surface again through the
+/// generic property diff.
+fn is_first_class_param(key: &str) -> bool {
+    matches!(
+        key,
+        // Reported as their own rows above.
+        "Reference" | "Value" | "Footprint" | "MPN" | "Manufacturer"
+        // DNP is a dedicated flip.
+        | "kicad_dnp"
+        // Documentation, not an electrical attribute — kept out to avoid noise.
+        | "Description" | "Datasheet"
+    ) || key.starts_with("ki_")
+}
+
 /// Component field comparison + re-annotation rename folding (plan §2).
 fn diff_components(a: &Bundle, b: &Bundle, out: &mut Vec<Change>) -> CompDelta {
     let mut delta = CompDelta::default();
@@ -1078,6 +1098,30 @@ fn diff_components(a: &Bundle, b: &Bundle, out: &mut Vec<Change>) -> CompDelta {
         if x.mpn != y.mpn {
             fields.push(("MPN", &x.mpn, &y.mpn));
         }
+        if x.mfr != y.mfr {
+            fields.push(("Manufacturer", &x.mfr, &y.mfr));
+        }
+        // Edits to arbitrary symbol properties (Package, Tolerance, Automotive Grade,
+        // Voltage, …) that `CompLite` doesn't surface. Compared over the union of both
+        // sides' keys so an added/removed property registers too. Keys already reported
+        // as first-class rows above — and KiCad-internal `ki_*` metadata — are skipped
+        // so nothing is double-counted.
+        let empty = std::collections::BTreeMap::new();
+        let pa = a.comp_params.get(r.as_str()).unwrap_or(&empty);
+        let pb = b.comp_params.get(r.as_str()).unwrap_or(&empty);
+        let mut param_keys: Vec<&String> = pa.keys().chain(pb.keys()).collect();
+        param_keys.sort_unstable();
+        param_keys.dedup();
+        for key in param_keys {
+            if is_first_class_param(key) {
+                continue;
+            }
+            let old = pa.get(key).map(String::as_str).unwrap_or("");
+            let new = pb.get(key).map(String::as_str).unwrap_or("");
+            if old != new {
+                fields.push((key.as_str(), old, new));
+            }
+        }
         let dnp_flip = x.dnp != y.dnp;
 
         // Schematic symbol move (bbox-centre delta on the sheet) — its own cosmetic
@@ -1130,8 +1174,9 @@ fn diff_components(a: &Bundle, b: &Bundle, out: &mut Vec<Change>) -> CompDelta {
                 extra.push(if y.dnp { "marked DNP".into() } else { "un-marked DNP".into() });
             }
             detail = extra.join("; ");
-            // value/footprint/mpn are electrical-ish; footprint is placement-relevant
-            // but treated electrical here (it changes the land pattern / part).
+            // value/footprint/mpn/manufacturer and the part-attribute properties
+            // (Package, Tolerance, Automotive Grade, …) are all electrical-ish; footprint
+            // is placement-relevant but treated electrical here (land pattern / part).
             impact = Impact::Electrical;
         } else {
             // DNP-only flip.

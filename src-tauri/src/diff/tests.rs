@@ -81,7 +81,22 @@ fn bundle(indexes: DesignIndexes) -> Bundle {
         geometry: None,
         sch_geometry: None,
         pcb_file: None,
+        comp_params: HashMap::new(),
     }
+}
+
+/// A bundle whose components carry the given property maps (refdes → [(key, val)]),
+/// for exercising the generic symbol-property diff.
+fn bundle_params(indexes: DesignIndexes, params: &[(&str, &[(&str, &str)])]) -> Bundle {
+    let mut b = bundle(indexes);
+    b.comp_params = params
+        .iter()
+        .map(|(refdes, kvs)| {
+            let m = kvs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+            (refdes.to_string(), m)
+        })
+        .collect();
+    b
 }
 
 /// A schematic-geometry element `(uuid, kind, [x,y,w,h], sig)`.
@@ -125,6 +140,86 @@ fn value_change_is_one_electrical_modify() {
     assert!(c.title.contains("C14"), "title names the part: {}", c.title);
     assert!(c.title.contains("100n") && c.title.contains("1u"), "title shows both values: {}", c.title);
     assert_eq!(doc.stats.electrical, 1);
+}
+
+#[test]
+fn manufacturer_change_is_flagged() {
+    let mut a = empty_indexes();
+    let mut ca = comp("10k", "R_0402", false);
+    ca.mfr = "Yageo".into();
+    a.components.insert("R49".into(), ca);
+    let mut b = empty_indexes();
+    let mut cb = comp("10k", "R_0402", false);
+    cb.mfr = "Vishay".into();
+    b.components.insert("R49".into(), cb);
+
+    let doc = diff_bundles(&bundle(a), &bundle(b), &no_source_diff());
+    let c = doc
+        .changes
+        .iter()
+        .find(|c| c.group == Group::Component && c.title.contains("R49"))
+        .expect("R49 change present");
+    assert_eq!(c.kind, Kind::Modified);
+    assert!(
+        c.title.contains("Manufacturer") && c.title.contains("Yageo") && c.title.contains("Vishay"),
+        "title names the manufacturer change: {}",
+        c.title
+    );
+}
+
+#[test]
+fn arbitrary_symbol_properties_are_flagged() {
+    // R49: Package, Tolerance and Automotive Grade all edited — none is a first-class
+    // CompLite field, so they must come through the generic property diff, folded into
+    // one component row (headline + detail).
+    let mut a = empty_indexes();
+    a.components.insert("R49".into(), comp("10k", "R_0402", false));
+    let mut b = empty_indexes();
+    b.components.insert("R49".into(), comp("10k", "R_0402", false));
+
+    let pa: &[(&str, &[(&str, &str)])] = &[(
+        "R49",
+        &[("Package", "0402"), ("Tolerance", "1%"), ("Automotive Grade", "No")],
+    )];
+    let pb: &[(&str, &[(&str, &str)])] = &[(
+        "R49",
+        &[("Package", "0603"), ("Tolerance", "5%"), ("Automotive Grade", "AEC-Q200")],
+    )];
+
+    let doc = diff_bundles(&bundle_params(a, pa), &bundle_params(b, pb), &no_source_diff());
+    let comp_changes: Vec<_> =
+        doc.changes.iter().filter(|c| c.group == Group::Component && c.title.contains("R49")).collect();
+    assert_eq!(comp_changes.len(), 1, "one folded component row: {:?}", comp_changes);
+    let c = comp_changes[0];
+    let all = format!("{} | {}", c.title, c.detail);
+    for needle in ["Package", "0402", "0603", "Tolerance", "1%", "5%", "Automotive Grade", "AEC-Q200"] {
+        assert!(all.contains(needle), "row mentions {needle}: {all}");
+    }
+}
+
+#[test]
+fn internal_and_documentation_props_are_ignored() {
+    // ki_* metadata, Datasheet and Description churn must NOT produce a row on their own.
+    let mut a = empty_indexes();
+    a.components.insert("R49".into(), comp("10k", "R_0402", false));
+    let mut b = empty_indexes();
+    b.components.insert("R49".into(), comp("10k", "R_0402", false));
+
+    let pa: &[(&str, &[(&str, &str)])] = &[(
+        "R49",
+        &[("ki_keywords", "res"), ("Datasheet", "~"), ("Description", "old")],
+    )];
+    let pb: &[(&str, &[(&str, &str)])] = &[(
+        "R49",
+        &[("ki_keywords", "resistor"), ("Datasheet", "http://x"), ("Description", "new")],
+    )];
+
+    let doc = diff_bundles(&bundle_params(a, pa), &bundle_params(b, pb), &no_source_diff());
+    assert!(
+        !doc.changes.iter().any(|c| c.group == Group::Component && c.title.contains("R49")),
+        "no component row for internal/documentation-only churn: {:?}",
+        doc.changes
+    );
 }
 
 #[test]
