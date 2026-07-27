@@ -1056,6 +1056,12 @@ button {
   border-radius: var(--radius-1);
   align-self: center;
 }
+/* "KiCad files" marker: where the on-disk design actually is — distinct from
+   "viewing" (accent) so their divergence is legible at a glance. */
+.rev-kicad-tag {
+  background: var(--warn-dim);
+  color: var(--warn);
+}
 /* version-control badges: local checkpoint, hidden tombstone, git-tag-style refs */
 .rev-badge {
   text-transform: uppercase;
@@ -1964,6 +1970,18 @@ button {
   color: var(--fg-1);
 }
 .ctx-label { flex: 1; }
+/* Trailing feature-status pill on a menu row (e.g. "Beta" on Compare). */
+.ctx-badge {
+  margin-left: var(--sp-2);
+  padding: 0 5px;
+  border-radius: var(--radius-1);
+  background: var(--accent-dim);
+  color: var(--accent);
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
 .ctx-arrow { margin-left: auto; color: var(--fg-2); font-size: var(--fs-0); }
 /* Selected choice in a submenu (e.g. the current severity): tinted row + trailing check. */
 .ctx-item.active { background: var(--accent-dim); color: var(--fg-0); }
@@ -3049,3 +3067,322 @@ button {
   padding: 0 2px;
 }
 .toast-close:hover { color: var(--fg-0); }
+
+/* ============================================================ visual diff (§3–§5) */
+
+/* Diff-mode banner — a strip pinned to the top of the canvas area, view-global. */
+.diff-banner {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  height: 30px;
+  padding: 0 var(--sp-3);
+  background: var(--bg-2);
+  border-bottom: 1px solid var(--border-1);
+  font-size: 12px;
+  color: var(--fg-1);
+}
+.diff-banner-label { color: var(--fg-2); text-transform: uppercase; letter-spacing: 0.04em; font-size: 10px; }
+/* Beta tag on the diff banner — visual diff is still a beta feature. */
+.diff-banner-beta {
+  padding: 0 5px;
+  border-radius: var(--radius-1);
+  background: var(--accent-dim);
+  color: var(--accent);
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.diff-side { display: inline-flex; align-items: center; gap: 6px; }
+.diff-side-name { color: var(--fg-0); font-weight: 500; }
+.diff-side-a .diff-side-name { color: var(--diff-remove); }
+.diff-side-b .diff-side-name { color: var(--diff-add); }
+.diff-arrow { color: var(--fg-2); }
+.diff-preparing { color: var(--accent); font-style: italic; }
+.diff-banner-btn { display: inline-flex; align-items: center; gap: 4px; }
+/* Exit-comparison ✕ — red so it stands out as the way out of diff mode (batch 2). */
+.diff-banner-close { font-size: 14px; color: var(--err); }
+.diff-banner-close:hover { color: var(--err); background: var(--err-dim); }
+
+/* PCB compare legend: changed copper is layer-coloured, so the swatches teach the
+   FILL STYLE (crosshatched = removed, solid = added) in a neutral tone, not a hue. */
+.diff-legend {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-right: var(--sp-3);
+  font-size: 10px;
+  color: var(--fg-2);
+}
+.diff-legend-swatch {
+  width: 14px;
+  height: 8px;
+  border-radius: 2px;
+  border: 1px solid var(--border-1);
+}
+.diff-legend-removed {
+  background-image:
+    repeating-linear-gradient(45deg, var(--fg-2) 0 1px, transparent 1px 3.5px),
+    repeating-linear-gradient(135deg, var(--fg-2) 0 1px, transparent 1px 3.5px);
+}
+.diff-legend-added { background: var(--fg-2); }
+.diff-legend-label { margin-right: 3px; }
+
+/* PCB compare toggles (Blink / Zones) in the diff banner. */
+.diff-mode-toggle { display: inline-flex; align-items: center; gap: 2px; margin-right: var(--sp-2); }
+.diff-mode-toggle .diff-banner-btn.is-active {
+  color: var(--accent);
+  background: var(--bg-3);
+  border-radius: var(--radius-1);
+}
+
+/* Push the canvases below the banner while diffing so it never overlaps the art. */
+.canvas-area.diffing .view-fill { top: 30px; }
+
+/* Schematic side-by-side: A (read-only, left) | B (the live Canvas, right). A real
+   gutter (not just a hairline) separates the two, so the sheets never read as one
+   continuous canvas. */
+.view-fill.diff-side-by-side { display: flex; gap: 8px; background: var(--bg-2); }
+.view-fill.diff-side-by-side > .diff-a-stage { flex: 1 1 50%; border-right: 1px solid var(--border-1); }
+.view-fill.diff-side-by-side > :not(.diff-a-stage) { flex: 1 1 50%; position: relative; border-left: 1px solid var(--border-1); }
+
+.diff-a-stage {
+  position: relative;
+  overflow: hidden;
+  background: var(--bg-0);
+  cursor: grab;
+}
+.diff-a-stage:active { cursor: grabbing; }
+/* No will-change here — same reason as .canvas-world (B side): pinning the raster
+   scale makes Chromium GPU-upscale the SVG instead of re-rastering, so zoomed text
+   goes fuzzy and the A side reads "dull" next to the crisp B side (batch 2). */
+.diff-a-world { position: absolute; transform-origin: 0 0; }
+.diff-a-island svg { display: block; }
+.diff-a-placeholder {
+  position: absolute;
+  top: 40%;
+  left: 0;
+  right: 0;
+  text-align: center;
+  color: var(--fg-2);
+  font-size: 13px;
+  font-style: italic;
+}
+
+/* Diff tint overlays (mirror .hl-overlay): coloured clones of the changed uuids over a
+   dimmed sheet. Colours come from CSS vars only. A pulse draws the eye on focus. */
+.hl-diff-scrim { fill: var(--canvas-scrim); pointer-events: none; }
+.hl-diff { pointer-events: none; --dv: var(--warn); }
+.hl-diff-err { --dv: var(--err); }
+.hl-diff-ok { --dv: var(--ok); }
+.hl-diff-warn { --dv: var(--warn); }
+/* The `.canvas-island`-prefixed variants exist for specificity: the KiCad theme rules
+   (`.canvas-island … text.sch-val`, 0-2-1) would otherwise out-rank the tint (0-1-1)
+   and keep overlay text theme-coloured instead of tinted. */
+.hl-diff *, .canvas-island .hl-diff * { stroke: var(--dv) !important; stroke-width: 0.5 !important; fill: none !important; }
+.hl-diff text, .hl-diff tspan,
+.canvas-island .hl-diff text, .canvas-island .hl-diff tspan { fill: var(--dv) !important; stroke: none !important; }
+/* The exact edited text inside a modified change: old value red (A), new green (B). */
+.canvas-island .hl-diff .hl-diff-emph-err, .canvas-island .hl-diff .hl-diff-emph-err tspan { fill: var(--err) !important; stroke: none !important; font-weight: 700; }
+.canvas-island .hl-diff .hl-diff-emph-ok, .canvas-island .hl-diff .hl-diff-emph-ok tspan { fill: var(--ok) !important; stroke: none !important; font-weight: 700; }
+.hl-diff-pulse { animation: diff-pulse 1.1s ease-in-out infinite; }
+@keyframes diff-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+
+/* ---------- Changes panel (left rail, diff mode only) ---------- */
+.changes-panel { display: flex; flex-direction: column; min-height: 0; flex: 1; overflow: hidden; }
+
+/* Review-status filter: a segmented control (Pending / Reviewed / All). */
+.changes-filter {
+  display: flex;
+  gap: 2px;
+  margin: var(--sp-2) var(--sp-3) 0;
+  padding: 2px;
+  background: var(--bg-2);
+  border: 1px solid var(--border-1);
+  border-radius: 6px;
+}
+.changes-filter-btn {
+  flex: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  padding: 4px 6px;
+  font-size: 11px;
+  border: none;
+  border-radius: 4px;
+  background: none;
+  color: var(--fg-2);
+  cursor: pointer;
+}
+.changes-filter-btn:hover { color: var(--fg-0); }
+.changes-filter-btn.active { background: var(--bg-0); color: var(--fg-0); font-weight: 600; }
+.changes-filter-count {
+  font-size: 10px;
+  min-width: 15px;
+  padding: 0 4px;
+  border-radius: 8px;
+  background: var(--bg-3);
+  color: var(--fg-2);
+  text-align: center;
+}
+.changes-filter-btn.active .changes-filter-count { background: var(--accent); color: var(--accent-fg); }
+
+.changes-stepper {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-2);
+  padding: var(--sp-1) var(--sp-3);
+}
+.step-count { font-size: 11px; color: var(--fg-2); min-width: 64px; text-align: center; }
+.step-btn { font-size: 18px; line-height: 1; padding: 0 8px; color: var(--fg-1); }
+.step-btn:hover { color: var(--fg-0); }
+
+.changes-search {
+  margin: var(--sp-2) var(--sp-3);
+  padding: 5px 8px;
+  font-size: 12px;
+  background: var(--bg-2);
+  border: 1px solid var(--border-1);
+  border-radius: 4px;
+  color: var(--fg-0);
+}
+.changes-search:focus { outline: none; border-color: var(--accent); }
+
+/* Board-overlay reset: shown while a solo / shift-click subset hides changes. */
+.changes-visbar {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: 0 var(--sp-3) var(--sp-2);
+  padding: 3px 8px;
+  background: var(--accent-dim);
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+}
+.changes-visbar-btn { font-size: 11px; color: var(--accent); padding: 0 4px; }
+.changes-visbar-btn:hover { text-decoration: underline; }
+
+.changes-tree { flex: 1; overflow-y: auto; padding-bottom: var(--sp-3); }
+.changes-group { border-bottom: 1px solid var(--border-0); }
+.changes-group-head {
+  display: flex;
+  align-items: center;
+  padding: 4px var(--sp-3);
+  background: var(--bg-1);
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+.group-toggle {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: none;
+  border: none;
+  color: var(--fg-1);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  text-align: left;
+}
+.group-toggle .chevron { display: inline-flex; transition: transform 0.12s; }
+.group-toggle .chevron.collapsed { transform: rotate(-90deg); }
+.group-count {
+  font-size: 10px;
+  background: var(--bg-3);
+  color: var(--fg-1);
+  border-radius: 8px;
+  padding: 0 6px;
+  min-width: 16px;
+  text-align: center;
+}
+.group-markall {
+  font-size: 10px;
+  background: none;
+  border: 1px solid var(--border-1);
+  border-radius: 4px;
+  color: var(--fg-2);
+  cursor: pointer;
+  padding: 1px 6px;
+}
+.group-markall:hover { color: var(--fg-0); border-color: var(--border-1); }
+
+.change-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 6px var(--sp-3);
+  cursor: pointer;
+  border-left: 2px solid transparent;
+}
+.change-row:hover { background: var(--bg-2); }
+.change-row.focused { background: var(--accent-dim); border-left-color: var(--accent); }
+.change-row.seen .change-title { color: var(--fg-2); }
+.change-dot { flex: none; width: 8px; height: 8px; border-radius: 50%; margin-top: 4px; }
+.change-dot-err { background: var(--diff-remove); }
+.change-dot-ok { background: var(--diff-add); }
+.change-dot-warn { background: var(--diff-change); }
+.change-body { flex: 1; min-width: 0; }
+.change-title { font-size: 12px; color: var(--fg-0); line-height: 1.35; }
+.change-detail { font-size: 11px; color: var(--fg-2); margin-top: 1px; }
+.change-badges { flex: none; }
+.change-both {
+  font-size: 9px;
+  color: var(--fg-2);
+  border: 1px solid var(--border-1);
+  border-radius: 3px;
+  padding: 0 3px;
+  letter-spacing: 0.03em;
+}
+.change-seen {
+  flex: none;
+  background: none;
+  border: 1.5px solid var(--border-1);
+  border-radius: 6px;
+  width: 24px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: transparent;
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s, color 0.12s, transform 0.12s;
+}
+/* Bolder tick than the icon set's 1.2px default — a thin stroke reads faint at this size. */
+.change-seen svg { stroke-width: 2; }
+/* Unchecked: a faint preview of the tick on hover so the target reads as a checkbox. */
+.change-seen:hover { color: var(--fg-2); border-color: var(--fg-2); }
+/* Checked: a filled green box with a bold light tick — unmistakable at a glance. */
+.change-seen.on {
+  background: var(--ok);
+  border-color: var(--ok);
+  color: var(--accent-fg);
+  box-shadow: 0 1px 3px color-mix(in srgb, var(--ok) 45%, transparent);
+}
+.change-seen.on:hover { color: var(--accent-fg); }
+.change-seen:active { transform: scale(0.92); }
+
+/* Members of a composed shift-click subset light up blue; the focused row keeps its
+   stronger accent border on top of the same wash. */
+.change-row.board-on { background: var(--accent-dim); }
+
+/* Off-board rows (not in the shift-click overlay subset) dim but stay findable. */
+.change-row.board-hidden .change-title,
+.change-row.board-hidden .change-detail { opacity: 0.55; }
+
+/* ---------- history graph: compare pick-mode ---------- */
+.compare-nudge { color: var(--accent); }
+.history-compare-tips { display: inline-flex; align-items: center; gap: 4px; }
+.dag-row.compare-from { box-shadow: inset 2px 0 0 var(--accent); background: var(--accent-dim); }
+.dag-row.compare-target { cursor: crosshair; }
+.dag-row.compare-target:hover { background: var(--accent-dim); outline: 1px dashed var(--accent); outline-offset: -1px; }
+.statusbar-btn.comparing { color: var(--accent); }

@@ -24,6 +24,7 @@ import type {
   UiSettings,
 } from "./types";
 import type { DesignIndexes } from "./design";
+import type { DiffHandle } from "./diff";
 
 export const ipc = {
   // ---- projects ----
@@ -52,12 +53,20 @@ export const ipc = {
   crunchNow: () => invoke<void>("crunch_now"),
   getCrunchStatus: () => invoke<CrunchStatus>("get_crunch_status"),
   listExtractions: () => invoke<ExtractionMeta[]>("list_extractions"),
+  /** The revision the KiCad design folder currently corresponds to (the history
+   *  graph's "KiCad files" marker) — independent of the viewer's active revision. */
+  getDesignHead: () => invoke<string | null>("get_design_head"),
   labelExtraction: (id: string, label: string | null) =>
     invoke<void>("label_extraction", { id, label }),
-  /** Select a revision (null = latest). For KiCad this is a checkout-to-disk;
-   *  `confirmed` permits overwriting a dirty working tree (after capturing it). */
-  setActiveExtraction: (id: string | null, confirmed = false) =>
-    invoke<CheckoutResult>("set_active_extraction", { id, confirmed }),
+  /** Select the revision the viewer shows (null = latest). Pure viewer switch —
+   *  never touches the KiCad files; `updateDesignFiles` is the explicit write. */
+  setActiveExtraction: (id: string | null) =>
+    invoke<void>("set_active_extraction", { id }),
+  /** Write a revision's files back into the design folder (explicit action from the
+   *  history graph). `confirmed` permits overwriting a dirty working tree (after
+   *  capturing it as a checkpoint). */
+  updateDesignFiles: (id: string, confirmed = false) =>
+    invoke<CheckoutResult>("update_design_files", { id, confirmed }),
 
   // ---- version control (tags / hide / diff) ----
   tagRevision: (id: string, tagName: string, message?: string | null) =>
@@ -68,14 +77,22 @@ export const ipc = {
   unhideRevision: (id: string) => invoke<void>("unhide_revision", { id }),
   diffRevisions: (a: string, b: string) =>
     invoke<RevisionDiff>("diff_revisions", { a, b }),
+  /** Semantic visual-diff: ensure both revision caches, run the diff engine, and
+   *  return the changeset + both cache keys + resolved labels (visual-diff §6.1).
+   *  Idempotent + cached; equal revisions short-circuit to an empty doc. */
+  prepareDiff: (revA: string, revB: string) =>
+    invoke<DiffHandle>("prepare_diff", { revA, revB }),
+  /** Read an artifact (metadata-stripped) from a *specific* revision's cache by its
+   *  cache key, so the diff view can load the A (older) side's sheets while B stays
+   *  the active revision (visual-diff §6.2). */
+  readArtifactFrom: (cacheKey: string, relPath: string) =>
+    invoke<string>("read_artifact_from", { cacheKey, relPath }),
   /** Promote a machine-local checkpoint into the synced (shared) history (item 5:
    *  a changelog message is required, enforced in the UI and the backend). */
   publishCheckpoint: (id: string, message: string) =>
     invoke<void>("publish_checkpoint", { id, message }),
   /** Hard-delete a machine-local checkpoint (unsynced). */
   deleteCheckpoint: (id: string) => invoke<void>("delete_checkpoint", { id }),
-  /** Hide everywhere + delete this revision's bytes on this machine (leaked secret). */
-  purgeRevisionLocal: (id: string) => invoke<void>("purge_revision_local", { id }),
   /** Other users who touched this project recently (soft fork-awareness). */
   getPresence: () => invoke<PresenceEntry[]>("get_presence"),
 

@@ -159,7 +159,8 @@ pub(crate) struct RevEvent {
     label: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pinned: Option<bool>,
-    /// Revision this was derived from (the active revision at crunch time). None = root.
+    /// Revision this was derived from (what the design folder descended from at
+    /// crunch time — the hash-gate state, not the viewed revision). None = root.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     parent: Option<String>,
     /// Tag name for "tag"/"untag" actions (git-tag semantics, unique by name).
@@ -528,7 +529,27 @@ fn mutate_event(
     message: Option<String>,
 ) -> Result<(), String> {
     let raw = raw_dir(project_dir);
-    let lamport = next_lamport(&raw, REVISIONS_PREFIX);
+    let log = revisions_log(&raw, user);
+    mutate_event_in(&raw, REVISIONS_PREFIX, &log, user, id, action, label, pinned, tag_name, message)
+}
+
+/// Append a mutate event into an arbitrary store (dir + log prefix + target log) —
+/// shared by the synced revisions log and the machine-local checkpoint log, so
+/// label/pin/tag mutations fold identically in both stores.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn mutate_event_in(
+    store_dir: &Path,
+    prefix: &str,
+    log: &Path,
+    user: &str,
+    id: &str,
+    action: &str,
+    label: Option<String>,
+    pinned: Option<bool>,
+    tag_name: Option<String>,
+    message: Option<String>,
+) -> Result<(), String> {
+    let lamport = next_lamport(store_dir, prefix);
     let ts = now_rfc3339()?;
     let event = RevEvent {
         event_id: make_id("e", &[user, &lamport.to_string(), &ts, id, action]),
@@ -548,7 +569,7 @@ fn mutate_event(
         tag_name,
         message,
     };
-    append_event(&revisions_log(&raw, user), &event)
+    append_event(log, &event)
 }
 
 pub fn set_label(project_dir: &Path, user: &str, id: &str, label: Option<String>) -> Result<(), String> {

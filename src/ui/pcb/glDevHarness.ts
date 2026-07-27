@@ -38,7 +38,9 @@ async function main() {
   renderer.setLayerState(new Set(), null);
   // Expose the renderer + geometry for headless verification (readPixels), mirroring the
   // app's window.__spinzero probe. Dev harness only — never bundled into the app.
-  Object.assign(window as unknown as Record<string, unknown>, { __glr: renderer, __geom: geom });
+  // __GLR (the class) lets a devtools/pilot session build extra renderer instances on
+  // the same context — e.g. a diff-flagged one to exercise the compare passes.
+  Object.assign(window as unknown as Record<string, unknown>, { __glr: renderer, __geom: geom, __GLR: PcbGlRenderer });
 
   let cam: Camera = { x: 0, y: 0, scale: 1 };
   const fit = () => {

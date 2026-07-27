@@ -8,6 +8,12 @@ export interface Highlight {
   kind: "net" | "comp";
   ref: string;
   color: string;
+  /** Multi-unit parts (U12.A/.B/.C) place each unit as its own schematic symbol, but
+   *  the component index collapses a designator onto ONE placement. When a highlight
+   *  is about a specific unit — a pad → pin cross-probe knows which one owns the pin —
+   *  this pins the schematic group uuid to paint instead of the index's default.
+   *  Absent for designator-level highlights (and for every persisted pin). */
+  uuid?: string;
 }
 
 // Distinct highlight colors for multi-select; nets default to blue, components amber.

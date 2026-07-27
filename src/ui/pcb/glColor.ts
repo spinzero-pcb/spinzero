@@ -34,6 +34,11 @@ export function resolveCssColor(css: string): [number, number, number] {
   return parseRgb(getComputedStyle(el).color);
 }
 
+/** Fallback for the diff-mode unchanged-copper grey when `--pcb-diff-base` can't be
+ *  resolved. The token in tokens.css is the source of truth; this is the single JS
+ *  mirror both the GL renderer's initial value and the Canvas2D overlay read. */
+export const PCB_DIFF_BASE_FALLBACK = "#8b8f98";
+
 /** Parse a `#rgb`/`#rrggbb` hex string to [r,g,b] in 0..1. */
 export function hexToRgb(hex: string): [number, number, number] {
   const h = hex.replace("#", "").trim();

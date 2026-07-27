@@ -206,9 +206,12 @@ pub fn build_components_on(
         }
         let prefix = prefix_of(&designator);
         let pins = pin_count(sch, sym);
+        // Per-unit extent: a multi-unit symbol's units are placed separately, so each
+        // instance's box must cover only its own unit's geometry (else U12.A's box spans
+        // U12.B/.C too, inflating the hit area and cross-contaminating the diff).
         let bbox = sch
             .lib_for(sym)
-            .and_then(|l| l.bbox)
+            .and_then(|l| l.bbox_for_unit(sym.unit))
             .map(|(min, max)| placed_bbox(sym, min, max));
         let mut parameters: BTreeMap<String, String> = BTreeMap::new();
         for p in &sym.properties {

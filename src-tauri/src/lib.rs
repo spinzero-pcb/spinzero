@@ -2,6 +2,7 @@ mod cache;
 mod checkpoints;
 mod design;
 mod device;
+mod diff;
 mod events;
 mod index_db;
 mod logging;
@@ -175,6 +176,11 @@ fn unique_tmp_dir(prefix: &str, rev_id: &str) -> PathBuf {
     let n = SEQ.fetch_add(1, Ordering::SeqCst);
     std::env::temp_dir().join(format!("{prefix}_{}_{}_{}", std::process::id(), rev_id, n))
 }
+
+/// Surfaced by the commands that would trigger a fresh extraction (viewer switch, diff
+/// prepare) while a crunch is staging into cache/<key>.tmp — blocking avoids the
+/// remove_dir_all race on the shared staging dir. The frontend toasts it verbatim.
+const EXTRACTION_BUSY: &str = "extraction in progress — try again in a moment";
 
 /// Ensure the runtime cache holds `rev`'s extracted bundle, extracting on a miss —
 /// from the live design folder when it still matches the revision, else by
@@ -427,9 +433,9 @@ async fn relink_design_path(
     Ok(handle.info())
 }
 
-/// Outcome of selecting a revision. KiCad-with-a-design-folder selections are a
-/// checkout-to-disk: `dirty` means there are un-captured on-disk edits and the caller
-/// must confirm; on a confirmed retry they're captured as a checkpoint, then overwritten.
+/// Outcome of writing a revision back into the design folder (`update_design_files`):
+/// `dirty` means there are un-captured on-disk edits and the caller must confirm; on a
+/// confirmed retry they're captured as a checkpoint, then overwritten.
 #[derive(serde::Serialize, Clone)]
 struct CheckoutResult {
     status: String, // "switched" | "dirty" | "busy"
@@ -437,7 +443,8 @@ struct CheckoutResult {
 }
 
 /// Point the viewer at a resolved revision: ensure its cache, ingest it, persist the
-/// active pointer. No disk write — used by the read-only path and after a checkout.
+/// active pointer. Never touches the design folder — used by every viewer switch and
+/// after an explicit `update_design_files` checkout.
 fn view_resolved(
     handle: &ProjectHandle,
     id: Option<&str>,
@@ -452,51 +459,72 @@ fn view_resolved(
     Ok(())
 }
 
-/// Select a revision. With a design folder present this is a **checkout-to-disk**
-/// (the revision is written back into the design folder so KiCad and the app agree),
-/// guarded so un-captured edits are never silently lost. For a read-only project it
-/// is a pure viewer switch. `id = None` means "latest". `confirmed = true` permits
-/// overwriting a dirty working tree (after capturing it).
+/// Select the revision the viewer shows. This is a **pure viewer switch** — the design
+/// folder on disk is never touched, so it needs no confirmation and is always safe.
+/// `id = None` means "latest". Writing a revision back into the KiCad files is a
+/// separate, explicit action: `update_design_files`.
 #[tauri::command]
 async fn set_active_extraction(
     state: State<'_, AppState>,
     id: Option<String>,
+) -> Result<(), String> {
+    let handle = current_project(&state)?;
+    // A viewer switch to an un-cached revision re-extracts into cache/<key>.tmp — the same
+    // staging path a live crunch uses — so ensure_lazy's remove_dir_all would race the
+    // crunch (sidecar 'os error 3'). Bail while a crunch runs; the switch is retried once
+    // it settles. (Restores the 'Extraction in progress' guard the pure-viewer-switch path
+    // dropped; the crunch's own re-extract lands the latest revision anyway.)
+    if handle.crunch_running.load(Ordering::SeqCst) {
+        return Err(EXTRACTION_BUSY.into());
+    }
+    if let Some(rid) = id.as_deref() {
+        let resolved = handle.resolve_rev(rid).ok_or_else(|| format!("unknown revision {rid}"))?;
+        view_resolved(&handle, Some(rid), &resolved)?;
+    } else {
+        project::set_active_extraction(&handle.project_dir, None)?;
+        *handle.active_extraction.lock_safe() = None;
+    }
+    Ok(())
+}
+
+/// Write a revision's source files back into the design folder, so KiCad shows the same
+/// thing as the app. An explicit user action (history graph → "Update KiCad files") —
+/// never triggered by merely viewing a version. Guarded so un-captured edits are never
+/// silently lost: `dirty` asks the caller to confirm; `confirmed = true` captures them
+/// as a checkpoint, then overwrites.
+#[tauri::command]
+async fn update_design_files(
+    state: State<'_, AppState>,
+    id: String,
     confirmed: bool,
 ) -> Result<CheckoutResult, String> {
     let handle = current_project(&state)?;
-    let switched = CheckoutResult { status: "switched".into(), captured: None };
+    let design_path = handle.design_path_clone().ok_or_else(|| {
+        "the design folder is missing on this machine — re-link it first".to_string()
+    })?;
 
-    // No design folder (read-only): pure viewer switch.
-    let Some(design_path) = handle.design_path_clone() else {
-        if let Some(rid) = id.as_deref() {
-            let resolved = handle.resolve_rev(rid).ok_or_else(|| format!("unknown revision {rid}"))?;
-            view_resolved(&handle, Some(rid), &resolved)?;
-        } else {
-            project::set_active_extraction(&handle.project_dir, id.as_deref())?;
-            *handle.active_extraction.lock_safe() = id;
-        }
-        return Ok(switched);
-    };
-
-    // With a design folder, selecting a revision checks it out to disk.
     // Suspend the watcher BEFORE the checkout: otherwise a watch-triggered crunch can
     // slip into the gap between the busy-check and the write (TOCTOU) and hash a
     // half-overwritten design folder into a torn revision. Resume unconditionally, even
     // on an early return or error.
     handle.watcher_suspended.store(true, Ordering::SeqCst);
-    let result = checkout_to_disk(&handle, &design_path, id.as_deref(), confirmed);
+    let result = checkout_to_disk(&handle, &design_path, &id, confirmed);
     handle.watcher_suspended.store(false, Ordering::SeqCst); // always resume
+    if matches!(&result, Ok(r) if r.status == "switched") {
+        log::info!("design files updated to revision {id}");
+        telemetry::bump("update_design_files");
+    }
     result
 }
 
-/// The KiCad checkout-to-disk body of `set_active_extraction`, extracted so the policy
+/// The KiCad checkout-to-disk body of `update_design_files`, extracted so the policy
 /// (busy/dirty/switched outcomes, capture-before-overwrite, hash-gate seeding) is a named,
 /// testable unit and the command wrapper is just the watcher-suspend bracket. The caller
 /// MUST have suspended the watcher; this runs the whole resolve→capture→write→view flow.
 fn checkout_to_disk(
     handle: &ProjectHandle,
     design_path: &Path,
-    id: Option<&str>,
+    id: &str,
     confirmed: bool,
 ) -> Result<CheckoutResult, String> {
     let switched = CheckoutResult { status: "switched".into(), captured: None };
@@ -504,24 +532,13 @@ fn checkout_to_disk(
         return Ok(CheckoutResult { status: "busy".into(), captured: None });
     }
 
-    // Resolve the target (id None = the newest row across both stores).
-    let resolved = match id {
-        Some(rid) => handle.resolve_rev(rid).ok_or_else(|| format!("unknown revision {rid}"))?,
-        None => match handle.latest_resolved() {
-            Some(r) => r,
-            None => {
-                project::set_active_extraction(&handle.project_dir, None)?;
-                *handle.active_extraction.lock_safe() = None;
-                return Ok(switched);
-            }
-        },
-    };
+    let resolved = handle.resolve_rev(id).ok_or_else(|| format!("unknown revision {id}"))?;
     let target_hashes = resolved.revision().source_hashes.clone();
     let live = sidecar::source_hashes(design_path);
 
     // Disk already matches the target → no write, just point the viewer.
     if live == target_hashes {
-        view_resolved(handle, id, &resolved)?;
+        view_resolved(handle, Some(id), &resolved)?;
         return Ok(switched);
     }
 
@@ -533,9 +550,11 @@ fn checkout_to_disk(
 
     let mut captured = None;
     if !clean {
-        // Capture the dirty working tree FIRST so it is never lost.
+        // Capture the dirty working tree FIRST so it is never lost. Its parent is the
+        // folder's own last captured state (the hash gate), not the viewed revision —
+        // the edits were made on top of what was on disk.
         let git = project::git_info(design_path);
-        let parent = handle.effective_resolved().map(|r| r.revision().id.clone());
+        let parent = sidecar::design_parent_id(handle);
         let cp = checkpoints::snapshot_local(
             &handle.project_dir,
             design_path,
@@ -558,7 +577,7 @@ fn checkout_to_disk(
     // Seed the hash gate so any stray post-resume trigger no-ops.
     sidecar::save_last_crunch_hashes(&handle.project_dir, &target_hashes);
 
-    view_resolved(handle, id, &resolved)?;
+    view_resolved(handle, Some(id), &resolved)?;
     Ok(CheckoutResult { status: "switched".into(), captured })
 }
 
@@ -568,6 +587,15 @@ fn list_extractions(state: State<AppState>) -> Result<Vec<project::ExtractionMet
     Ok(handle.list_extractions_meta())
 }
 
+/// The revision id the KiCad design folder currently corresponds to (the history
+/// graph's "KiCad files" marker). Independent of the viewer's active revision —
+/// this is exactly the divergence the marker exists to show.
+#[tauri::command]
+fn get_design_head(state: State<AppState>) -> Result<Option<String>, String> {
+    let handle = current_project(&state)?;
+    Ok(sidecar::design_head_id(&handle))
+}
+
 #[tauri::command]
 fn label_extraction(
     state: State<AppState>,
@@ -575,7 +603,18 @@ fn label_extraction(
     label: Option<String>,
 ) -> Result<(), String> {
     let handle = current_project(&state)?;
-    rawstore::set_label(&handle.project_dir, &project::author_slug(), &id, label)
+    let user = project::author_slug();
+    // Route the label to the store that holds the row's create event: a label folded
+    // in the synced log lands on nothing for an unpublished local checkpoint (its
+    // create lives in the machine-local checkpoint log), so renaming silently no-oped.
+    if rawstore::find_revision(&handle.project_dir, &id).is_some() {
+        return rawstore::set_label(&handle.project_dir, &user, &id, label);
+    }
+    if checkpoints::find_checkpoint(&handle.project_dir, &id).is_some() {
+        log::info!("labeling local checkpoint {id}");
+        return checkpoints::set_label_local(&handle.project_dir, &user, &id, label);
+    }
+    Err(format!("unknown revision {id}"))
 }
 
 // ------------------------------------------------------------ version control
@@ -626,6 +665,227 @@ fn diff_revisions(
         .resolve_source_hashes(&b)
         .ok_or_else(|| format!("unknown revision {b}"))?;
     Ok(rawstore::diff_source_hashes(&from, &to))
+}
+
+/// What `prepare_diff` hands back: the changeset plus the two cache keys (so the
+/// frontend can lazily read B's artifacts via `read_artifact_from` while A stays
+/// active) and the resolved side labels. Field names cross to `src/lib/diff.ts`.
+#[derive(serde::Serialize)]
+struct DiffHandle {
+    doc: diff::DiffDoc,
+    /// Machine-local path of the cached `diff.json` (regenerable, never synced).
+    path: String,
+    cache_key_a: String,
+    cache_key_b: String,
+    label_a: String,
+    label_b: String,
+}
+
+/// Human-facing label for a revision row: its explicit label, else its message's
+/// first line, else the short revision id. Mirrors the history graph's row text.
+fn revision_label(rev: &rawstore::Revision) -> String {
+    if let Some(l) = rev.label.as_ref().filter(|l| !l.is_empty()) {
+        return l.clone();
+    }
+    if let Some(m) = rev.message.as_ref().and_then(|m| m.lines().next()).filter(|m| !m.is_empty()) {
+        return m.to_string();
+    }
+    rev.id.clone()
+}
+
+/// The `.kicad_pcb` source file in a revision's source-hash map (design-relative),
+/// for the diff engine's PCB-pass pruning. `None` for a board-less (schematic-only)
+/// revision.
+fn pcb_source_file(hashes: &std::collections::BTreeMap<String, String>) -> Option<String> {
+    hashes
+        .keys()
+        .find(|k| k.ends_with(".kicad_pcb"))
+        .cloned()
+}
+
+/// Prepare a semantic diff of two revisions (§6.1). Ensures both revision caches
+/// (short-circuits to an empty diff when the cache keys are equal), runs the pure
+/// engine, writes `diff.json` to the machine-local diff cache, GCs it, and returns
+/// the doc + both cache keys + labels. Read-only: no viewer state changes.
+///
+/// The body is multi-second on a cold cache (two extractions + a full board diff), so
+/// the command is `async` and runs it on a blocking thread — the webview event loop and
+/// all other IPC (incl. the "Preparing comparison…" spinner) stay responsive.
+#[tauri::command]
+async fn prepare_diff(
+    state: State<'_, AppState>,
+    rev_a: String,
+    rev_b: String,
+) -> Result<DiffHandle, String> {
+    let handle = current_project(&state)?;
+    tauri::async_runtime::spawn_blocking(move || prepare_diff_blocking(&handle, rev_a, rev_b))
+        .await
+        .map_err(|e| format!("prepare_diff task: {e}"))?
+}
+
+/// The synchronous body of [`prepare_diff`], run on a blocking thread.
+fn prepare_diff_blocking(
+    handle: &Arc<ProjectHandle>,
+    rev_a: String,
+    rev_b: String,
+) -> Result<DiffHandle, String> {
+    // Same staging-dir race as set_active_extraction: prepare_diff materializes both
+    // revisions' caches (ensure_revision_cache below), which shares cache/<key>.tmp with a
+    // live crunch. Don't start while one runs.
+    if handle.crunch_running.load(Ordering::SeqCst) {
+        return Err(EXTRACTION_BUSY.into());
+    }
+
+    let resolved_a = handle
+        .resolve_rev(&rev_a)
+        .ok_or_else(|| format!("unknown revision {rev_a}"))?;
+    let resolved_b = handle
+        .resolve_rev(&rev_b)
+        .ok_or_else(|| format!("unknown revision {rev_b}"))?;
+    let rev_meta_a = resolved_a.revision().clone();
+    let rev_meta_b = resolved_b.revision().clone();
+    log::info!("prepare_diff: {} → {}", rev_meta_a.id, rev_meta_b.id);
+
+    let key_a = cache::cache_key(&rev_meta_a.source_hashes);
+    let key_b = cache::cache_key(&rev_meta_b.source_hashes);
+    let label_a = revision_label(&rev_meta_a);
+    let label_b = revision_label(&rev_meta_b);
+
+    // Both bundles are extracted at the current EXTRACTOR_CACHE_EPOCH, so equal cache
+    // keys ⇒ byte-identical bundles ⇒ empty diff. Short-circuit before any extraction.
+    if key_a == key_b {
+        log::info!("prepare_diff: revisions are byte-identical — empty diff");
+        let doc = diff::empty_doc(&rev_meta_a.id, &label_a, &rev_meta_b.id, &label_b);
+        let dkey = diff::diff_key(&key_a, &key_b);
+        let path = write_diff_cache(&handle.project_dir, &dkey, &doc)?;
+        return Ok(DiffHandle { doc, path, cache_key_a: key_a, cache_key_b: key_b, label_a, label_b });
+    }
+
+    // Materialize both bundles' caches up front, even when the diff doc itself is
+    // served from cache below: the frontend reads both sides' artifacts by cache key
+    // right after this returns, and the bundle cache GCs independently of the diff
+    // cache, so a cached doc must not outlive its bundles. The two caches key off
+    // disjoint dirs, so extract them in parallel — on a cold cache this is ~1 s instead
+    // of ~1 s + ~1 s back-to-back.
+    let (res_a, res_b) = std::thread::scope(|s| {
+        let ta = s.spawn(|| ensure_revision_cache(handle, &resolved_a));
+        let tb = s.spawn(|| ensure_revision_cache(handle, &resolved_b));
+        (ta.join(), tb.join())
+    });
+    let cache_dir_a = res_a.map_err(|_| "extraction A panicked".to_string())??;
+    let cache_dir_b = res_b.map_err(|_| "extraction B panicked".to_string())??;
+
+    // Serve a cached diff.json when both bundles are unchanged. The changeset is a
+    // pure function of the two source-identical bundles, but the row labels/revs are
+    // per-request metadata (a revision can be relabeled), so refresh the sides.
+    let dkey = diff::diff_key(&key_a, &key_b);
+    let cache_path = diff::diff_cache_path(&handle.project_dir, &dkey);
+    if let Ok(text) = fs::read_to_string(&cache_path) {
+        if let Ok(mut doc) = serde_json::from_str::<diff::DiffDoc>(&text) {
+            log::info!("prepare_diff: served cached diff.json ({} changes)", doc.changes.len());
+            doc.a = diff::DiffSide { rev: rev_meta_a.id.clone(), label: label_a.clone() };
+            doc.b = diff::DiffSide { rev: rev_meta_b.id.clone(), label: label_b.clone() };
+            return Ok(DiffHandle {
+                doc,
+                path: cache_path.to_string_lossy().into_owned(),
+                cache_key_a: key_a,
+                cache_key_b: key_b,
+                label_a,
+                label_b,
+            });
+        }
+    }
+
+    let bundle_a = load_diff_bundle(&cache_dir_a, &rev_meta_a, label_a.clone())?;
+    let bundle_b = load_diff_bundle(&cache_dir_b, &rev_meta_b, label_b.clone())?;
+
+    // Cheap per-file source-hash delta feeds the engine's pruning (§6.4). Altium
+    // prunes nothing (the delta is still computed and simply won't match .kicad_*).
+    let source_diff = rawstore::diff_source_hashes(&rev_meta_a.source_hashes, &rev_meta_b.source_hashes);
+
+    let doc = diff::diff_bundles(&bundle_a, &bundle_b, &source_diff);
+    log::info!("prepare_diff: computed {} changes", doc.changes.len());
+    let path = write_diff_cache(&handle.project_dir, &dkey, &doc)?;
+    diff::gc(&handle.project_dir, &dkey, 8); // keep the doc we just published + serve
+
+    Ok(DiffHandle { doc, path, cache_key_a: key_a, cache_key_b: key_b, label_a, label_b })
+}
+
+/// Assemble a diff `Bundle` from a revision's cache dir: viewer indexes + the
+/// backend-only extras (sheet→file map, geometry IR).
+fn load_diff_bundle(
+    cache_dir: &Path,
+    rev: &rawstore::Revision,
+    label: String,
+) -> Result<diff::Bundle, String> {
+    let indexes = design::build_indexes(Some(cache_dir.to_path_buf()))?;
+    let extras = design::load_diff_extras(cache_dir)?;
+    let geometry = match extras.geometry_json {
+        Some(text) => serde_json::from_str::<diff::Geometry>(&text)
+            .map_err(|e| format!("geometry parse: {e}"))
+            .map(Some)?,
+        None => None,
+    };
+    // Schematic geometry is best-effort: a parse failure (or an older cache without the
+    // artifact) simply leaves the diff engine on its one-row-per-sheet fallback. Log the
+    // fallback branch so a corrupt geometry.json is distinguishable from an old cache in a
+    // bug report (mirrors the extractor's 'schematic geometry skipped').
+    let sch_geometry = extras.sch_geometry_json.and_then(|text| {
+        match serde_json::from_str::<diff::SchGeometry>(&text) {
+            Ok(g) => Some(g),
+            Err(e) => {
+                log::info!("diff: schematic geometry skipped for {} ({e})", rev.id);
+                None
+            }
+        }
+    });
+    Ok(diff::Bundle {
+        rev: rev.id.clone(),
+        label,
+        indexes,
+        sheet_files: extras.sheet_files,
+        geometry,
+        sch_geometry,
+        pcb_file: pcb_source_file(&rev.source_hashes),
+        comp_params: extras.comp_params,
+    })
+}
+
+/// Serialize + write a diff doc into the machine-local cache, returning its path.
+fn write_diff_cache(project_dir: &Path, dkey: &str, doc: &diff::DiffDoc) -> Result<String, String> {
+    let root = diff::diff_cache_root(project_dir);
+    fs::create_dir_all(&root).map_err(|e| e.to_string())?;
+    let path = diff::diff_cache_path(project_dir, dkey);
+    let text = serde_json::to_string(doc).map_err(|e| e.to_string())?;
+    // Atomic-ish publish: write a temp then rename, so a reader never sees a torn file.
+    let tmp = path.with_extension("json.tmp");
+    fs::write(&tmp, text.as_bytes()).map_err(|e| e.to_string())?;
+    if let Err(e) = fs::rename(&tmp, &path) {
+        let _ = fs::remove_file(&tmp);
+        return Err(e.to_string());
+    }
+    Ok(path.to_string_lossy().into_owned())
+}
+
+/// Read an artifact from a *specific* revision's cache by its cache key (§6.2), so the
+/// frontend can load the comparison (B) side's sheets/geometry while A stays active.
+/// Read-only; mirrors `read_artifact`'s metadata-stripping + path sanitization.
+#[tauri::command]
+fn read_artifact_from(
+    state: State<AppState>,
+    cache_key: String,
+    rel_path: String,
+) -> Result<String, String> {
+    let handle = current_project(&state)?;
+    // Reject a key that isn't a plain cache-key token, so it can't escape the cache root.
+    if cache_key.is_empty() || !cache_key.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return Err("invalid cache key".into());
+    }
+    let dir = cache::cache_dir(&handle.project_dir, &cache_key);
+    if !dir.is_dir() {
+        return Err(format!("no cached bundle for key {cache_key}"));
+    }
+    design::read_artifact(Some(dir), &rel_path)
 }
 
 /// Promote a machine-local checkpoint into the synced (shared) history. Idempotent —
@@ -1051,13 +1311,17 @@ pub fn run() {
             detect_design_folder,
             relink_design_path,
             set_active_extraction,
+            update_design_files,
             list_extractions,
+            get_design_head,
             label_extraction,
             tag_revision,
             untag_revision,
             hide_revision,
             unhide_revision,
             diff_revisions,
+            prepare_diff,
+            read_artifact_from,
             publish_checkpoint,
             get_presence,
             delete_checkpoint,

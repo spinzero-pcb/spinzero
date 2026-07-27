@@ -15,7 +15,10 @@ import type {
 } from "../lib/types";
 import type { DesignIndexes } from "../lib/design";
 
-export type LeftTab = "review" | "ai";
+/** Which surface the left rail shows. "changes" is only reachable while a visual diff
+ *  is active (the Changes tab appears then); diff enter/exit drive it. This is the one
+ *  source of truth — ActivityBar, LeftPanel, and diffStore all read/write it. */
+export type LeftTab = "review" | "changes";
 
 /** Derived display state. ⟳ re-check is never persisted — it is computed from the
  *  anchored object's live hash vs the hash stored when the comment was filed. */

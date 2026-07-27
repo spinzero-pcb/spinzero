@@ -5,6 +5,7 @@ import { useDesignStore } from "../../stores/designStore";
 import { useHistoryStore } from "../../stores/historyStore";
 import { useProjectStore } from "../../stores/projectStore";
 import { useSelectionStore } from "../../stores/selectionStore";
+import { useDiffStore } from "../../stores/diffStore";
 import { ipc } from "../../lib/ipc";
 import { formatLocalTime, formatRelative } from "../../lib/time";
 import { IconHistory, IconLocate, IconRefresh } from "../icons";
@@ -36,9 +37,30 @@ function SelectionMirror() {
 function VersionChip() {
   const extractions = useProjectStore((s) => s.extractions);
   const activeExtraction = useProjectStore((s) => s.activeExtraction);
+  const diffActive = useDiffStore((s) => s.active);
+  const diffA = useDiffStore((s) => s.doc?.a ?? null);
+  const diffB = useDiffStore((s) => s.doc?.b ?? null);
+  const exitDiff = useDiffStore((s) => s.exitDiff);
   const latestId = extractions[0]?.id ?? null;
   const shownId = activeExtraction ?? latestId;
   const shown = extractions.find((e) => e.id === shownId) ?? null;
+  // While comparing, the chip reflects the diff pair and exits diff mode on click
+  // (a fast off-ramp that doesn't require reaching for the banner ×).
+  if (diffActive && diffA && diffB) {
+    return (
+      <button
+        className="statusbar-btn comparing"
+        title="Comparing revisions — click to exit comparison"
+        onClick={exitDiff}
+      >
+        <IconHistory size={12} />
+        <span className="mono">
+          {diffA.label} → {diffB.label}
+        </span>
+        <span className="rev-old-tag">comparing</span>
+      </button>
+    );
+  }
   if (!shownId && extractions.length === 0) return null;
   const isOld = activeExtraction != null && activeExtraction !== latestId;
   // Footer shows the active revision's DATE and its tag, if any (item 9) — not the
@@ -48,13 +70,17 @@ function VersionChip() {
   return (
     <button
       className={`statusbar-btn ${isOld ? "viewing-old" : ""}`}
-      title="Revision history — click to open the graph"
+      title={
+        isOld
+          ? "Reviewing an older version — your KiCad files are unchanged. To write this version to disk, right-click it in the history graph and choose “Update KiCad files”. Click to open the graph."
+          : "Revision history — click to open the graph"
+      }
       onClick={() => useHistoryStore.getState().openGraph()}
     >
       <IconHistory size={12} />
       <span className="mono">{dateText}</span>
       {tag && <span className="rev-tag-ref">{tag}</span>}
-      {isOld && <span className="rev-old-tag">history</span>}
+      {isOld && <span className="rev-old-tag">reviewing old version</span>}
     </button>
   );
 }

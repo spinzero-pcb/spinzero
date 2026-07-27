@@ -10,7 +10,7 @@
 //! `PCBREVIEW_CACHE_DIR` when set — the dev override that lets the canvas run against
 //! an already-crunched `output/` bundle with no re-crunch.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -106,6 +106,10 @@ pub struct CompLite {
     pub dnp: bool,
     pub nets: Vec<String>,
     pub svg_id: String,
+    /// Placed schematic bounding box `[x, y, w, h]` on its sheet (design.json `bbox`),
+    /// when the library symbol has geometry. Lets the diff engine see symbol moves.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bbox: Option<[f64; 4]>,
 }
 
 #[derive(Serialize)]
@@ -186,6 +190,75 @@ pub fn build_indexes(vault_cache: Option<PathBuf>) -> Result<DesignIndexes, Stri
     let cache = cache_dir(vault_cache)?;
     let design_dir = find_design_dir(&cache)?;
     build_indexes_kicad(&cache, &design_dir)
+}
+
+/// Extra per-bundle data the diff engine needs beyond the viewer `DesignIndexes`:
+/// the sheet-number → `.kicad_sch` filename map (for source-hash pruning) and the raw
+/// `pcb/geometry.json` text (parsed by the diff engine into its own IR mirror). This
+/// avoids widening the frontend-facing `DesignIndexes`/`design.ts` contract for
+/// backend-only diff needs.
+pub struct DiffBundleExtras {
+    /// Sheet number → source `.kicad_sch` file (design-relative), for pruning.
+    pub sheet_files: HashMap<i64, String>,
+    /// Raw contents of `pcb/geometry.json`, if the bundle has a board.
+    pub geometry_json: Option<String>,
+    /// Raw contents of `schematics/geometry.json` (per-element schematic geometry),
+    /// when the extraction emitted it. `None` for older caches → the diff falls back.
+    pub sch_geometry_json: Option<String>,
+    /// Per-component (refdes → the symbol's full property map) so the diff engine can
+    /// report edits to arbitrary fields (Package, Tolerance, Automotive Grade, …) that
+    /// aren't first-class on `CompLite`. Backend-only: keeps these off the viewer
+    /// payload while still letting the changeset flag them.
+    pub comp_params: HashMap<String, BTreeMap<String, String>>,
+}
+
+/// Load a bundle's diff extras from its cache dir. Best-effort on the geometry (a
+/// schematic-only bundle simply has `geometry_json = None`); the sheet map is derived
+/// from the design JSON's `sheets[]`.
+pub fn load_diff_extras(cache: &Path) -> Result<DiffBundleExtras, String> {
+    let design_dir = find_design_dir(cache)?;
+    let d = read_design_json(&design_dir)?;
+
+    let mut sheet_files: HashMap<i64, String> = HashMap::new();
+    if let Some(arr) = d.get("sheets").and_then(|s| s.as_array()) {
+        for s in arr {
+            let Some(num) = s.get("sheet_number").and_then(|n| n.as_i64()) else { continue };
+            if let Some(file) = str_at(s, "filename").filter(|f| !f.is_empty()) {
+                sheet_files.insert(num, file.to_string());
+            }
+        }
+    }
+
+    // Geometry paths come from the manifest (same as build_indexes), read raw so the
+    // diff engine can deserialize its own mirrors without loading the whole viewer IR.
+    let manifest: Option<Value> = fs::read_to_string(design_dir.join("design_review_manifest.json"))
+        .ok()
+        .and_then(|t| serde_json::from_str::<Value>(&t).ok());
+    let read_rel = |key: &str| {
+        manifest
+            .as_ref()
+            .and_then(|m| m.get(key).and_then(|v| v.as_str()).map(|s| s.to_string()))
+            .and_then(|rel| fs::read_to_string(design_dir.join(rel)).ok())
+    };
+    let geometry_json = read_rel("pcb_geometry");
+    let sch_geometry_json = read_rel("schematic_geometry");
+
+    // Per-component property maps (backend-only): keyed by designator, carrying every
+    // symbol property so the diff can flag edits to fields `CompLite` doesn't surface.
+    let mut comp_params: HashMap<String, BTreeMap<String, String>> = HashMap::new();
+    if let Some(arr) = d.get("components").and_then(|c| c.as_array()) {
+        for c in arr {
+            let Some(designator) = str_at(c, "designator") else { continue };
+            let Some(params) = c.get("parameters").and_then(|p| p.as_object()) else { continue };
+            let map: BTreeMap<String, String> = params
+                .iter()
+                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                .collect();
+            comp_params.insert(designator.to_string(), map);
+        }
+    }
+
+    Ok(DiffBundleExtras { sheet_files, geometry_json, sch_geometry_json, comp_params })
 }
 
 /// KiCad design-JSON → viewer payload.
@@ -429,6 +502,10 @@ fn build_indexes_kicad(cache: &Path, design_dir: &Path) -> Result<DesignIndexes,
                 .and_then(|v| v.as_array())
                 .map(|a| a.iter().filter_map(|v| v.as_str()).map(String::from).collect())
                 .unwrap_or_default();
+            let bbox = c.get("bbox").and_then(|b| {
+                let f = |k: &str| b.get(k).and_then(|v| v.as_f64());
+                Some([f("x")?, f("y")?, f("w")?, f("h")?])
+            });
             components.insert(
                 designator.to_string(),
                 CompLite {
@@ -441,6 +518,7 @@ fn build_indexes_kicad(cache: &Path, design_dir: &Path) -> Result<DesignIndexes,
                     dnp,
                     nets: nets_of,
                     svg_id: str_at(c, "svg_id").unwrap_or("").to_string(),
+                    bbox,
                 },
             );
         }

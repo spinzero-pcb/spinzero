@@ -14,9 +14,13 @@ import { measureNav, nav, pcbNav, type ChipComment } from "../canvas/navigator";
 import { ContextMenu, type MenuItem } from "../ContextMenu";
 import { IconClose, IconComment, IconCopy, IconFit, IconRuler, IconSheet, IconTrash } from "../icons";
 import type { CommentAnchor } from "../../lib/types";
-import type { PcbTextDef } from "../../lib/pcbGeometry";
-import { PcbGlRenderer, netLabelRows, type BBox, type Camera, type ObjectState } from "./glRenderer";
-import { resolveCssColor } from "./glColor";
+import type { PcbGeometry, PcbTextDef } from "../../lib/pcbGeometry";
+import { DIFF_HATCH_PERIOD_CSS, PcbGlRenderer, netLabelRows, type BBox, type Camera, type DiffFlags, type ObjectState } from "./glRenderer";
+import { buildDiffVisibility, changeCode, changeExtent, computeDiffFlags, unionExtent } from "./glDiff";
+import type { Change } from "../../lib/diff";
+import { isTypingTarget } from "../../lib/keymap";
+import { useDiffStore } from "../../stores/diffStore";
+import { resolveCssColor, PCB_DIFF_BASE_FALLBACK } from "./glColor";
 import { registerRenderProbe } from "../../lib/renderProbe";
 import { parseMarkup, type MarkupRun } from "./textMarkup";
 import { knockoutMargin, layoutStrokeText, traceStrokeText } from "./strokeFont";
@@ -41,6 +45,70 @@ import { PcbToolbar } from "./PcbToolbar";
  *  toolbar/keyboard) clamp to this range. */
 const MIN_SCALE = 0.05;
 const MAX_SCALE = 2000;
+
+/** Diff overlay encoding: colour = LAYER, texture = old vs new. Changed copper keeps
+ *  its TRUE layer colour (mix 1.0) so "which layer changed" reads instantly over the
+ *  grey base; removed (A) copper is crosshatched, added (B) is solid (glRenderer
+ *  diffHatch). Red/green tints were tried and dropped — per-layer tint blends were
+ *  illegible; 45° single-direction stripes likewise (parallel lines on diagonal
+ *  tracks); a checkerboard likewise (blotchy when zoomed out). */
+const DIFF_LAYER_MIX = 1.0;
+/** Added-copper alpha: slightly sheer so the removed crosshatch painted on top of a
+ *  same-spot restyle (thickened track) stands out against it. */
+const DIFF_ADDED_ALPHA = 0.85;
+
+
+/** Prepare the reusable scratch canvas for the removed-text pass: sized to the view,
+ *  cleared, with the same css-px transform as the overlay context. Returns null when
+ *  a 2D context is unavailable (the pass is skipped — never crash the frame). */
+function beginHatchScratch(
+  ref: { current: HTMLCanvasElement | null },
+  cssW: number,
+  cssH: number,
+  dpr: number,
+): CanvasRenderingContext2D | null {
+  ref.current ??= document.createElement("canvas");
+  const cnv = ref.current;
+  const W = Math.round(cssW * dpr);
+  const H = Math.round(cssH * dpr);
+  if (cnv.width !== W || cnv.height !== H) {
+    cnv.width = W;
+    cnv.height = H;
+  }
+  const sctx = cnv.getContext("2d");
+  if (!sctx) return null;
+  sctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  sctx.clearRect(0, 0, cssW, cssH);
+  return sctx;
+}
+
+/** Punch the GL shader's ±45° crosshatch through everything drawn on the scratch
+ *  canvas (destination-out, cuts keep a 0.25 ghost like the copper texture), then
+ *  composite it onto the overlay. Both diagonal directions, screen-space period. */
+function compositeHatched(ctx: CanvasRenderingContext2D, sctx: CanvasRenderingContext2D, dpr: number) {
+  const { width: W, height: H } = sctx.canvas; // device px
+  sctx.save();
+  sctx.setTransform(1, 0, 0, 1, 0, 0);
+  sctx.globalCompositeOperation = "destination-out";
+  sctx.strokeStyle = "rgba(0,0,0,0.75)"; // cut to a faint ghost, not fully out
+  const period = DIFF_HATCH_PERIOD_CSS * dpr; // spacing along an axis, like gl_FragCoord.x+y
+  sctx.lineWidth = 0.22 * period * 0.7071; // the shader's band width, made perpendicular
+  sctx.beginPath();
+  for (let o = -H; o < W; o += period) {
+    sctx.moveTo(o, 0);
+    sctx.lineTo(o + H, H); // "\" set: x − y = o
+  }
+  for (let o = 0; o < W + H; o += period) {
+    sctx.moveTo(o, 0);
+    sctx.lineTo(o - H, H); // "/" set: x + y = o
+  }
+  sctx.stroke();
+  sctx.restore();
+  ctx.save();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.drawImage(sctx.canvas, 0, 0);
+  ctx.restore();
+}
 
 /** Draw one net-label row: the plain `text` centred at (0, cy) plus a KiCad-style
  *  overline over each `~{…}` run (feedback: nets like `~{project_rst}`). ctx.font /
@@ -292,16 +360,70 @@ export function PcbGlView({ visible }: { visible: boolean }) {
   const measureActive = useMeasureStore((s) => s.active);
   const measureUnits = useMeasureStore((s) => s.units);
 
+  // Visual diff (plan §4): while a comparison is active and BOTH sides carry a PCB
+  // geometry IR, the view renders the compare overlay instead of the plain board.
+  const diffActive = useDiffStore((s) => s.active);
+  const diffBlink = useDiffStore((s) => s.blink);
+  const diffHideZones = useDiffStore((s) => s.hideZones);
+  const diffHiddenIds = useDiffStore((s) => s.hiddenChangeIds);
+  const diffFocusedId = useDiffStore((s) => s.focusedChangeId);
+  // Identity of the current comparison — the diff-inputs effect must re-bake geomA + the
+  // owner flags when a NEW doc lands even if diffActive/indexes are unchanged (else the
+  // GPU codes go stale against the new changeset).
+  const diffDoc = useDiffStore((s) => s.doc);
+  const diffCacheKeyA = useDiffStore((s) => s.cacheKeyA);
+
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const labelCanvasRef = useRef<HTMLCanvasElement>(null);
+  /** Reusable offscreen canvas for the removed-text crosshatch pass (diff mode). */
+  const hatchScratchRef = useRef<HTMLCanvasElement | null>(null);
   const commentLayerRef = useRef<HTMLDivElement>(null);
   const rendererRef = useRef<PcbGlRenderer | null>(null);
+  /** The A (older) side's renderer, sharing the same GL context; null outside diff mode. */
+  const rendererARef = useRef<PcbGlRenderer | null>(null);
+  /** Prepared diff inputs (A geometry + both sides' changed flags); renderers rebuild
+   *  with the flags baked in when this lands (diffEpoch bump re-runs the create effect). */
+  const diffDataRef = useRef<{
+    geomA: PcbGeometry;
+    geomB: PcbGeometry;
+    flagsA: DiffFlags;
+    flagsB: DiffFlags;
+  } | null>(null);
+  /** Memoised per-change extents (world mm), keyed by change id; dropped whole when
+   *  the diff-data object identity changes (flags rebuilt). */
+  const extentMemo = useRef<{ data: object; boxes: Map<string, BBox | null> } | null>(null);
+  /** The GPU visibility mask, cached from the visibility effect so drawOverlay's
+   *  per-frame text pass reads it instead of rebuilding it every frame (blink/pulse keep
+   *  the loop hot). Rebuilt only when hiddenChangeIds / the doc change. */
+  const diffVisRef = useRef<Uint8Array | null>(null);
+  const [diffEpoch, setDiffEpoch] = useState(0);
+  const diffOnRef = useRef(false);
+  diffOnRef.current = diffActive;
+  const blinkRef = useRef(false);
+  blinkRef.current = diffActive && diffBlink;
+  const hideZonesRef = useRef(false);
+  hideZonesRef.current = diffHideZones;
+  /** True while the last overlay frame drew the focused-change pulse frame — keeps the
+   *  dirty-driven render loop animating (the pulse is the only continuous animation). */
+  const diffPulse = useRef(false);
+  /** The indexes the current renderer was built for — a rebuild for the SAME design
+   *  (diff enter/exit) keeps the camera; a new design triggers the first fit. */
+  const lastIndexesRef = useRef<typeof indexes | null>(null);
+  /** Blink phase (true = the removed/A overlay is showing) + Space-held pause. */
+  const blinkA = useRef(true);
+  const blinkHold = useRef(false);
   const cam = useRef<Camera>({ x: 0, y: 0, scale: 1 });
   const dirty = useRef(true);
   const needsFit = useRef(false);
   // Whether the camera has framed the board at least once (the `fitted` probe field);
   // cleared when a new geometry loads (needsFit set), set true once fit() runs.
   const fitted = useRef(false);
+  // True while the camera still sits at a plain whole-board fit and nothing else has
+  // moved it. While true, a canvas resize re-runs the fit — the first fit can land on
+  // a not-yet-settled layout (window still restoring/maximizing, panels mounting) and
+  // under-zoom the board (feedback 2.PNG). Any pan/zoom/reveal clears it, so a resize
+  // never overrides a camera the user has placed.
+  const atFit = useRef(false);
   // Net-name strings actually drawn on the last overlay frame (the `netLabels` probe
   // field). drawOverlay culls by zoom + collision, so this is the placed set, not all
   // candidates from renderer.netLabels().
@@ -377,6 +499,7 @@ export function PcbGlView({ visible }: { visible: boolean }) {
       scale: Math.min(cw / bw, ch / bh) * 0.9,
     };
     fitted.current = true;
+    atFit.current = true;
     dirty.current = true;
   };
 
@@ -384,6 +507,7 @@ export function PcbGlView({ visible }: { visible: boolean }) {
    *  the world point AT the centre, so scaling alone keeps it fixed. Clamped to the
    *  same MIN_SCALE–MAX_SCALE px/mm range as the wheel. */
   const zoomBy = (factor: number) => {
+    atFit.current = false;
     cam.current.scale = Math.max(MIN_SCALE, Math.min(cam.current.scale * factor, MAX_SCALE));
     dirty.current = true;
   };
@@ -404,6 +528,7 @@ export function PcbGlView({ visible }: { visible: boolean }) {
     const bw = Math.max(b.maxx - b.minx, 2);
     const bh = Math.max(b.maxy - b.miny, 2);
     const scale = Math.min(Math.min(cw / bw, ch / bh) * 0.6, 60);
+    atFit.current = false;
     cam.current = { x: (b.minx + b.maxx) / 2, y: (b.miny + b.maxy) / 2, scale };
     pendingReveal.current = null;
     needsFit.current = false; // an explicit reveal supersedes the first-reveal fit
@@ -432,6 +557,63 @@ export function PcbGlView({ visible }: { visible: boolean }) {
     } else {
       b = r.compBBox(anchor.ref);
     }
+    if (b) applyReveal(b);
+  };
+
+  /** The focused change's TRUE extent: the union bbox of the primitives that change
+   *  owns on BOTH revisions (glDiff flags), so the camera/pulse-frame covers exactly
+   *  the rerouted stretch / moved footprint's old+new spot — not the whole net.
+   *  Null until the async diff flags land (callers fall back to the anchor). */
+  const extentForChange = (id: string): BBox | null => {
+    const data = diffDataRef.current;
+    if (!data) return null;
+    let m = extentMemo.current;
+    if (!m || m.data !== data) {
+      m = { data, boxes: new Map() };
+      extentMemo.current = m;
+    }
+    const cached = m.boxes.get(id);
+    if (cached !== undefined) return cached;
+    const doc = useDiffStore.getState().doc;
+    const k = doc?.changes.findIndex((c) => c.id === id) ?? -1;
+    let box: BBox | null = null;
+    if (k >= 0) {
+      const code = changeCode(k);
+      box = unionExtent(
+        changeExtent(data.geomA, data.flagsA, code),
+        changeExtent(data.geomB, data.flagsB, code),
+      );
+    }
+    m.boxes.set(id, box);
+    return box;
+  };
+
+  /** A change's frame rect (world mm): its own changed-primitive extent, else — until the
+   *  flags land — the anchor's bbox, else the comp/net extent on the renderer. Shared by
+   *  revealChange's camera landing and the accent-frame draw so the camera and the pulsing
+   *  highlight always frame the same rectangle. */
+  const boxForChange = (change: Change, r: PcbGlRenderer): BBox | null => {
+    const b = extentForChange(change.id);
+    if (b) return b;
+    const pcb = change.anchors.pcb;
+    if (!pcb) return null;
+    if (pcb.bbox) {
+      const [x, y, w, h] = pcb.bbox;
+      return { minx: x, miny: y, maxx: x + w, maxy: y + h };
+    }
+    if (pcb.comp) return r.compBBox(pcb.comp);
+    if (pcb.net) return r.netBBox(pcb.net);
+    return null;
+  };
+
+  /** Land the camera on a focused change (diff mode). Prefers the change's own extent;
+   *  falls back to the anchor's bbox/comp/net until the flags land. Deliberately does
+   *  NOT un-hide layers (unlike revealAnchor's net path) — focusChange just isolated
+   *  the changed layer, and this must not undo that. */
+  const revealChange = (change: Change) => {
+    const r = rendererRef.current;
+    if (!r) return;
+    const b = boxForChange(change, r);
     if (b) applyReveal(b);
   };
 
@@ -548,6 +730,12 @@ export function PcbGlView({ visible }: { visible: boolean }) {
         sel.setSelection(null, "pcb");
       },
     });
+    // In comparison mode, expose the same exit the banner's × does — a right-click on
+    // the board is where users reach for it (batch1).
+    if (useDiffStore.getState().active) {
+      items.push({ separator: true });
+      items.push({ label: "Exit comparison", icon: <IconClose size={14} />, onClick: () => useDiffStore.getState().exitDiff() });
+    }
     setCtxMenu({ x: e.clientX, y: e.clientY, items });
   };
 
@@ -623,14 +811,19 @@ export function PcbGlView({ visible }: { visible: boolean }) {
     // exactly. Text that names a real outline font (`(font (face …))`, e.g. Calibri) is
     // the exception — KiCad plots those with the actual TTF, so drawOutlineText fills them
     // in that family (the stroke font can't reproduce an arbitrary typeface).
-    for (const t of r.texts) {
+    const drawBoardText = (
+      tctx: CanvasRenderingContext2D,
+      rr: PcbGlRenderer,
+      t: PcbTextDef,
+      colorOverride?: string,
+    ) => {
       const key = t.comp != null ? "footprints" : "text"; // footprint text vs board text
-      if (pv.objects[key] === false) continue;
-      if (pv.hidden.has(r.layerNames[t.layer] ?? "")) continue;
-      if (t.size * scale < 3.2) continue; // unreadable at this zoom
+      if (pv.objects[key] === false) return;
+      if (pv.hidden.has(rr.layerNames[t.layer] ?? "")) return;
+      if (t.size * scale < 3.2) return; // unreadable at this zoom
       const sx = (t.x - c.x) * scale + cssW / 2;
       const sy = (t.y - c.y) * scale + cssH / 2;
-      if (sx < -250 || sx > cssW + 250 || sy < -250 || sy > cssH + 250) continue;
+      if (sx < -250 || sx > cssW + 250 || sy < -250 || sy > cssH + 250) return;
       // KiCad CCW angle → screen CW = -a; footprint text is kept upright [0,180), board
       // text uses its literal angle normalised to (-180, 180] (mirrors the SVG view).
       let a = t.angle % 360;
@@ -639,13 +832,13 @@ export function PcbGlView({ visible }: { visible: boolean }) {
         if (a >= 180) a -= 180;
       } else if (a > 180) a -= 360;
       else if (a <= -180) a += 360;
-      const textColor = r.layerColorCss(t.layer);
+      const textColor = colorOverride ?? rr.layerColorCss(t.layer);
       // A text that names a real outline font (e.g. Calibri) is rendered in that font —
       // KiCad plots such text with the actual TTF, not the stroke font. Everything else
       // keeps the exact Newstroke stroke-font pipeline below.
       if (t.font) {
-        drawOutlineText(ctx, t, sx, sy, a, scale, textColor, strokeFont);
-        continue;
+        drawOutlineText(tctx, t, sx, sy, a, scale, textColor, strokeFont);
+        return;
       }
       const layout = layoutStrokeText(t.text, {
         size: t.size,
@@ -655,35 +848,66 @@ export function PcbGlView({ visible }: { visible: boolean }) {
         italic: t.italic,
         justify: t.justify,
       });
-      if (layout.strokes.length === 0) continue;
-      ctx.save();
-      ctx.translate(sx, sy);
-      if (a) ctx.rotate((-a * Math.PI) / 180);
-      if (t.mirror) ctx.scale(-1, 1);
-      ctx.scale(scale, scale); // draw in text-local mm; lineWidth is the pen in mm
-      ctx.lineWidth = layout.pen;
-      ctx.lineCap = "round";
-      ctx.lineJoin = "round";
+      if (layout.strokes.length === 0) return;
+      tctx.save();
+      tctx.translate(sx, sy);
+      if (a) tctx.rotate((-a * Math.PI) / 180);
+      if (t.mirror) tctx.scale(-1, 1);
+      tctx.scale(scale, scale); // draw in text-local mm; lineWidth is the pen in mm
+      tctx.lineWidth = layout.pen;
+      tctx.lineCap = "round";
+      tctx.lineJoin = "round";
       if (t.knockout && layout.bbox) {
         // KiCad knockout: the ink bbox (pen included) inflated by max(pen/2, height/9),
         // filled in the layer colour, with the glyph strokes punched back out
         // (pcb_text.cpp TransformTextToPolySet + buildBoundingHull).
         const b = layout.bbox;
         const m = knockoutMargin(t.size, layout.pen);
-        ctx.fillStyle = textColor;
-        ctx.fillRect(b.minx - m, b.miny - m, b.maxx - b.minx + 2 * m, b.maxy - b.miny + 2 * m);
-        ctx.globalCompositeOperation = "destination-out";
-        ctx.strokeStyle = "#000"; // any opaque colour — only alpha matters here
-        ctx.beginPath();
-        traceStrokeText(ctx, layout);
-        ctx.stroke();
+        tctx.fillStyle = textColor;
+        tctx.fillRect(b.minx - m, b.miny - m, b.maxx - b.minx + 2 * m, b.maxy - b.miny + 2 * m);
+        tctx.globalCompositeOperation = "destination-out";
+        tctx.strokeStyle = "#000"; // any opaque colour — only alpha matters here
+        tctx.beginPath();
+        traceStrokeText(tctx, layout);
+        tctx.stroke();
       } else {
-        ctx.strokeStyle = textColor;
-        ctx.beginPath();
-        traceStrokeText(ctx, layout);
-        ctx.stroke();
+        tctx.strokeStyle = textColor;
+        tctx.beginPath();
+        traceStrokeText(tctx, layout);
+        tctx.stroke();
       }
-      ctx.restore();
+      tctx.restore();
+    };
+
+    // In diff mode the text passes mirror the GL copper passes: unchanged texts (and
+    // a HIDDEN change's texts) draw in the flat base grey so only the spotlit change
+    // carries colour; a visible changed text draws solid in its layer colour and
+    // follows the added blink phase; then A's removed/old texts draw crosshatched ON
+    // TOP for visible rows only.
+    const diff = diffOnRef.current ? diffDataRef.current : null;
+    const rA = rendererARef.current;
+    const diffDoc = diff && rA ? useDiffStore.getState() : null;
+    // The mask is maintained by the visibility effect (keyed on hiddenChangeIds/doc), so
+    // read the cached ref rather than rebuilding a Uint8Array + walking every change on
+    // each frame — the pulse/blink loop can run this dozens of times a second.
+    const vis = diffDoc?.doc ? diffVisRef.current : null;
+    const blinkOn = blinkRef.current;
+    const diffGrey = rootStyle.getPropertyValue("--pcb-diff-base").trim() || PCB_DIFF_BASE_FALLBACK;
+    for (let i = 0; i < r.texts.length; i++) {
+      const spotlit = diff && vis ? diff.flagsB.texts[i] > 0 && vis[diff.flagsB.texts[i]] > 0 : false;
+      if (spotlit && blinkOn && blinkA.current) continue; // added: B phase only
+      drawBoardText(ctx, r, r.texts[i], diff && vis && !spotlit ? diffGrey : undefined);
+    }
+    if (diff && vis && rA && (!blinkOn || blinkA.current)) {
+      let sctx: CanvasRenderingContext2D | null = null;
+      for (let i = 0; i < diff.geomA.texts.length; i++) {
+        const code = diff.flagsA.texts[i];
+        if (!code || !vis[code]) continue;
+        sctx ??= beginHatchScratch(hatchScratchRef, cssW, cssH, dpr);
+        if (!sctx) break; // scratch context unavailable — skip the removed-text pass
+        drawBoardText(sctx, rA, diff.geomA.texts[i]);
+      }
+      if (sctx) compositeHatched(ctx, sctx, dpr);
     }
 
     // --- net-name labels (+ pad numbers) ---
@@ -788,6 +1012,102 @@ export function PcbGlView({ visible }: { visible: boolean }) {
       ctx.restore();
     }
 
+    // --- visual diff: placement move vectors + focused-change pulse frame ---
+    // A vector shows WHERE a moved footprint came from (old centroid, red dot) and
+    // landed (new centroid, green dot) — drawn for EVERY visible placement move, so
+    // the overview reads at a glance (a solo naturally leaves just one). The pulsing
+    // accent frame marks the focused change's extent so a stepper landing is
+    // unmistakable against the compare tint.
+    diffPulse.current = false;
+    if (diffOnRef.current) {
+      const d = useDiffStore.getState();
+      const errCol = rootStyle.getPropertyValue("--err").trim() || "#e05252";
+      const okCol = rootStyle.getPropertyValue("--ok").trim() || "#4caf7d";
+      const sxOf = (x: number) => (x - c.x) * scale + cssW / 2;
+      const syOf = (y: number) => (y - c.y) * scale + cssH / 2;
+      const rA = rendererARef.current;
+      if (rA && d.doc) {
+        let vectors = 0;
+        for (const chg of d.doc.changes) {
+          if (vectors >= 100) break; // cap: a pathological changeset can't stall the frame
+          if (chg.kind !== "moved" || !chg.anchors.pcb?.comp) continue;
+          if (d.hiddenChangeIds.has(chg.id)) continue;
+          const bA = rA.compBBox(chg.anchors.pcb.comp);
+          const bB = r.compBBox(chg.anchors.pcb.comp);
+          if (!bA || !bB) continue;
+          const x0 = sxOf((bA.minx + bA.maxx) / 2);
+          const y0 = syOf((bA.miny + bA.maxy) / 2);
+          const x1 = sxOf((bB.minx + bB.maxx) / 2);
+          const y1 = syOf((bB.miny + bB.maxy) / 2);
+          // Off-screen or sub-4-px (rotation-only / tiny nudge at this zoom): skip —
+          // two smeared dots read worse than nothing.
+          if (Math.hypot(x1 - x0, y1 - y0) <= 4) continue;
+          if (Math.max(x0, x1) < 0 || Math.min(x0, x1) > cssW || Math.max(y0, y1) < 0 || Math.min(y0, y1) > cssH) continue;
+          ctx.save();
+          ctx.strokeStyle = accent;
+          ctx.lineWidth = 1.5;
+          ctx.setLineDash([5, 4]);
+          ctx.beginPath();
+          ctx.moveTo(x0, y0);
+          ctx.lineTo(x1, y1);
+          ctx.stroke();
+          ctx.setLineDash([]);
+          ctx.fillStyle = errCol;
+          ctx.beginPath();
+          ctx.arc(x0, y0, 3.5, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.fillStyle = okCol;
+          ctx.beginPath();
+          ctx.arc(x1, y1, 3.5, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.restore();
+          vectors++;
+        }
+      }
+      // Accent frames: the focused change pulses; while a shift-click subset is active,
+      // every OTHER visible change gets a steady frame too, so everything selected is
+      // findable at a glance (feedback: "whatever is selected needs the blue box").
+      if (d.doc) {
+        const subsetActive = d.hiddenChangeIds.size > 0;
+        let framed = 0;
+        for (const chg of d.doc.changes) {
+          if (framed >= 40) break; // cap: a huge subset can't stall the frame
+          const pcbA = chg.anchors.pcb;
+          if (!pcbA || d.hiddenChangeIds.has(chg.id)) continue;
+          const isFocused = chg.id === d.focusedChangeId;
+          if (!isFocused && !subsetActive) continue; // overview: only the focused frames
+          // Frame rect: the change's OWN extent (just the changed primitives — a
+          // rerouted stretch, not the whole net); until the flags land, the anchor's
+          // bbox, else the comp/net extent. Same cascade revealChange lands the camera
+          // on, so the frame and the camera always agree.
+          const fb = boxForChange(chg, r);
+          if (!fb) continue;
+          const pad = 6; // screen-px breathing room so the frame never sits on the copper
+          const fx = sxOf(fb.minx) - pad;
+          const fy = syOf(fb.miny) - pad;
+          const fw = (fb.maxx - fb.minx) * scale + 2 * pad;
+          const fh = (fb.maxy - fb.miny) * scale + 2 * pad;
+          ctx.save();
+          // Faint fill so the whole selected region reads highlighted, not just an edge.
+          ctx.globalAlpha = 0.08;
+          ctx.fillStyle = accent;
+          ctx.fillRect(fx, fy, fw, fh);
+          if (isFocused) {
+            ctx.globalAlpha = 0.45 + 0.35 * Math.sin(performance.now() / 250);
+            ctx.lineWidth = 2;
+            diffPulse.current = true; // keep the rAF loop ticking for the pulse
+          } else {
+            ctx.globalAlpha = 0.55;
+            ctx.lineWidth = 1.5;
+          }
+          ctx.strokeStyle = accent;
+          ctx.strokeRect(fx, fy, fw, fh);
+          ctx.restore();
+          framed++;
+        }
+      }
+    }
+
     // --- measure tool: ruler + readout, on top of everything (§7.6) ---
     if (measureActiveRef.current) {
       const cssVar = (name: string, fallback: string) =>
@@ -812,12 +1132,50 @@ export function PcbGlView({ visible }: { visible: boolean }) {
     }
   };
 
+  // ---- diff-mode inputs: A geometry + both sides' changed flags ------------
+  // Prepared asynchronously; landing bumps diffEpoch so the create effect below
+  // rebuilds both renderers with the flags baked into their GPU batches.
+  useEffect(() => {
+    if (!diffActive) {
+      if (diffDataRef.current) {
+        diffDataRef.current = null;
+        setDiffEpoch((e) => e + 1); // rebuild back to the plain single-board renderer
+      }
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      const geomB = await getPcbGeometry();
+      const geomA = await useDiffStore.getState().getPcbGeometryA(indexes?.pcb_geometry);
+      if (cancelled || !geomA || !geomB) return; // schematic-only side → plain render
+      // The semantic change list drives per-primitive OWNERSHIP (per-change show/solo)
+      // and gates zone tinting on a real zone row (refill jitter stays grey).
+      const changes = useDiffStore.getState().doc?.changes ?? [];
+      const flags = computeDiffFlags(geomA, geomB, changes);
+      diffDataRef.current = { geomA, geomB, flagsA: flags.a, flagsB: flags.b };
+      setDiffEpoch((e) => e + 1);
+      // A change focused before the flags landed was framed on its coarse anchor
+      // (whole net / comp): re-land the camera on the true extent now known.
+      const d = useDiffStore.getState();
+      const focused = d.doc?.changes.find((c) => c.id === d.focusedChangeId);
+      if (focused?.anchors.pcb) revealChange(focused);
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // diffDoc + diffCacheKeyA key the effect to the diff SESSION: a re-prepared doc (or a
+    // new A side) re-bakes the flags/geomA even when diffActive and indexes don't change.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [diffActive, indexes, getPcbGeometry, diffDoc, diffCacheKeyA]);
+
   // ---- create / dispose renderer -----------------------------------------
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas || !indexes?.pcb_geometry) {
       rendererRef.current?.dispose();
       rendererRef.current = null;
+      rendererARef.current?.dispose();
+      rendererARef.current = null;
       return;
     }
     // premultipliedAlpha: true — the SRC_ALPHA blend leaves a premultiplied framebuffer;
@@ -827,34 +1185,59 @@ export function PcbGlView({ visible }: { visible: boolean }) {
     if (!gl || gl.isContextLost()) return; // a lost context can't build GL resources yet
     let cancelled = false;
     let created: PcbGlRenderer | null = null;
+    let createdA: PcbGlRenderer | null = null;
     void getPcbGeometry().then((geom) => {
       if (cancelled || !geom) return;
+      const diff = diffDataRef.current;
       try {
-        created = new PcbGlRenderer(gl, geom);
+        created = new PcbGlRenderer(gl, geom, diff?.flagsB);
+        // The A side shares the GL context (two compact geometries resident is fine);
+        // its own layer table maps the same hidden/active names.
+        if (diff) createdA = new PcbGlRenderer(gl, diff.geomA, diff.flagsA);
       } catch (e) {
         console.error("PcbGlRenderer init failed", e);
         return;
       }
       rendererRef.current = created;
+      rendererARef.current = createdA;
       snapIndex.current = buildSnapIndex(geom); // measure-tool point-snap targets (§5)
       edgeIndex.current = buildEdgeIndex(geom); // on-edge / edge-to-edge projection (feature 13)
       // Drop any measurement carried over from the previous board.
       mA.current = mB.current = mHover.current = null;
       const pv = usePcbViewStore.getState();
-      created.setLayerState(pv.hidden, pv.active);
+      // Diff mode fades the visible copper stack top→bottom so a multi-layer compare
+      // reads in depth; a plain rebuild keeps the normal opaque alphas.
+      created.setLayerState(pv.hidden, pv.active, !!diff);
+      createdA?.setLayerState(pv.hidden, pv.active, true);
+      // Fresh renderers start with everything visible — re-apply the current
+      // per-change visibility (a solo may already be active when we rebuild).
+      if (diff) {
+        const d = useDiffStore.getState();
+        const vis = d.doc ? buildDiffVisibility(d.doc.changes, d.hiddenChangeIds) : null;
+        diffVisRef.current = vis; // keep the drawOverlay cache in step with the rebuild
+        created.setDiffVisibility(vis);
+        createdA?.setDiffVisibility(vis);
+      }
       syncSelection(created);
       renderPcbCommentChips(); // re-anchor chips to the fresh geometry
-      fitted.current = false; // fresh board isn't framed until the first-sized-frame fit
-      needsFit.current = true;
+      // A NEW design refits; a diff-mode rebuild of the SAME board keeps the camera
+      // (entering/leaving a comparison must not yank the user's viewpoint).
+      if (lastIndexesRef.current !== indexes) {
+        lastIndexesRef.current = indexes;
+        fitted.current = false;
+        needsFit.current = true;
+      }
       dirty.current = true;
     });
     return () => {
       cancelled = true;
       created?.dispose();
+      createdA?.dispose();
       if (rendererRef.current === created) rendererRef.current = null;
+      if (rendererARef.current === createdA) rendererARef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [indexes, getPcbGeometry, restoreNonce]);
+  }, [indexes, getPcbGeometry, restoreNonce, diffEpoch]);
 
   // Context-loss recovery (see contextLost above). Prevent the default so the browser can
   // restore the context, drop the now-invalid renderer, and rebuild on restore. Listeners
@@ -886,14 +1269,67 @@ export function PcbGlView({ visible }: { visible: boolean }) {
     const r = rendererRef.current;
     if (!r) return;
     r.resolveColors();
+    rendererARef.current?.resolveColors();
     dirty.current = true;
   }, [indexes?.theme]);
+
+  // Blink: pulse the changed copper — removed (A) and added (B) overlays alternate
+  // phases every 500 ms over the stable grey base, so what pulses IN is new copper and
+  // what pulses OUT is old. Holding Space freezes the current phase.
+  useEffect(() => {
+    if (!diffActive || !diffBlink) {
+      blinkA.current = true;
+      return;
+    }
+    const t = setInterval(() => {
+      if (blinkHold.current) return;
+      blinkA.current = !blinkA.current;
+      dirty.current = true;
+    }, 500);
+    const down = (e: KeyboardEvent) => {
+      // Only while the PCB canvas is up — the blink pause is a PCB-compare affordance,
+      // and this window-level preventDefault must not swallow Space on the schematic.
+      if (e.code === "Space" && !isTypingTarget(e) && useViewStore.getState().view === "pcb") {
+        e.preventDefault();
+        blinkHold.current = true;
+      }
+    };
+    const up = (e: KeyboardEvent) => {
+      if (e.code === "Space") blinkHold.current = false;
+    };
+    window.addEventListener("keydown", down);
+    window.addEventListener("keyup", up);
+    return () => {
+      clearInterval(t);
+      window.removeEventListener("keydown", down);
+      window.removeEventListener("keyup", up);
+    };
+  }, [diffActive, diffBlink]);
+
+  // Per-change visibility (show-all / solo / eye toggles) → the renderers' GPU mask.
+  // A texture update, not a rebuild — stepping J/K through changes stays instant.
+  useEffect(() => {
+    if (!diffActive) return;
+    const doc = useDiffStore.getState().doc;
+    if (!doc) return;
+    const vis = buildDiffVisibility(doc.changes, diffHiddenIds);
+    diffVisRef.current = vis;
+    rendererRef.current?.setDiffVisibility(vis);
+    rendererARef.current?.setDiffVisibility(vis);
+    dirty.current = true;
+  }, [diffActive, diffHiddenIds, diffEpoch]);
+
+  // Mode/focus switches need a redraw (the loop is dirty-driven).
+  useEffect(() => {
+    dirty.current = true;
+  }, [diffActive, diffBlink, diffHideZones, diffFocusedId]);
 
   // ---- store → renderer sync ---------------------------------------------
   useEffect(() => {
     const r = rendererRef.current;
     if (!r) return;
     r.setLayerState(hidden, active);
+    rendererARef.current?.setLayerState(hidden, active);
     dirty.current = true;
   }, [hidden, active]);
 
@@ -941,6 +1377,7 @@ export function PcbGlView({ visible }: { visible: boolean }) {
       renderPcbCommentChips();
     };
     pcbNav.reveal = (anchor) => revealAnchor(anchor);
+    pcbNav.revealChange = (change) => revealChange(change);
     // Esc while measuring: clear an in-progress measurement (report whether we did, so
     // the app keymap only exits the mode when there was nothing to clear).
     measureNav.escape = () => {
@@ -974,6 +1411,7 @@ export function PcbGlView({ visible }: { visible: boolean }) {
       pcbNav.zoomBy = () => {};
       pcbNav.setComments = () => {};
       pcbNav.reveal = () => {};
+      pcbNav.revealChange = () => {};
       measureNav.escape = () => false;
       measureNav.clear = () => {};
       measureNav.copy = () => false;
@@ -1014,11 +1452,38 @@ export function PcbGlView({ visible }: { visible: boolean }) {
         if (canvas.width !== w || canvas.height !== h) {
           canvas.width = w;
           canvas.height = h;
+          // A camera still at a plain whole-board fit tracks the resize (the first
+          // fit may have measured a not-yet-settled layout); a placed camera doesn't.
+          if (atFit.current) fit();
           dirty.current = true;
         }
         if (dirty.current && w > 0 && h > 0) {
           r.setDpr(dpr);
-          r.render(cam.current, w, h, objRef.current);
+          const rA = rendererARef.current;
+          if (rA && diffOnRef.current) {
+            rA.setDpr(dpr);
+            const base = objRef.current;
+            // The banner's Zones toggle drops pours from the WHOLE compare (they
+            // re-flow around edits; sometimes even the gated tint is unwanted).
+            const obj = hideZonesRef.current
+              ? { objects: { ...base.objects, zones: false }, opacity: base.opacity }
+              : base;
+            // Overlay: the unchanged common base as flat grey (from B), then the changed
+            // copper in its TRUE layer colour — B's added copper solid-but-sheer FIRST,
+            // A's removed copper crosshatched ON TOP (colour = layer, texture = old/new;
+            // DIFF_LAYER_MIX). Removed paints last because a same-spot restyle (e.g. a
+            // thickened track) otherwise buries the old copper under the new; the sheer
+            // added pass + the crosshatch cuts keep both readable where they overlap.
+            // With blink on, removed and added alternate phases instead.
+            r.render(cam.current, w, h, obj, { diffPass: 1 });
+            const blinkOn = blinkRef.current;
+            if (!blinkOn || !blinkA.current)
+              r.render(cam.current, w, h, obj, { clear: false, diffPass: 2, diffMix: DIFF_LAYER_MIX, diffAlpha: DIFF_ADDED_ALPHA });
+            if (!blinkOn || blinkA.current)
+              rA.render(cam.current, w, h, obj, { clear: false, diffPass: 2, diffMix: DIFF_LAYER_MIX, diffHatch: true });
+          } else {
+            r.render(cam.current, w, h, objRef.current);
+          }
           drawOverlay(r, canvas.clientWidth, canvas.clientHeight, dpr);
           // Comment chips ride their world anchors at fixed screen size.
           const cw = canvas.clientWidth;
@@ -1028,7 +1493,9 @@ export function PcbGlView({ visible }: { visible: boolean }) {
             const sy = (cc.y - cam.current.y) * cam.current.scale + ch / 2;
             cc.el.style.transform = `translate(${sx + 2}px,${sy}px) translateY(-65%)`;
           }
-          dirty.current = false;
+          // The focused-change pulse frame is the one continuous animation; keep the
+          // dirty-driven loop hot only while it's actually on screen.
+          dirty.current = diffPulse.current;
         }
       }
       raf = requestAnimationFrame(loop);
@@ -1218,6 +1685,7 @@ export function PcbGlView({ visible }: { visible: boolean }) {
     const dx = e.clientX - d.x;
     const dy = e.clientY - d.y;
     if (Math.abs(dx) + Math.abs(dy) > 3) d.moved = true;
+    atFit.current = false;
     cam.current.x -= dx / cam.current.scale;
     cam.current.y -= dy / cam.current.scale;
     d.x = e.clientX;
@@ -1248,6 +1716,7 @@ export function PcbGlView({ visible }: { visible: boolean }) {
       const my = e.clientY - rect.top - rect.height / 2;
       const wx = cam.current.x + mx / cam.current.scale;
       const wy = cam.current.y + my / cam.current.scale;
+      atFit.current = false;
       cam.current.scale *= Math.exp(-e.deltaY * 0.0015);
       cam.current.scale = Math.max(MIN_SCALE, Math.min(cam.current.scale, MAX_SCALE));
       cam.current.x = wx - mx / cam.current.scale;

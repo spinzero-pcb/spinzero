@@ -22,12 +22,15 @@ interface ProjectState {
   extractions: ExtractionMeta[];
   /** The extraction shown in the viewer; null = latest/live. */
   activeExtraction: string | null;
+  /** The revision the KiCad design folder currently matches (null = unknown) —
+   *  shown as the "KiCad files" marker so viewing-vs-disk divergence is visible. */
+  designHead: string | null;
   /** Read-only mode: the project's design folder is missing on this machine. */
   designPathMissing: boolean;
   busy: boolean;
   errorMsg: string | null;
-  /** Pending checkout confirmation (set when a switch would overwrite un-captured
-   *  on-disk edits); the modal resolves the promise with the user's choice. */
+  /** Pending confirmation for updateDesignFiles (set when the write would overwrite
+   *  un-captured on-disk edits); the modal resolves the promise with the user's choice. */
   checkoutPrompt: { resolve: (ok: boolean) => void } | null;
 
   init: () => Promise<void>;
@@ -40,14 +43,18 @@ interface ProjectState {
     class?: string | null;
   }) => Promise<void>;
   relinkDesignPath: (newDesignPath: string) => Promise<void>;
-  setActiveExtraction: (id: string | null) => Promise<void>;
+  /** Pin the viewer to a revision. Resolves `true` when the switch landed, `false` when
+   *  it was skipped (a switch/update was already in flight) or the IPC failed — so a
+   *  caller like the diff enter can detect a silent no-op instead of proceeding on the
+   *  wrong revision. */
+  setActiveExtraction: (id: string | null) => Promise<boolean>;
+  updateDesignFiles: (id: string) => Promise<void>;
   labelExtraction: (id: string, label: string | null) => Promise<void>;
   setTag: (id: string, name: string, message?: string | null) => Promise<void>;
   removeTag: (name: string) => Promise<void>;
   hide: (id: string) => Promise<void>;
   unhide: (id: string) => Promise<void>;
   publish: (id: string, message: string) => Promise<void>;
-  purgeLocal: (id: string) => Promise<void>;
   deleteCheckpoint: (id: string) => Promise<void>;
   refreshIndex: () => Promise<void>;
 }
@@ -66,7 +73,7 @@ function resetForNewProject() {
   sel.setCurrentSheet(null);
   useSelectionStore.setState({ pinned: [] });
   // A checkout-confirm prompt may be awaiting the user when the project is torn down.
-  // Resolve it false so the awaiting setActiveExtraction unwinds (and clears `busy`)
+  // Resolve it false so the awaiting updateDesignFiles unwinds (and clears `busy`)
   // instead of stranding the promise — a stranded prompt wedges `busy` and blocks all
   // future revision switches.
   const pendingPrompt = useProjectStore.getState().checkoutPrompt;
@@ -108,6 +115,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   layers: [],
   extractions: [],
   activeExtraction: null,
+  designHead: null,
   designPathMissing: false,
   busy: false,
   errorMsg: null,
@@ -136,7 +144,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     set({ busy: true, errorMsg: null });
     try {
       resetForNewProject();
-      set({ summary: null, sheets: [], layers: [], extractions: [] });
+      set({ summary: null, sheets: [], layers: [], extractions: [], designHead: null });
       const project = await ipc.openProject(projectDir);
       set(adopt(project));
       // A failed recents refresh must not report the (already-open) project as failed —
@@ -177,7 +185,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     set({ busy: true, errorMsg: null });
     try {
       resetForNewProject();
-      set({ summary: null, sheets: [], layers: [], extractions: [] });
+      set({ summary: null, sheets: [], layers: [], extractions: [], designHead: null });
       const project = await ipc.createProject(args);
       set({ ...adopt(project), recents: await ipc.getRecentProjects() });
       // First extraction runs in the background; the design loads off the crunch
@@ -205,16 +213,41 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     }
   },
 
+  // Pure viewer switch: the design folder on disk is never touched, so there is
+  // nothing to confirm. Writing files back is the separate updateDesignFiles action.
   setActiveExtraction: async (id) => {
+    if (get().busy) return false; // don't overlap another switch/update — caller sees the no-op
+    set({ busy: true });
+    try {
+      await ipc.setActiveExtraction(id);
+      // Switched: re-resolve highlights/selection against the newly-active bundle.
+      set({ activeExtraction: id });
+      const sel = useSelectionStore.getState();
+      sel.setHighlights([], "sch");
+      sel.setSelection(null, "sch");
+      await Promise.all([get().refreshIndex(), useDesignStore.getState().load()]);
+      return true;
+    } catch (e) {
+      useToastStore.getState().push({ kind: "error", title: "Couldn’t switch revision", message: String(e) });
+      return false;
+    } finally {
+      set({ busy: false });
+    }
+  },
+
+  // Explicitly write a revision back into the KiCad design folder (history graph →
+  // "Update KiCad files…"). Un-captured on-disk edits raise the confirm dialog and are
+  // captured as a local checkpoint before the overwrite. Also points the viewer at it.
+  updateDesignFiles: async (id) => {
     if (get().busy) return; // a checkout is a slow disk write — don't overlap
     set({ busy: true });
     try {
-      let res = await ipc.setActiveExtraction(id, false);
+      let res = await ipc.updateDesignFiles(id, false);
       if (res.status === "busy") {
         useToastStore.getState().push({
           kind: "warning",
           title: "Extraction in progress",
-          message: "Try switching again in a moment.",
+          message: "Try updating again in a moment.",
         });
         return;
       }
@@ -225,17 +258,23 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
         const ok = await new Promise<boolean>((resolve) => set({ checkoutPrompt: { resolve } }));
         set({ checkoutPrompt: null });
         if (!ok) return; // cancel: viewer + disk unchanged
-        res = await ipc.setActiveExtraction(id, true);
+        res = await ipc.updateDesignFiles(id, true);
         if (res.status !== "switched") {
-          useToastStore.getState().push({ kind: "error", title: "Couldn’t switch revision" });
+          useToastStore.getState().push({ kind: "error", title: "Couldn’t update the KiCad files" });
           return;
         }
       }
-      // Switched: re-resolve highlights/selection against the newly-active bundle.
+      // Updated: the backend also pointed the viewer at this revision — mirror it and
+      // re-resolve highlights/selection against the newly-active bundle.
       set({ activeExtraction: id });
       const sel = useSelectionStore.getState();
       sel.setHighlights([], "sch");
       sel.setSelection(null, "sch");
+      useToastStore.getState().push({
+        kind: "success",
+        title: "KiCad files updated",
+        message: "If the design is open in KiCad, close it and open it again to see this version.",
+      });
       if (res.captured) {
         useToastStore.getState().push({
           kind: "info",
@@ -245,7 +284,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       }
       await Promise.all([get().refreshIndex(), useDesignStore.getState().load()]);
     } catch (e) {
-      useToastStore.getState().push({ kind: "error", title: "Couldn’t switch revision", message: String(e) });
+      useToastStore.getState().push({ kind: "error", title: "Couldn’t update the KiCad files", message: String(e) });
     } finally {
       set({ busy: false });
     }
@@ -268,14 +307,6 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     }),
   deleteCheckpoint: (id) =>
     refreshAfter("Couldn’t delete checkpoint", () => ipc.deleteCheckpoint(id)),
-  purgeLocal: (id) =>
-    refreshAfter("Couldn’t delete", () => ipc.purgeRevisionLocal(id), {
-      // Honest serverless caveat — be clear about what a permanent delete can and can't reach.
-      kind: "warning",
-      title: "Deleted permanently",
-      message:
-        "Removed for everyone and its bytes deleted from this machine. Teammates who already synced keep their copy until their own cleanup.",
-    }),
 
   refreshIndex: async () => {
     // The index may still be rebuilding in the background right after open
@@ -283,16 +314,17 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     const dir = get().project?.project_dir;
     for (let attempt = 0; attempt < 6; attempt++) {
       try {
-        const [summary, sheets, layers, extractions] = await Promise.all([
+        const [summary, sheets, layers, extractions, designHead] = await Promise.all([
           ipc.getProjectSummary(),
           ipc.listSheets(),
           ipc.listLayers(),
           ipc.listExtractions(),
+          ipc.getDesignHead(),
         ]);
         // The user may have switched projects while we awaited; a stale iteration of this
         // loop (it can run up to ~10s) must not overwrite the new project's rows.
         if (get().project?.project_dir !== dir) return;
-        set({ summary, sheets, layers, extractions: extractions.map(normalizeExtraction) });
+        set({ summary, sheets, layers, extractions: extractions.map(normalizeExtraction), designHead });
         if (summary && sheets.length > 0) {
           void useSelectionStore.getState().loadPinned(); // item 22: per-project highlights
           return;

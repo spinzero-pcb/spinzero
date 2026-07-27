@@ -33,6 +33,9 @@ export interface CompLite {
   dnp: boolean;
   nets: string[];
   svg_id: string;
+  /** Placed schematic bounding box [x, y, w, h] on its sheet, when the library
+   *  symbol has geometry (used by the diff engine to detect symbol moves). */
+  bbox?: [number, number, number, number];
 }
 
 export interface LayerLite {

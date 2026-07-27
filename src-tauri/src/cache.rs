@@ -7,8 +7,11 @@
 //! version + every source file's hash. The cache is:
 //!
 //! - **regenerable** — gitignored, safe to delete; rebuilt on next open;
-//! - **self-invalidating** — bumping `extract::EXTRACTOR_CACHE_EPOCH` or editing
-//!   any source file changes the key, so a stale entry is never served;
+//! - **self-invalidating** — a new app release (`CARGO_PKG_VERSION`), a bump of
+//!   `extract::EXTRACTOR_CACHE_EPOCH`, or an edit to any source file changes the key,
+//!   so a stale entry is never served. Folding in the app version means every update
+//!   re-extracts on next open even when the extractor logic looks unchanged, since the
+//!   new build may extract differently;
 //! - **content-addressed** — the same source + extractor reuses one dir, so storage
 //!   stops growing with the number of crunches.
 //!
@@ -35,11 +38,22 @@ pub fn cache_dir(project_dir: &Path, key: &str) -> PathBuf {
     cache_root(project_dir).join(key)
 }
 
-/// Content+logic cache key: the extractor's output-contract version folded with the
-/// BLAKE3 of every relevant source file (the same map the crunch hash gate builds).
-/// Deterministic — `source_hashes` is a `BTreeMap`, so iteration order is stable.
+/// Content+logic cache key: the app version and the extractor's output-contract
+/// version, folded with the BLAKE3 of every relevant source file (the same map the
+/// crunch hash gate builds). Deterministic — `source_hashes` is a `BTreeMap`, so
+/// iteration order is stable.
+///
+/// The app's own `CARGO_PKG_VERSION` (bumped on every release, in `src-tauri/Cargo.toml`)
+/// is part of the key, so **every app update re-extracts on the next open even if no
+/// source file changed and nobody bumped `extract::EXTRACTOR_CACHE_EPOCH`**. This makes
+/// the "extraction may have changed in the new version" guarantee automatic rather than
+/// relying on a developer remembering the epoch. `extract::cache_version()` stays in the
+/// key too, so a logic-only extractor change shipped without a version bump (dev builds)
+/// still invalidates when the epoch moves.
 pub fn cache_key(source_hashes: &BTreeMap<String, String>) -> String {
     let mut h = blake3::Hasher::new();
+    h.update(env!("CARGO_PKG_VERSION").as_bytes());
+    h.update(b"\0");
     h.update(extract::cache_version().as_bytes());
     for (path, hash) in source_hashes {
         h.update(b"\0");

@@ -25,6 +25,16 @@ Never attach a proprietary design you don't have the right to share.
 - Verify before submitting: `npm run build` (tsc + vite), `npx vitest run`,
   and `cargo test --lib` in `src-tauri/`.
 
+## Project layout
+
+| Path | What |
+|---|---|
+| `src/` | Frontend — React + TypeScript, zustand stores, canvas renderers |
+| `src-tauri/src/` | Rust core: raw store, watcher, extraction pipeline, reviews, SQLite index |
+| `src-tauri/crates/eda-parse-kicad/` | Parser + in-memory model for KiCad file formats |
+| `src-tauri/crates/extract/` | Projects a parsed design into the review bundle (also builds the standalone `pcb-extract` binary) |
+| `scripts/` | Release cutting, raw-store recovery, index sanity checks |
+
 ## File-format parsing
 
 The `eda-parse-kicad` crate is written from the file formats themselves

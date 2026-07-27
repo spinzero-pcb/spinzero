@@ -1,30 +1,61 @@
 # SpinZero
 
-Local-first design review for KiCad PCB projects.
-
-Point SpinZero at a project folder: it imports the design with its own
-extraction pipeline, snapshots every change, and lets reviewers pin comments
-directly to the net, footprint, or trace they're about. When the design moves,
-affected comments are automatically flagged for re-check — no more stale PDF
-markups. Everything stays on your machine: no cloud, no account, no upload.
+Review KiCad PCB designs - pin comments to the actual nets, footprints, and traces, and let SpinZero track what changed between revisions. No cloud, no account, no upload.
 
 ![Cross-probing a net from schematic to PCB and anchoring a review comment](assets/spinzero-demo.gif)
 
-*Search a net, cross-probe it from schematic to copper with one key, and pin
-review comments directly to the objects they're about.*
+## Get started
 
-**Download:** signed Windows installers are published on the
-[Releases page](https://github.com/spinzero-pcb/spinzero/releases)
-(the app auto-updates from there).
+1. **Install** — grab the signed Windows installer from the
+   [Releases page](https://github.com/spinzero-pcb/spinzero/releases).
 
-## How it reads your design files
+2. **Open your project** — point SpinZero at your KiCad project folder. It
+   imports the schematic and board as-is; your KiCad files are never
+   modified.
+3. **Start reviewing** — everything below happens inside SpinZero while you
+   keep editing in KiCad as usual.
 
-SpinZero contains its **own, independently written** parser and extraction
-pipeline (the `eda-parse-kicad` and `extract` crates under
-[`src-tauri/crates/`](src-tauri/crates/)). It does not link, embed, or invoke
-any KiCad code — it reads the KiCad file formats directly. Your KiCad source
-files are stored untouched in the project's `raw/` store as the system of
-record; everything SpinZero derives from them is regenerable.
+## How you use it
+
+### Find anything fast
+
+Press **Ctrl+F** and type a net or component name — SpinZero searches the
+whole design and jumps you to it. **Ctrl+P** opens the command palette for
+everything else (e.g. the measure tool is **Ctrl+Shift+M**).
+
+### Jump between schematic and board
+
+Select a net or component and press **X** to cross-probe: the same object
+lights up on the schematic and the copper, so you can check a routing
+concern against the schematic intent in one keystroke.
+
+### Pin comments where they belong
+
+Right-click a net, footprint, or trace and add a comment — it stays anchored
+to that object. Threads live in the
+review panel, so discussion and design stay side by side.
+
+### Keep reviewing as the design changes
+
+Every time you save in KiCad, SpinZero snapshots the design automatically.
+When something a comment points at moves or changes, that comment is flagged
+for re-check - you will never sign off against a stale markup. The **Changes**
+panel lists exactly what differs between revisions and tracks your review
+progress through it, and the history graph lets you step back through any
+earlier snapshot.
+
+### Check the BOM
+
+The **BOM** tab gives you the bill of materials extracted straight from the
+design, ready to sanity-check parts during review.
+
+## Your files stay yours
+
+SpinZero reads KiCad file formats with its own parser — it never links,
+embeds, or invokes KiCad code, and it never writes to your source files.
+Your originals are stored untouched as the system of record; everything
+SpinZero derives from them is regenerable. Nothing leaves your machine, and
+crash/usage reporting is opt-in (File ▸ Privacy).
 
 ## Building from source
 
@@ -40,21 +71,10 @@ npm run tauri build   # release build → src-tauri/target/release/spinzero.exe
 Frontend-only checks: `npm run build` (tsc + vite) and `npx vitest run`.
 Rust tests: `cargo test --lib` in `src-tauri/`.
 
-A build from source has **telemetry disabled by default**: crash/usage
-reporting is compiled in only when a Sentry DSN is provided at build time (see
-[`.env.example`](.env.example)), and even official builds honor the in-app
-consent toggle (File ▸ Privacy). Updater signing also lives in `.env` —
+A build from source has telemetry disabled by default: crash/usage reporting
+is compiled in only when a Sentry DSN is provided at build time (see
+[`.env.example`](.env.example)). Updater signing also lives in `.env` —
 without it you get a normal unsigned dev build.
-
-## Project layout
-
-| Path | What |
-|---|---|
-| `src/` | Frontend — React + TypeScript, zustand stores, canvas renderers |
-| `src-tauri/src/` | Rust core: raw store, watcher, extraction pipeline, reviews, SQLite index |
-| `src-tauri/crates/eda-parse-kicad/` | Parser + in-memory model for KiCad file formats |
-| `src-tauri/crates/extract/` | Projects a parsed design into the review bundle (also builds the standalone `pcb-extract` binary) |
-| `scripts/` | Release cutting, raw-store recovery, index sanity checks |
 
 ## License
 
@@ -65,5 +85,6 @@ as KiCad. Individual use is free forever; team sync licenses fund development.
 ## Contributing
 
 Issues and pull requests are welcome — see
-[CONTRIBUTING.md](CONTRIBUTING.md). Bug reports with a minimal KiCad project
-that reproduces the problem are especially valuable.
+[CONTRIBUTING.md](CONTRIBUTING.md), which also describes the project layout.
+Bug reports with a minimal KiCad project that reproduces the problem are
+especially valuable.

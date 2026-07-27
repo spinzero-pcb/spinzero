@@ -10,12 +10,14 @@ import {
 import { sheetMatches, type Selection, type SheetRef } from "../../lib/design";
 import { isTypingTarget } from "../../lib/keymap";
 import { useViewStore } from "../../stores/viewStore";
-import { canvasRestore, nav, type ChipComment } from "./navigator";
+import { buildDiffOverlay, camBridge, canvasRestore, nav, type ChipComment } from "./navigator";
+import { useDiffStore } from "../../stores/diffStore";
 import { relabelInstances } from "./relabel";
+import { pinUnitUuid as resolvePinUnit } from "./pinUnit";
 import { useReviewStore } from "../../stores/reviewStore";
 import { Overview } from "./Overview";
 import { ContextMenu, type MenuItem } from "../ContextMenu";
-import { IconBoard, IconComment, IconCopy, IconFit, IconTrash } from "../icons";
+import { IconBoard, IconClose, IconComment, IconCopy, IconFit, IconTrash } from "../icons";
 import { registerRenderProbe } from "../../lib/renderProbe";
 import { ipc } from "../../lib/ipc";
 
@@ -182,17 +184,31 @@ export function Canvas() {
     }
 
     // -------------------------------------------------------------- camera
+    // Width reserved on the right for the floating properties card. In diff mode the
+    // card is never shown (focusing a change is read-only — nothing gets selected) and
+    // the schematic is a half-width B pane, so reserving the full gutter there shrinks
+    // the landing until a change reads as "zoomed out to fit". Drop it while diffing.
+    const gutter = () => (useDiffStore.getState().active ? 0 : CARD_GUTTER);
+    // True while the camera sits at a plain whole-sheet fit (boot, sheet switch, or an
+    // explicit Fit) and nothing else has moved it. While true, a stage resize re-runs
+    // the fit: the boot fit can measure a not-yet-settled layout (window still
+    // restoring/maximizing, panels still mounting), which left the sheet small and
+    // left-anchored with dead space (feedback 2.PNG). Any pan/zoom/landing clears it,
+    // so a resize never fights a camera the user (or a jump) has placed.
+    let atFit = false;
     function fitSheet() {
       const r = stage.getBoundingClientRect();
-      const usableW = r.width - CARD_GUTTER;
+      const usableW = r.width - gutter();
       const s = Math.min(usableW / vb.current[2], (r.height - 2 * PAD) / vb.current[3]);
       tgt.current.s = s;
       tgt.current.x = PAD;
       tgt.current.y = PAD + ((r.height - 2 * PAD) - vb.current[3] * s) / 2;
+      atFit = true;
     }
     function centerOn(ux: number, uy: number, viewW: number) {
+      atFit = false;
       const r = stage.getBoundingClientRect();
-      const usableW = r.width - CARD_GUTTER;
+      const usableW = r.width - gutter();
       const s = Math.min(60, Math.max(0.2, usableW / viewW));
       tgt.current.s = s;
       tgt.current.x = usableW / 2 - (ux - vb.current[0]) * s;
@@ -226,8 +242,15 @@ export function Canvas() {
         }
       }
       if (!isFinite(minX)) return false;
+      frameWorldBox(minX, minY, maxX, maxY, viewW);
+      return true;
+    }
+    /** Land the shared camera on an explicit world-space bbox with the same padding/fit
+     *  rules as centerOnUuids — shared by the same-sheet uuid focus and camBridge's
+     *  A-island landing (a removed object framed from the A side). */
+    function frameWorldBox(minX: number, minY: number, maxX: number, maxY: number, viewW: number) {
       const r = stage.getBoundingClientRect();
-      const usableW = r.width - CARD_GUTTER;
+      const usableW = r.width - gutter();
       const usableH = r.height - 2 * PAD;
       const aspect = usableW / usableH; // px aspect, to weigh the Y span as an X-width
       const PADDING = 1.3; // breathing room so the framed set isn't flush to the edges
@@ -241,7 +264,6 @@ export function Canvas() {
       need = Math.min(need, Math.max(vb.current[2], aspect * vb.current[3]));
       centerOn((minX + maxX) / 2, (minY + maxY) / 2, need);
       focusWorld.current = { x: (minX + maxX) / 2, y: (minY + maxY) / 2 };
-      return true;
     }
 
     // -------------------------------------------------------------- sheet load
@@ -369,6 +391,22 @@ export function Canvas() {
       }
       svg.appendChild(ov);
     }
+    /** Visual-diff tint: clone the changed uuids into a `.hl-diff` overlay coloured by
+     *  the change's role (err/ok/warn CSS vars) and scrim the rest, so the focused change
+     *  reads against a dimmed sheet (§4). Kept in its own class so the normal
+     *  clearPaint/renderHighlights cycle never wipes it; cleared explicitly via clearDiff. */
+    function paintDiff(uuids: string[], role: "err" | "ok" | "warn", emph?: string) {
+      clearDiffPaint();
+      const svg = curSvg.current;
+      if (!svg) return;
+      // Same scrim + cloned-overlay DOM as the A island (buildDiffOverlay). B side shows
+      // the NEW state, so the changed text (e.g. the value string) is coloured green. The
+      // returned extent is unused here — B owns its camera landing via revealDiff.
+      buildDiffOverlay(svg, vb.current, uuids, role, emph, "hl-diff-emph-ok");
+    }
+    function clearDiffPaint() {
+      curSvg.current?.querySelectorAll(".hl-diff, .hl-diff-scrim").forEach((n) => n.remove());
+    }
     function netMembersInDom(name: string): string[] {
       const svg = curSvg.current;
       if (!svg) return [];
@@ -387,6 +425,10 @@ export function Canvas() {
       return out;
     }
 
+    /** The symbol group that owns `dsg`'s pin `pin` on the current sheet — the unit a pin
+     *  selection must highlight, since `idx.components[dsg].svg_id` is only whichever
+     *  placement of a multi-unit part the index kept. See {@link resolvePinUnit}. */
+    const pinUnitUuid = (dsg: string, pin: string) => resolvePinUnit(curSvg.current, dsg, pin);
 
     /** Object-anchored comment chips (Phase 2): one numbered chip per comment whose
      *  anchored object is on the current sheet. Lives in its own layer so the
@@ -492,7 +534,9 @@ export function Canvas() {
       ];
       const plans = combined.map((h) => {
         if (h.kind === "net") return { h, members: netMembersInDom(h.ref) };
-        const u = idx.components[h.ref]?.svg_id;
+        // `h.uuid` wins when the highlight is about one unit of a multi-unit part
+        // (pad → pin cross-probe); the index's svg_id is only the default placement.
+        const u = h.uuid ?? idx.components[h.ref]?.svg_id;
         const present = u && svg?.querySelector(`g[data-uuid="${esc(u)}"]`) ? [u] : [];
         return { h, members: present };
       });
@@ -516,7 +560,7 @@ export function Canvas() {
     const selColor = (h: { kind: "net" | "comp"; ref: string }) =>
       useSelectionStore.getState().pinnedColor(h.kind, h.ref) ??
       (h.kind === "net" ? NET_COLOR : COMP_COLOR);
-    function setSingle(h: { kind: "net" | "comp"; ref: string }) {
+    function setSingle(h: { kind: "net" | "comp"; ref: string; uuid?: string }) {
       highlights.current = [{ ...h, color: selColor(h) }];
       renderHighlights();
     }
@@ -592,6 +636,7 @@ export function Canvas() {
     }
     async function restore(h: HistEntry) {
       await loadSheet(h.sheet);
+      atFit = false;
       tgt.current = { ...h.cam };
       highlights.current = [...h.highlights];
       renderHighlights();
@@ -733,7 +778,14 @@ export function Canvas() {
       if (hit.kind === "pin") {
         const c = idx.components[hit.ref.designator];
         if (c?.svg_id) {
-          highlights.current = [{ kind: "comp", ref: hit.ref.designator, color: COMP_COLOR }];
+          highlights.current = [
+            {
+              kind: "comp",
+              ref: hit.ref.designator,
+              color: COMP_COLOR,
+              uuid: pinUnitUuid(hit.ref.designator, hit.ref.pin),
+            },
+          ];
           renderHighlights();
         }
         setSelectionStore(hit, "sch"); // pin specifics in the card
@@ -790,7 +842,7 @@ export function Canvas() {
       // stays put so closing the overview returns exactly where you were.
       if (e.deltaY > 0 && !overviewRef.current) {
         const fitS = Math.min(
-          (r.width - CARD_GUTTER) / vb.current[2],
+          (r.width - gutter()) / vb.current[2],
           (r.height - 2 * PAD) / vb.current[3],
         );
         if (ns < fitS * 0.5) {
@@ -803,6 +855,7 @@ export function Canvas() {
       // the cursor on rapid scroll. ns still grows from tgt.s, so zoom speed is unchanged.
       const c = cam.current;
       const ratio = ns / c.s;
+      atFit = false;
       tgt.current.x = mx - (mx - c.x) * ratio;
       tgt.current.y = my - (my - c.y) * ratio;
       tgt.current.s = ns;
@@ -838,6 +891,7 @@ export function Canvas() {
       if (!drag) return;
       if (drag.box) { updateRubber(drag.px, drag.py, e.clientX, e.clientY); return; }
       if (drag.text) return;
+      atFit = false;
       tgt.current.x = drag.ox + e.clientX - drag.px;
       tgt.current.y = drag.oy + e.clientY - drag.py;
       cam.current.x = tgt.current.x;
@@ -991,6 +1045,12 @@ export function Canvas() {
           },
         });
       }
+      // In comparison mode, expose the same exit the banner's × does — a right-click on
+      // the canvas is where users reach for it (batch1).
+      if (useDiffStore.getState().active) {
+        items.push({ separator: true });
+        items.push({ label: "Exit comparison", icon: <IconClose size={14} />, onClick: () => useDiffStore.getState().exitDiff() });
+      }
       setCtxMenu({ x: e.clientX, y: e.clientY, items });
     };
 
@@ -1053,11 +1113,11 @@ export function Canvas() {
       const c = idx.components[dsg];
       if (!c) return;
       const land = () => {
-        setSingle({ kind: "comp", ref: dsg });
-        setSelectionStore({ kind: "pin", ref: { designator: dsg, pin } }, "sch");
         const el = curSvg.current?.querySelector(
           `[data-designator="${esc(dsg)}"][data-pin="${esc(pin)}"]`,
         ) as SVGGraphicsElement | null;
+        setSingle({ kind: "comp", ref: dsg, uuid: pinUnitUuid(dsg, pin) });
+        setSelectionStore({ kind: "pin", ref: { designator: dsg, pin } }, "sch");
         if (el) {
           const b = el.getBBox();
           centerOn(b.x + b.width / 2, b.y + b.height / 2, 70);
@@ -1137,10 +1197,11 @@ export function Canvas() {
     nav.fitView = fitSheet;
     nav.zoomBy = (factor) => {
       const r = stage.getBoundingClientRect();
-      const mx = (r.width - CARD_GUTTER) / 2;
+      const mx = (r.width - gutter()) / 2;
       const my = r.height / 2;
       const ns = Math.min(60, Math.max(0.2, tgt.current.s * factor));
       const ratio = ns / tgt.current.s;
+      atFit = false;
       tgt.current.x = mx - (mx - tgt.current.x) * ratio;
       tgt.current.y = my - (my - tgt.current.y) * ratio;
       tgt.current.s = ns;
@@ -1217,6 +1278,56 @@ export function Canvas() {
             highlights: [...highlights.current],
           };
 
+    // Visual diff (§4): load the change's sheet if needed, centre on its uuids, and
+    // paint the diff tint. Read-only — no pushHistory / selection writes, so exiting
+    // diff mode leaves the normal viewing state exactly as it was.
+    nav.revealDiff = (sheet, uuids, role, emph, aOnly) =>
+      whenVisible(() => {
+        const land = () => {
+          if (aOnly) {
+            // The object exists only on A (removed): this (B) side has no geometry to
+            // frame, so leave the camera to the A island (camBridge.centerWorld) and just
+            // dim the sheet. Don't fit — that would fight the A-side landing.
+          } else if (uuids.length && centerOnUuids(uuids, 110)) {
+            /* framed the changed set */
+          } else {
+            fitSheet(); // added/removed sheet, or uuids not on this sheet → show context
+          }
+          paintDiff(uuids, role, emph);
+        };
+        if (sheet !== curSheet.current && idx.sheets.some((s) => s.num === sheet)) {
+          void (async () => {
+            await loadSheet(sheet);
+            land();
+          })();
+        } else {
+          land();
+        }
+      });
+    nav.clearDiff = () => clearDiffPaint();
+
+    // Shared-camera driver for the A-island: it forwards its own pan (screen px) and
+    // wheel-zoom (factor about the cursor, in *this* canvas's screen space) here so
+    // panning/zooming either side moves both (§4).
+    camBridge.drive = (dx, dy, zoomFactor, anchorX, anchorY) => {
+      atFit = false;
+      if (dx || dy) {
+        tgt.current.x += dx;
+        tgt.current.y += dy;
+      }
+      if (zoomFactor !== 1) {
+        const ns = Math.min(60, Math.max(0.2, tgt.current.s * zoomFactor));
+        const ratio = ns / tgt.current.s;
+        tgt.current.x = anchorX - (anchorX - tgt.current.x) * ratio;
+        tgt.current.y = anchorY - (anchorY - tgt.current.y) * ratio;
+        tgt.current.s = ns;
+      }
+    };
+    // Absolute landing for the A island: frame a removed object's A-side bbox on the
+    // shared camera (this B side has no such geometry to centre on). Same world units.
+    camBridge.centerWorld = (box) =>
+      whenVisible(() => frameWorldBox(box.x, box.y, box.x + box.width, box.y + box.height, 110));
+
     // Debug-only render probe (Layer-2 E2E): tauri-pilot can't read the painted SVG
     // island, so expose the live render state for it to assert on via `eval`. No-op
     // outside dev builds. See lib/renderProbe.ts + docs/testing.md.
@@ -1229,13 +1340,21 @@ export function Canvas() {
         cam: { ...cam.current },
         tgt: { ...tgt.current },
         elements: svg?.querySelectorAll("g[data-uuid]").length ?? 0,
-        highlights: highlights.current.map((h) => ({ kind: h.kind, ref: h.ref, color: h.color })),
+        // `uuid` is the resolved unit of a multi-unit part (pin selections) — the E2E
+        // check that a pad → pin probe landed on U12.A rather than the index's default.
+        highlights: highlights.current.map((h) => ({
+          kind: h.kind,
+          ref: h.ref,
+          color: h.color,
+          uuid: h.uuid ?? null,
+        })),
         overlays: svg?.querySelectorAll(".hl-overlay").length ?? 0,
         hiddenSources: hiddenSources.current.length,
         dimmed: !!svg?.querySelector(".hl-scrim"),
         comments: commentAnchors.current.length,
         badges: badgeAnchors.current.length,
         overviewOpen: overviewRef.current,
+        atFit, // camera sits at a plain whole-sheet fit (resize keeps it fitted)
       };
     });
 
@@ -1249,6 +1368,18 @@ export function Canvas() {
       c.y += (t.y - c.y) * k;
       c.s += (t.s - c.s) * k;
       world.style.transform = `translate(${c.x}px,${c.y}px) scale(${c.s})`;
+      // Visual diff: publish the live camera + viewBox + sheet so the read-only A-island
+      // follows this (B) side (shared camera, §4). Cheap; only meaningful in diff mode.
+      if (useDiffStore.getState().active) {
+        camBridge.cam.x = c.x;
+        camBridge.cam.y = c.y;
+        camBridge.cam.s = c.s;
+        camBridge.vb = [...vb.current];
+        if (camBridge.sheet !== curSheet.current) {
+          camBridge.sheet = curSheet.current;
+          camBridge.epoch++;
+        }
+      }
       // Region/rubber outlines: compensate stroke for zoom (see .cmt-region css).
       // Set on the tiny group/element only — NOT on world — to avoid cascading a style
       // recalculation over the entire schematic SVG every frame (causes text jank).
@@ -1281,8 +1412,26 @@ export function Canvas() {
     };
 
     // -------------------------------------------------------------- boot
+    // Keep a plain whole-sheet fit fitted as the stage changes size. The boot fit can
+    // run against a not-yet-settled layout (the window still restoring/maximizing,
+    // panels still mounting), which left the sheet small and off-centre with dead
+    // space around it (feedback 2.PNG) — and entering/leaving diff mode resizes the
+    // stage too. Only re-fits while `atFit` holds, so it never overrides a camera the
+    // user (or a landing/jump) has placed.
+    const ro = new ResizeObserver(() => {
+      if (!atFit || !curSvg.current) return;
+      if (stage.clientWidth <= 0 || stage.clientHeight <= 0) return; // hidden view
+      fitSheet();
+    });
+    ro.observe(stage);
+
+    // Open the root sheet by default (KiCad's top-level page, the lowest sheet
+    // number). The design JSON lists sheets root-first, so sheets[0] is the root;
+    // the min-num scan is a guard in case that order ever changes.
     const start =
-      idx.sheets.find((s) => /\bcan\b/i.test(s.name))?.num ?? idx.sheets[0]?.num ?? 1;
+      idx.sheets.reduce<number | null>((lo, s) => (lo == null || s.num < lo ? s.num : lo), null) ??
+      idx.sheets[0]?.num ??
+      1;
     (async () => {
       try {
         // D1 reload restore: selection and viewport survive a re-crunch; the sheet
@@ -1318,6 +1467,7 @@ export function Canvas() {
 
     return () => {
       cancelAnimationFrame(raf);
+      ro.disconnect();
       for (const id of visRafs) cancelAnimationFrame(id); // stop any pending whenVisible poll
       unsubCompose();
       unregisterProbe();
@@ -1331,7 +1481,11 @@ export function Canvas() {
         nav.toggleHighlight = nav.fitView = nav.zoomBy = nav.toggleOverview =
         nav.applySelection = nav.setComments = () => {};
       nav.reveal = () => {};
+      nav.revealDiff = () => {};
+      nav.clearDiff = () => {};
       nav.getViewState = () => null;
+      camBridge.drive = () => {};
+      camBridge.centerWorld = () => {};
     };
   }, [indexes, getSheetSvg, setSelectionStore, setHighlightStore, setCurrentSheet]);
 

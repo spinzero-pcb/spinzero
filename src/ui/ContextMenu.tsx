@@ -14,6 +14,8 @@ export interface MenuItem {
   /** Marks the currently-selected choice in a submenu — the row is highlighted and
    *  carries a trailing check so the active option is obvious at a glance. */
   active?: boolean;
+  /** A small trailing pill (e.g. "Beta") that tags the row's feature status. */
+  badge?: string;
   separator?: boolean;
   disabled?: boolean;
   onClick?: () => void;
@@ -132,6 +134,7 @@ function MenuList({ items, onClose }: { items: MenuItem[]; onClose: () => void }
               )}
             </span>
             <span className="ctx-label">{it.label}</span>
+            {it.badge && <span className="ctx-badge">{it.badge}</span>}
             {it.active && !it.submenu && <span className="ctx-check">✓</span>}
             {it.submenu && <span className="ctx-arrow">▸</span>}
             {it.submenu && openSub === i && (

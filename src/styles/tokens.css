@@ -122,6 +122,7 @@
   --pcb-netlabel-via: #111111; /* net-name label text on a via — dark on the gold barrel */
   --pcb-worksheet: #c86464; /* drawing-sheet frame + title block (KiCad worksheet red, lightened to read on the dark canvas) */
   --pcb-dim: #3a3f47; /* mix base for dulled layers while a selection is active */
+  --pcb-diff-base: #8b8f98; /* diff mode: flat grey for unchanged copper (greyed out, not dimmed) */
 
   /* Measure tool (docs/measure-tool-plan.md): a KiCad-style ruler — white line, ticks
      and text (KiCad's LAYER_AUX_ITEMS colour) over a black drop-shadow so it reads over

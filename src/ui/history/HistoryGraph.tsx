@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
 import { useHistoryStore } from "../../stores/historyStore";
 import { useProjectStore } from "../../stores/projectStore";
+import { useDiffStore } from "../../stores/diffStore";
 import { ContextMenu, type MenuItem } from "../ContextMenu";
-import { IconCopy, IconGear, IconHistory, IconPin, IconRefresh, IconSparkle, IconTrash } from "../icons";
+import { IconClose, IconCompare, IconCopy, IconEdit, IconEye, IconFolder, IconRefresh, IconSparkle, IconTag, IconTrash } from "../icons";
 import { formatLocalTime } from "../../lib/time";
 import { layoutDag } from "./layout";
 import type { ExtractionMeta } from "../../lib/types";
@@ -19,10 +20,13 @@ const shortId = (id: string) => id.slice(0, 10);
 
 /** The revision-history overlay — the single version-control surface (opened from the
  *  footer version chip). A DAG of the merged published + local-checkpoint timeline,
- *  with a "viewing" marker on the active node and per-row actions: open / rename / tag /
- *  publish (with a required changelog) / hide / delete. Local checkpoints render
+ *  with a "viewing" marker on the active node and per-row actions: open / update the
+ *  KiCad files (the only path that writes to disk — opening a version is view-only) /
+ *  rename / tag / publish (with a required changelog) / hide / delete. Local checkpoints render
  *  distinctly (hollow dot + "local" badge + italic) so a reader sees only the published
- *  line as the "normal" history. (Compare/diff was removed per feedback.) */
+ *  line as the "normal" history. Compare/diff is a first-class feature again (visual-diff
+ *  §3): "Compare with…" enters pick mode, "Compare with previous" uses the parent pointer,
+ *  and "Compare branches" appears when the DAG has two or more heads. */
 export function HistoryGraph() {
   const open = useHistoryStore((s) => s.open);
   const showHidden = useHistoryStore((s) => s.showHidden);
@@ -31,7 +35,10 @@ export function HistoryGraph() {
 
   const extractions = useProjectStore((s) => s.extractions);
   const activeExtraction = useProjectStore((s) => s.activeExtraction);
+  const designHead = useProjectStore((s) => s.designHead);
   const setActiveExtraction = useProjectStore((s) => s.setActiveExtraction);
+  const updateDesignFiles = useProjectStore((s) => s.updateDesignFiles);
+  const designPathMissing = useProjectStore((s) => s.designPathMissing);
   const publish = useProjectStore((s) => s.publish);
   const hide = useProjectStore((s) => s.hide);
   const unhide = useProjectStore((s) => s.unhide);
@@ -39,7 +46,11 @@ export function HistoryGraph() {
   const setTag = useProjectStore((s) => s.setTag);
   const removeTag = useProjectStore((s) => s.removeTag);
   const deleteCheckpoint = useProjectStore((s) => s.deleteCheckpoint);
-  const purgeLocal = useProjectStore((s) => s.purgeLocal);
+  const enterDiff = useDiffStore((s) => s.enterDiff);
+
+  // Compare pick-mode: after "Compare with…", the graph waits for a second row; other
+  // rows get a target affordance and Esc cancels (visual-diff §3).
+  const [compareFrom, setCompareFrom] = useState<string | null>(null);
 
   const [ctx, setCtx] = useState<{ x: number; y: number; id: string } | null>(null);
   const [editing, setEditing] = useState<string | null>(null); // rename
@@ -48,9 +59,9 @@ export function HistoryGraph() {
   const [tagDraft, setTagDraft] = useState("");
   const [publishing, setPublishing] = useState<string | null>(null); // changelog dialog
   const [changelog, setChangelog] = useState("");
-  // Permanent (unrecoverable) delete confirmation. `checkpoint` = a local-only checkpoint;
-  // `purge` = purge a synced revision's local bytes.
-  const [confirmDel, setConfirmDel] = useState<{ id: string; kind: "checkpoint" | "purge" } | null>(null);
+  // Permanent (unrecoverable) delete confirmation for a local-only checkpoint — the
+  // only revision kind with a hard delete; published history is soft-deleted (hide).
+  const [confirmDel, setConfirmDel] = useState<string | null>(null);
 
   useEffect(() => {
     if (!open) return;
@@ -58,13 +69,23 @@ export function HistoryGraph() {
       if (e.key !== "Escape") return;
       if (confirmDel) setConfirmDel(null);
       else if (publishing) setPublishing(null);
+      else if (compareFrom) setCompareFrom(null); // cancel compare pick-mode
       else closeGraph();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [open, closeGraph, publishing, confirmDel]);
+  }, [open, closeGraph, publishing, confirmDel, compareFrom]);
 
   const layout = useMemo(() => layoutDag(extractions, showHidden), [extractions, showHidden]);
+
+  // DAG tips = revisions that are nobody's parent (the branch heads). Two+ tips is the
+  // fork case the "Compare branches" shortcut targets. Computed before the early return
+  // below so hook order stays stable across open/closed renders.
+  const tips = useMemo(() => {
+    const isParent = new Set(extractions.flatMap((e) => e.parents));
+    return extractions.filter((e) => !e.hidden && !isParent.has(e.id));
+  }, [extractions]);
+
   if (!open) return null;
 
   const latestId = extractions[0]?.id ?? null;
@@ -77,6 +98,20 @@ export function HistoryGraph() {
 
   const openVersion = (id: string) =>
     void setActiveExtraction(id === latestId ? null : id).then(closeGraph);
+
+  // The nearest present parent for "Compare with previous" (first parent = nearest
+  // ancestor on the active lane, per the VC plan §8). null for a root revision.
+  const parentOf = (r: ExtractionMeta): string | null => {
+    const present = r.parents.find((p) => extractions.some((e) => e.id === p));
+    return present ?? null;
+  };
+
+  // Start a comparison and close the graph; enterDiff normalizes order + pins B active.
+  const startCompare = (a: string, b: string) => {
+    setCompareFrom(null);
+    closeGraph();
+    void enterDiff(a, b);
+  };
 
   function saveLabel(id: string) {
     const label = draft.trim() ? draft.trim() : null;
@@ -98,42 +133,64 @@ export function HistoryGraph() {
   }
   function doConfirmDelete() {
     if (!confirmDel) return;
-    const { id, kind } = confirmDel;
+    const id = confirmDel;
     setConfirmDel(null);
-    if (kind === "checkpoint") void deleteCheckpoint(id);
-    else void purgeLocal(id);
+    void deleteCheckpoint(id);
   }
 
   function rowMenu(r: ExtractionMeta): MenuItem[] {
     const localOnly = r.is_checkpoint && !r.published;
+    const parent = parentOf(r);
     const items: MenuItem[] = [
-      { label: "Open this version", icon: <IconHistory size={14} />, onClick: () => openVersion(r.id) },
-      { label: "Rename…", icon: <IconGear size={14} />, onClick: () => { setTagging(null); setDraft(r.label ?? ""); setEditing(r.id); } },
-      { label: "Add tag…", icon: <IconPin size={14} />, onClick: () => { setEditing(null); setTagDraft(""); setTagging(r.id); } },
+      { label: "Open this version", icon: <IconEye size={14} />, onClick: () => openVersion(r.id) },
+      // The ONLY way a version reaches the KiCad files on disk — opening/viewing a
+      // version never writes them. Disabled when the design folder is missing here.
+      {
+        label: "Update KiCad files to this version…",
+        icon: <IconFolder size={14} />,
+        disabled: designPathMissing,
+        onClick: () => {
+          closeGraph();
+          void updateDesignFiles(r.id);
+        },
+      },
+      { separator: true },
+      // Compare (visual-diff §3). "Compare with…" enters pick mode; "Compare with
+      // previous" uses the parent pointer and is disabled for a root (no parent). Both
+      // are Beta while the visual-diff surface is still stabilising.
+      { label: "Compare with…", icon: <IconCompare size={14} />, badge: "Beta", onClick: () => { setEditing(null); setTagging(null); setCompareFrom(r.id); } },
+      {
+        label: "Compare with previous",
+        icon: <IconCompare size={14} />,
+        badge: "Beta",
+        disabled: !parent,
+        onClick: () => parent && startCompare(parent, r.id),
+      },
+      { separator: true },
+      { label: "Rename…", icon: <IconEdit size={14} />, onClick: () => { setTagging(null); setDraft(r.label ?? ""); setEditing(r.id); } },
+      { label: "Add tag…", icon: <IconTag size={14} />, onClick: () => { setEditing(null); setTagDraft(""); setTagging(r.id); } },
     ];
     for (const t of r.tags) {
-      items.push({ label: `Remove tag “${t}”`, icon: <IconTrash size={14} />, onClick: () => void removeTag(t) });
+      items.push({ label: `Remove tag “${t}”`, icon: <IconClose size={14} />, onClick: () => void removeTag(t) });
     }
     if (localOnly) {
       items.push({ separator: true });
       items.push({ label: "Publish…", icon: <IconSparkle size={14} />, onClick: () => { setChangelog(""); setPublishing(r.id); } });
     }
     items.push({ separator: true });
-    // Soft delete is recoverable via Restore; "Delete permanently" is the hard,
-    // unrecoverable removal (item 10).
-    items.push(
-      r.hidden
-        ? { label: "Restore", icon: <IconRefresh size={14} />, onClick: () => void unhide(r.id) }
-        : { label: "Delete", icon: <IconTrash size={14} />, onClick: () => void hide(r.id) },
-    );
-    items.push({ label: "Copy revision id", icon: <IconCopy size={14} />, onClick: () => void navigator.clipboard?.writeText(r.id) });
-    items.push({ separator: true });
-    // Both are unrecoverable — confirm first (the label's "…" signals the dialog).
-    if (localOnly) {
-      items.push({ label: "Delete permanently…", icon: <IconTrash size={14} />, onClick: () => setConfirmDel({ id: r.id, kind: "checkpoint" }) });
-    } else {
-      items.push({ label: "Delete permanently…", icon: <IconTrash size={14} />, onClick: () => setConfirmDel({ id: r.id, kind: "purge" }) });
+    // One delete action per row. Local checkpoints are private to this machine, so
+    // their delete is the hard, confirmed removal (the "…" signals the dialog).
+    // Published revisions are shared history: delete is soft (hide) and recoverable
+    // via "Show deleted" → Restore — no permanent-purge in the menu.
+    if (r.hidden) {
+      items.push({ label: "Restore", icon: <IconRefresh size={14} />, onClick: () => void unhide(r.id) });
     }
+    if (localOnly) {
+      items.push({ label: "Delete permanently…", icon: <IconTrash size={14} />, onClick: () => setConfirmDel(r.id) });
+    } else if (!r.hidden) {
+      items.push({ label: "Delete", icon: <IconTrash size={14} />, onClick: () => void hide(r.id) });
+    }
+    items.push({ label: "Copy revision id", icon: <IconCopy size={14} />, onClick: () => void navigator.clipboard?.writeText(r.id) });
     return items;
   }
 
@@ -151,11 +208,41 @@ export function HistoryGraph() {
           <label className="history-toggle">
             <input type="checkbox" checked={showHidden} onChange={toggleHidden} /> Show deleted
           </label>
+          {/* Fork awareness: when history has diverged into two (or more) branch heads,
+              one click compares the two newest (visual-diff §3). */}
+          {tips.length >= 2 && (
+            <button
+              className="btn-ghost history-compare-tips"
+              title={
+                tips.length > 2
+                  ? `Compare the two newest branch heads (${tips[0].id.slice(0, 8)} vs ${tips[1].id.slice(0, 8)})`
+                  : `Compare the two branch heads (${tips[0].id.slice(0, 8)} vs ${tips[1].id.slice(0, 8)})`
+              }
+              onClick={() => startCompare(tips[1].id, tips[0].id)}
+            >
+              <IconCompare size={13} /> Compare branches
+            </button>
+          )}
           <span style={{ flex: 1 }} />
           <button className="btn-ghost" onClick={closeGraph}>
             Close
           </button>
         </div>
+
+        {compareFrom && (
+          <div className="rev-nudge compare-nudge">
+            Pick a revision to compare with{" "}
+            {/* The picked row can vanish mid-pick (a refresh hid it) — fall back to
+                its short id instead of rowText over a hollow object. */}
+            <b>
+              {(() => {
+                const from = extractions.find((e) => e.id === compareFrom);
+                return from ? rowText(from) : shortId(compareFrom);
+              })()}
+            </b>{" "}
+            — or press Esc to cancel.
+          </div>
+        )}
 
         {localCount > 0 && (
           <div className="rev-nudge">
@@ -205,10 +292,19 @@ export function HistoryGraph() {
                   return (
                     <div
                       key={r.id}
-                      className={`dag-row ${localOnly ? "is-local" : ""} ${r.hidden ? "is-hidden" : ""} ${r.id === activeId ? "is-viewing" : ""}`}
+                      className={`dag-row ${localOnly ? "is-local" : ""} ${r.hidden ? "is-hidden" : ""} ${r.id === activeId ? "is-viewing" : ""} ${
+                        compareFrom ? (compareFrom === r.id ? "compare-from" : "compare-target") : ""
+                      }`}
                       style={{ height: ROW_H }}
                       onClick={() => {
                         if (editing === r.id || tagging === r.id) return;
+                        // In compare pick-mode a click picks the second revision (unless
+                        // it's the same row — clicking the source again just cancels).
+                        if (compareFrom) {
+                          if (compareFrom === r.id) setCompareFrom(null);
+                          else startCompare(compareFrom, r.id);
+                          return;
+                        }
                         openVersion(r.id);
                       }}
                       onContextMenu={(e) => {
@@ -249,6 +345,17 @@ export function HistoryGraph() {
                         <>
                           <span className="dag-name">{rowText(r)}</span>
                           {r.id === activeId && <span className="rev-latest-tag">viewing</span>}
+                          {/* Where the on-disk KiCad files actually are — may differ from
+                              "viewing" (view-only switches never touch the disk), and new
+                              edits made in KiCad will branch from HERE. */}
+                          {r.id === designHead && (
+                            <span
+                              className="rev-latest-tag rev-kicad-tag"
+                              title="The KiCad files on disk match this revision — edits made in KiCad will continue from here"
+                            >
+                              KiCad files
+                            </span>
+                          )}
                           {localOnly && <span className="rev-badge rev-local">local</span>}
                           {r.hidden && <span className="rev-badge rev-hidden-badge">deleted</span>}
                           {r.tags.map((t) => (
@@ -323,9 +430,7 @@ export function HistoryGraph() {
           <div className="publish-card" role="dialog" aria-label="Confirm permanent delete">
             <div className="history-title">Delete permanently?</div>
             <p className="publish-hint">
-              {confirmDel.kind === "checkpoint"
-                ? "This local checkpoint will be removed for good. This can’t be undone."
-                : "This removes the revision for everyone and deletes its bytes from this machine. Teammates who already synced keep their copy until their own cleanup. This can’t be undone."}
+              This local checkpoint will be removed for good. This can’t be undone.
             </p>
             <div className="publish-actions">
               <button className="btn-ghost" onClick={() => setConfirmDel(null)}>
