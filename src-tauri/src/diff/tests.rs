@@ -142,6 +142,70 @@ fn value_change_is_one_electrical_modify() {
     assert_eq!(doc.stats.electrical, 1);
 }
 
+/// A terminal carrying an explicit pin name + electrical type (`term` leaves both blank).
+fn term_typed(d: &str, p: &str, pn: &str, pt: &str) -> TerminalLite {
+    TerminalLite { d: d.into(), p: p.into(), pn: pn.into(), pt: pt.into() }
+}
+
+#[test]
+fn pin_electrical_type_change_is_flagged() {
+    // U12 pin 48 flips input → output. Connectivity, fields and placement are all
+    // identical, so without the pin pass this edit produced no row at all.
+    let mut a = empty_indexes();
+    a.components.insert("U12".into(), comp("F28P559", "LQFP-100", false));
+    a.nets.insert("GPIO12".into(), net(vec![term_typed("U12", "48", "GPIO12", "input")]));
+    let mut b = empty_indexes();
+    b.components.insert("U12".into(), comp("F28P559", "LQFP-100", false));
+    b.nets.insert("GPIO12".into(), net(vec![term_typed("U12", "48", "GPIO12", "output")]));
+
+    let doc = diff_bundles(&bundle(a), &bundle(b), &no_source_diff());
+    let pin: Vec<_> = doc.changes.iter().filter(|c| c.title.contains("pin 48")).collect();
+    assert_eq!(pin.len(), 1, "exactly one pin row: {:?}", doc.changes);
+    let c = pin[0];
+    assert_eq!(c.impact, Impact::Electrical, "a retyped pin is an electrical change");
+    assert_eq!(c.kind, Kind::Modified);
+    assert!(c.title.contains("U12"), "title names the part: {}", c.title);
+    assert!(
+        c.title.contains("input") && c.title.contains("output"),
+        "title shows both types: {}",
+        c.title
+    );
+    assert!(c.detail.contains("GPIO12"), "detail carries the pin name: {}", c.detail);
+}
+
+#[test]
+fn unchanged_pin_type_produces_no_row() {
+    let mut a = empty_indexes();
+    a.components.insert("U12".into(), comp("F28P559", "LQFP-100", false));
+    a.nets.insert("GPIO12".into(), net(vec![term_typed("U12", "48", "GPIO12", "input")]));
+    let mut b = empty_indexes();
+    b.components.insert("U12".into(), comp("F28P559", "LQFP-100", false));
+    b.nets.insert("GPIO12".into(), net(vec![term_typed("U12", "48", "GPIO12", "input")]));
+
+    let doc = diff_bundles(&bundle(a), &bundle(b), &no_source_diff());
+    assert!(doc.changes.is_empty(), "identical pins diff clean: {:?}", doc.changes);
+}
+
+#[test]
+fn pin_type_change_follows_a_reannotation() {
+    // U12 → U15 re-annotation *and* a retyped pin: the pin row must land on the new
+    // refdes rather than reading as a vanished pin on the old one.
+    let mut a = empty_indexes();
+    a.components.insert("U12".into(), comp("F28P559", "LQFP-100", false));
+    a.nets.insert("GPIO12".into(), net(vec![term_typed("U12", "48", "GPIO12", "input")]));
+    let mut b = empty_indexes();
+    b.components.insert("U15".into(), comp("F28P559", "LQFP-100", false));
+    b.nets.insert("GPIO12".into(), net(vec![term_typed("U15", "48", "GPIO12", "output")]));
+
+    let doc = diff_bundles(&bundle(a), &bundle(b), &no_source_diff());
+    let pin = doc
+        .changes
+        .iter()
+        .find(|c| c.title.contains("pin 48"))
+        .expect("the retyped pin is reported");
+    assert!(pin.title.contains("U15"), "row uses the new refdes: {}", pin.title);
+}
+
 #[test]
 fn manufacturer_change_is_flagged() {
     let mut a = empty_indexes();

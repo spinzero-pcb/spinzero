@@ -480,6 +480,7 @@ pub fn diff_bundles(
     // --- semantic groups over the design.json indexes ---
     let comp_delta = diff_components(a, b, &mut raw);
     diff_nets(a, b, &comp_delta, &mut raw);
+    diff_pins(a, b, &comp_delta, &mut raw);
     diff_sheets(a, b, &mut raw);
     diff_docs(a, b, &mut raw);
 
@@ -1274,6 +1275,86 @@ fn comp_anchors(bundle: &Bundle, refdes: &str) -> Anchors {
         }
     }
     anchors
+}
+
+// ================================================================= pin diff
+
+/// `(refdes, pin number)` → `(electrical type, pin name)`, gathered from every net's
+/// terminal list — design.json's only per-pin record. A-side designators are
+/// canonicalized through `rename` so a re-annotated part keeps its pins. A pin listed on
+/// several nets with conflicting types is dropped as ambiguous rather than guessed at.
+///
+/// Unconnected pins have no terminal anywhere, so they are invisible to this index; the
+/// library-body signature (`sch_geom::lib_body_sig`) still surfaces such an edit as a
+/// graphical row on the sheet.
+fn pin_type_index<'a>(
+    bundle: &'a Bundle,
+    rename: &HashMap<&str, &str>,
+) -> BTreeMap<(String, String), (&'a str, &'a str)> {
+    let mut out: BTreeMap<(String, String), (&str, &str)> = BTreeMap::new();
+    let mut ambiguous: HashSet<(String, String)> = HashSet::new();
+    for net in bundle.indexes.nets.values() {
+        for t in &net.terminals {
+            let d = rename.get(t.d.as_str()).copied().unwrap_or(t.d.as_str());
+            let key = (d.to_string(), t.p.clone());
+            match out.get(&key) {
+                Some((etype, _)) if *etype != t.pt.as_str() => {
+                    ambiguous.insert(key);
+                }
+                Some(_) => {}
+                None => {
+                    out.insert(key, (t.pt.as_str(), t.pn.as_str()));
+                }
+            }
+        }
+    }
+    for key in ambiguous {
+        out.remove(&key);
+    }
+    out
+}
+
+/// Pin electrical-type edits (`input` → `output`, `passive` → `power_in`, …).
+///
+/// A pin's electrical type lives in the *library symbol*, not on the placed instance, so
+/// none of the component/net passes above see it: the netlist connectivity is unchanged,
+/// every field is unchanged, and nothing moved. It is a genuine electrical statement
+/// though — it changes what the part drives and what ERC will accept — so it gets its own
+/// `Electrical` row, anchored to the owning component on both canvases.
+fn diff_pins(a: &Bundle, b: &Bundle, comps: &CompDelta, out: &mut Vec<Change>) {
+    let rename: HashMap<&str, &str> =
+        comps.renamed.iter().map(|(x, y)| (x.as_str(), y.as_str())).collect();
+    let ia = pin_type_index(a, &rename);
+    let ib = pin_type_index(b, &HashMap::new());
+
+    for ((refdes, pin), (old, name_a)) in &ia {
+        // A pin that vanished (or whose component did) is already told by the net
+        // membership / component removal row — only a *retyped* surviving pin lands here.
+        let Some((new, name_b)) = ib.get(&(refdes.clone(), pin.clone())) else { continue };
+        if old == new {
+            continue;
+        }
+        let name = if name_b.is_empty() { *name_a } else { *name_b };
+        let detail = if name.is_empty() || name == "~" {
+            String::new()
+        } else {
+            format!("pin name '{name}'")
+        };
+        let mut anchors = comp_anchors(b, refdes);
+        set_schematic_a(&mut anchors, comp_anchors(a, refdes));
+        out.push(Change {
+            group: Group::Component,
+            kind: Kind::Modified,
+            impact: Impact::Electrical,
+            title: format!("{refdes} pin {pin} electrical type {} → {}", disp(old), disp(new)),
+            detail,
+            anchors,
+            side: Side::Both,
+            // No emphasis: the electrical type is not drawn on either canvas, so there is
+            // no text for the renderer to tint.
+            ..Default::default()
+        });
+    }
 }
 
 // ================================================================= net diff
@@ -2696,7 +2777,11 @@ pub fn diff_key(cache_key_a: &str, cache_key_b: &str) -> String {
     //    into every spanned layer's "segments" row.
     // 7: zones also diff on shape — a pour that re-flowed at constant area (e.g. around
     //    a re-routed track) now emits a "reshaped" row the area-only test missed.
-    const DIFF_ENGINE_VERSION: &str = "7";
+    // 8: component property edits (Package, Manufacturer, Tolerance, …) get their own rows.
+    // 9: pin electrical-type edits get their own row, and the schematic element signature
+    //    folds in the library body (pin text sizes, pin geometry) so a lib-side restyle
+    //    no longer reads as "no change".
+    const DIFF_ENGINE_VERSION: &str = "9";
     let mut h = blake3::Hasher::new();
     h.update(DIFF_ENGINE_VERSION.as_bytes());
     h.update(b" ");
