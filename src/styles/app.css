@@ -42,9 +42,10 @@ button {
   height: 100%;
 }
 
-/* BOM view has no right-side panel (item 10): drop the 4th column so the table fills
-   the freed width (the <aside> itself is also not rendered on BOM, see App.tsx). */
-.app--bom {
+/* BOM (item 10) and History carry no right-side panel — BOM's table wants the width,
+   and History has its own revision-detail pane. Drop the 4th column so the view fills
+   the freed space (the <aside> itself isn't rendered either, see App.tsx). */
+.app--no-right {
   grid-template-columns: var(--activitybar-w) var(--sidepanel-w) 1fr 0;
 }
 
@@ -54,7 +55,7 @@ button {
 .app--fullscreen {
   grid-template-columns: 0 0 1fr var(--rightpanel-w);
 }
-.app--fullscreen.app--bom {
+.app--fullscreen.app--no-right {
   grid-template-columns: 0 0 1fr 0;
 }
 .app--fullscreen .activity-bar,
@@ -243,6 +244,24 @@ button {
 .activity-btn:disabled {
   opacity: 0.35;
   cursor: default;
+}
+
+/* Unpublished-checkpoint count on the History icon — the one fact about version control
+   worth surfacing without opening anything: work your team can't see yet. */
+.activity-btn { position: relative; }
+.activity-badge {
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  min-width: 14px;
+  height: 14px;
+  padding: 0 3px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--bg-1);
+  font-size: var(--fs-0);
+  line-height: 14px;
+  text-align: center;
 }
 
 .side-panel {
@@ -1067,55 +1086,71 @@ button {
   padding: 0 4px;
   border-radius: var(--radius-1);
 }
-/* "latest" tag sits inline next to the newest extraction row (not a separate
-   top entry). */
-.rev-latest-tag {
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  font-size: 9px;
-  background: var(--accent-dim);
-  color: var(--accent);
-  padding: 0 4px;
-  border-radius: var(--radius-1);
+/* ---------- revision row vocabulary ----------
+   Three unrelated categories used to render as identical pills — "on disk" and "local"
+   were literally the same warn-yellow style — so a reader had to memorise which yellow
+   meant what. They are now separated by SHAPE and by where they sit:
+
+     POINTERS (viewing / on disk)  square-ish ref chips in a fixed slot before the subject
+     STATE    (local / deleted)    carried by the row itself: hollow dot + italics,
+                                   strikethrough + dimming. No pill at all.
+     USER TAGS                     the only rounded pills. Round now means exactly one
+                                   thing: a name a human chose.
+
+   Colour follows the same discipline — accent = where you are, neutral outline = where
+   the files are, green = a human's tag. Yellow is reserved for real warnings (fork risk,
+   missing design folder) instead of being spent on routine information. */
+.rev-ref {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
   align-self: center;
-}
-/* "KiCad files" marker: where the on-disk design actually is — distinct from
-   "viewing" (accent) so their divergence is legible at a glance. */
-.rev-kicad-tag {
-  background: var(--warn-dim);
-  color: var(--warn);
-}
-/* version-control badges: local checkpoint, hidden tombstone, git-tag-style refs */
-.rev-badge {
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  font-size: 9px;
-  padding: 0 4px;
-  border-radius: var(--radius-1);
-  align-self: center;
-}
-.rev-local { background: var(--warn-dim); color: var(--warn); }
-.rev-hidden-badge { background: var(--bg-3); color: var(--fg-2); }
-.rev-tag-ref {
-  align-self: center;
-  font-size: 9px;
+  flex: none;
+  min-width: 58px;
+  font-size: var(--fs-0);
   padding: 0 5px;
+  border-radius: var(--radius-1);
+  border: 1px solid transparent;
+  white-space: nowrap;
+}
+/* Where you are. */
+.rev-ref-here { background: var(--accent-dim); color: var(--accent); }
+/* Where the KiCad files are — information, not a hazard, so no warn colour. */
+.rev-ref-disk { color: var(--fg-1); border-color: var(--border-1); }
+/* Plain-language state, for the detail pane where there is room to spell it out. */
+.rev-state {
+  align-self: center;
+  font-size: var(--fs-0);
+  color: var(--fg-2);
+  font-style: italic;
+}
+.rev-tag-ref {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  align-self: center;
+  flex: none;
+  font-size: var(--fs-0);
+  padding: 0 7px;
   border-radius: 999px;
   background: var(--ok-dim);
   color: var(--ok);
   white-space: nowrap;
 }
-.rev-menu-item.is-hidden .rev-menu-load { opacity: 0.55; }
-.rev-show-hidden {
-  width: 100%;
-  margin-top: var(--sp-1);
-  padding: var(--sp-1) var(--sp-2);
-  text-align: left;
+/* Author initials — one compact glyph in place of a text author column that used to
+   compete with the timestamp and the hash for the row's right edge. */
+.rev-avatar {
+  flex: none;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
   font-size: var(--fs-0);
-  color: var(--fg-2);
-  border-top: 1px solid var(--border-1);
+  background: var(--bg-3);
+  color: var(--fg-1);
 }
-.rev-show-hidden:hover { color: var(--fg-0); }
+.rev-spacer { flex: 1; min-width: 0; }
 .rev-nudge {
   padding: var(--sp-1) var(--sp-2);
   margin-bottom: var(--sp-1);
@@ -1124,27 +1159,119 @@ button {
   background: var(--accent-dim);
   border-radius: var(--radius-1);
 }
+.rev-nudge-row { display: flex; align-items: center; gap: var(--sp-2); }
+/* A fork IS a warning — this is what the yellow was freed up for. */
+.rev-nudge-warn { color: var(--warn); background: var(--warn-dim); }
+.rev-nudge-btn { font-size: var(--fs-0); color: inherit; padding: 0 var(--sp-1); }
+.rev-nudge-btn:hover { background: var(--bg-3); }
 
-/* ---------- revision history graph (overlay) ---------- */
-.history-overlay { z-index: 48; } /* below the checkout-confirm wizard (50) */
-.history-card {
+/* ---------- version control: the shared revision list ----------
+   One row style, two surfaces: the left-rail History panel (flat, dot per row) and the
+   full-width History view (DAG lanes drawn in an SVG gutter). */
+.rev-list { flex: 1; overflow: auto; outline: none; }
+.rev-list:focus-visible { box-shadow: inset 0 0 0 1px var(--accent); }
+.rev-row {
   display: flex;
-  flex-direction: column;
-  width: min(900px, calc(100vw - 2 * var(--sp-4)));
-  max-height: calc(100vh - 2 * var(--sp-4));
-  background: var(--bg-2);
-  border: 1px solid var(--border-1);
-  border-radius: var(--radius-2);
-  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
-  overflow: hidden;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: 0 var(--sp-2);
+  border-radius: var(--radius-1);
+  cursor: pointer;
 }
-.history-head {
+.rev-row:hover { background: var(--bg-3); }
+/* Selection is INSPECTION (the detail target + keyboard cursor); "viewing" is the
+   revision actually on the canvas. Two different things, so two different marks: a
+   left bar for the cursor, an accent wash for what's on screen. */
+.rev-row.is-selected { background: var(--bg-3); box-shadow: inset 2px 0 0 var(--fg-2); }
+.rev-row.is-viewing { background: var(--accent-dim); }
+.rev-row.is-viewing.is-selected { box-shadow: inset 2px 0 0 var(--accent); }
+/* State, said once, by the row itself — no badge needed. Local (unpublished)
+   checkpoints read as work-in-progress; published rows stay "normal" so a reader who
+   isn't designing sees a plain commit history (item 2). */
+.rev-row.is-local .rev-subject { font-style: italic; color: var(--fg-1); }
+.rev-row.is-deleted { opacity: 0.55; }
+.rev-row.is-deleted .rev-subject { text-decoration: line-through; }
+.rev-row.compare-from { background: var(--accent-dim); box-shadow: inset 2px 0 0 var(--accent); }
+.rev-row.compare-target { cursor: crosshair; }
+.rev-row.compare-target:hover {
+  background: var(--accent-dim);
+  outline: 1px dashed var(--accent);
+  outline-offset: -1px;
+}
+/* Fixed ref slot — sized to the widest row's pointer count so the subject starts at the
+   same x on every row instead of shifting by whichever pointers land there. Collapses
+   to nothing when no pointer is in view. */
+.rev-refs {
+  flex: none;
+  display: flex;
+  gap: 4px;
+  width: calc(var(--rev-ref-cols, 0) * 64px);
+}
+/* Shrinkable (0 1 auto + min-width 0), so a long changelog ellipsises instead of
+   pushing the tags, avatar and timestamp off the row. */
+.rev-subject {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.rev-when { font-size: var(--fs-0); flex: none; }
+/* Inline node dot for the rail's flat list (the workspace draws its own in the SVG). */
+.rev-dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--graph-dot);
+}
+.rev-dot.is-local { background: transparent; box-shadow: inset 0 0 0 1.5px var(--graph-dot); }
+.rev-dot.is-active { background: var(--graph-dot-active); }
+/* Publishing is the one gesture that matters most and it used to be buried in a
+   right-click menu behind a banner telling you to right-click. Now it's on the row —
+   quiet until the row is hovered, selected or keyboard-focused. */
+.rev-publish-btn {
+  flex: none;
+  display: none;
+  align-items: center;
+  gap: 4px;
+  font-size: var(--fs-0);
+  padding: 1px var(--sp-1);
+  border-radius: var(--radius-1);
+  background: var(--accent-dim);
+  color: var(--accent);
+}
+.rev-row:hover .rev-publish-btn,
+.rev-row.is-selected .rev-publish-btn { display: inline-flex; }
+.rev-publish-btn:hover { background: var(--accent); color: var(--bg-1); }
+/* ---------- version control: left-rail History panel ---------- */
+.history-panel { display: flex; flex-direction: column; min-height: 0; flex: 1; }
+.history-panel .changes-search { margin: 0 var(--sp-2) var(--sp-1); }
+.history-panel-head { padding-right: var(--sp-2); }
+/* The panel's title is a tab-shaped label, not a button — the rail has one surface. */
+.left-tab.as-title { cursor: default; }
+.history-expand { font-size: var(--fs-0); gap: 4px; }
+.history-panel-foot {
+  padding: var(--sp-1) var(--sp-2);
+  border-top: 1px solid var(--border-1);
+  flex: none;
+}
+.history-panel .rev-nudge { margin: 0 var(--sp-2) var(--sp-1); }
+
+/* ---------- version control: full-width History view ---------- */
+.history-view { display: flex; height: 100%; min-height: 0; }
+.history-view-main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+.history-view-head {
   display: flex;
   align-items: center;
   gap: var(--sp-3);
-  padding: var(--sp-3);
+  padding: var(--sp-2) var(--sp-3);
   border-bottom: 1px solid var(--border-1);
+  flex: none;
 }
+.history-view-search { width: 280px; margin: 0; }
+.history-view-body { flex: 1; overflow: auto; padding: var(--sp-2) var(--sp-3); }
+.history-view .rev-nudge { margin: var(--sp-2) var(--sp-3) 0; }
 .history-title { font-weight: 600; }
 .history-toggle {
   display: flex;
@@ -1153,27 +1280,8 @@ button {
   font-size: var(--fs-1);
   color: var(--fg-1);
 }
-.history-body { flex: 1; overflow: auto; padding: var(--sp-2) var(--sp-3); }
 .dag { position: relative; min-width: 0; }
 .dag-rows { position: relative; }
-.dag-row {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-2);
-  padding: 0 var(--sp-2);
-  border-radius: var(--radius-1);
-  cursor: pointer;
-}
-.dag-row:hover { background: var(--bg-3); }
-.dag-row.selected { background: var(--accent-dim); }
-.dag-row.is-hidden { opacity: 0.55; }
-/* Local (unpublished) checkpoints read as work-in-progress; published rows stay
-   "normal" so a reader who isn't designing sees a plain commit history (item 2). */
-.dag-row.is-local .dag-name { font-style: italic; color: var(--fg-1); }
-.dag-row.is-viewing { background: var(--accent-dim); box-shadow: inset 2px 0 0 var(--accent); }
-.dag-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.dag-author,
-.dag-time { font-size: var(--fs-0); flex: none; }
 .dag-edge { stroke: var(--graph-edge); stroke-width: 1.5; }
 .dag-edge-merge { stroke: var(--graph-edge-merge); }
 .dag-edge-pending { stroke: var(--graph-edge-pending); stroke-dasharray: 2 3; }
@@ -1181,14 +1289,54 @@ button {
 .dag-dot.is-local { fill: var(--bg-2); stroke: var(--graph-dot); } /* hollow = unpublished */
 .dag-dot.is-active { fill: var(--graph-dot-active); stroke: var(--bg-2); }
 .dag-dot.is-selected { stroke: var(--accent); stroke-width: 2.5; }
-.history-foot {
+
+/* The detail pane — the payoff for giving history real width. Everything the 34px row
+   can only ellipsise or hide in a tooltip reads properly here. */
+.history-detail {
+  width: 300px;
+  flex: none;
+  border-left: 1px solid var(--border-1);
+  background: var(--bg-1);
+  overflow: auto;
+}
+.history-detail-inner { padding: var(--sp-3); display: flex; flex-direction: column; gap: var(--sp-2); }
+.history-detail-subject { font-weight: 600; line-height: 1.35; }
+.history-detail-who {
   display: flex;
   align-items: center;
   gap: var(--sp-2);
-  padding: var(--sp-2) var(--sp-3);
-  border-top: 1px solid var(--border-1);
+  font-size: var(--fs-1);
+  color: var(--fg-1);
 }
-.history-hint { font-size: var(--fs-1); }
+.history-detail-refs { display: flex; flex-wrap: wrap; gap: 4px; }
+.history-detail-msg {
+  margin: 0;
+  font-size: var(--fs-1);
+  color: var(--fg-1);
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+.history-detail-meta {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 2px var(--sp-2);
+  margin: 0;
+  font-size: var(--fs-0);
+}
+.history-detail-meta dt { color: var(--fg-2); }
+.history-detail-meta dd { margin: 0; color: var(--fg-1); overflow-wrap: anywhere; }
+.history-detail-actions {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  margin-top: var(--sp-1);
+}
+.history-detail-actions button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-1);
+}
 .diff-panel {
   max-height: 30vh;
   overflow: auto;
@@ -3471,10 +3619,7 @@ button {
 .change-row.board-hidden .change-title,
 .change-row.board-hidden .change-detail { opacity: 0.55; }
 
-/* ---------- history graph: compare pick-mode ---------- */
+/* ---------- compare pick-mode ---------- */
+/* Row-level pick affordances live with the rest of the revision-row vocabulary above. */
 .compare-nudge { color: var(--accent); }
-.history-compare-tips { display: inline-flex; align-items: center; gap: 4px; }
-.dag-row.compare-from { box-shadow: inset 2px 0 0 var(--accent); background: var(--accent-dim); }
-.dag-row.compare-target { cursor: crosshair; }
-.dag-row.compare-target:hover { background: var(--accent-dim); outline: 1px dashed var(--accent); outline-offset: -1px; }
 .statusbar-btn.comparing { color: var(--accent); }

@@ -15,7 +15,7 @@ import { BomTab } from "./ui/BomTab";
 import { Palette } from "./ui/Palette";
 import { PropertiesCard } from "./ui/PropertiesCard";
 import { CheckoutConfirm } from "./ui/CheckoutConfirm";
-import { HistoryGraph } from "./ui/history/HistoryGraph";
+import { HistoryView } from "./ui/history/HistoryView";
 import { Toaster } from "./ui/Toaster";
 import { KeyboardShortcuts, useShortcutsDialog } from "./ui/shell/KeyboardShortcuts";
 import { useToastStore } from "./stores/toastStore";
@@ -63,6 +63,9 @@ function activeLayerForSelection(sel: NonNullable<Selection>) {
 const VIEWS: { id: MainView; label: string }[] = [
   { id: "schematic", label: "Schematic" },
   { id: "pcb", label: "PCB" },
+  // Version control is a peer view, not a modal: the DAG needs the full width to show
+  // lanes and forks, and the reader leaves it the way they leave any other tab.
+  { id: "history", label: "History" },
   // BOM tab hidden for the initial release — re-add when the BOM Rules Checker
   // lands. The BomTab component and the `view === "bom"` rendering below are left
   // intact so re-enabling is just restoring this entry.
@@ -153,6 +156,15 @@ export default function App() {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (isTypingTarget(e)) return;
+      // A focused revision list owns its walk keys (↑/↓/Home/End/Enter/C/Esc) — without
+      // this, C would arm comment mode while the reader is stepping through history.
+      // Every other chord (palette, fit, X…) still works from inside the list.
+      if (
+        (e.target as HTMLElement | null)?.closest?.(".rev-list") &&
+        ["ArrowUp", "ArrowDown", "Home", "End", "Enter", "Escape", "c", "C"].includes(e.key)
+      ) {
+        return;
+      }
       // Phase 2: C arms comment mode (next object click opens the composer); Esc
       // cancels an open composer/thread or disarms — before the canvas Esc clears.
       const review = useReviewStore.getState();
@@ -350,7 +362,7 @@ export default function App() {
 
   return (
     <div
-      className={`app ${view === "bom" ? "app--bom" : ""} ${
+      className={`app ${view === "bom" || view === "history" ? "app--no-right" : ""} ${
         fullscreen ? "app--fullscreen" : ""
       }`}
     >
@@ -417,7 +429,12 @@ export default function App() {
           {/* Diff-mode banner (visual-diff §3): view-global — sits above whichever
               canvas (schematic / PCB) is up. Renders nothing outside diff mode. */}
           <DiffBanner />
-          {designLoaded ? (
+          {/* History is browsable even when the design hasn't loaded — a failed or
+              still-running import is exactly when "open an older version" matters, so it
+              sits outside the designLoaded gate. */}
+          {view === "history" ? (
+            <HistoryView />
+          ) : designLoaded ? (
             <>
               {/* Schematic and PCB both stay mounted across view switches so their
                   camera, history and highlights survive a round-trip (item 3). In diff
@@ -454,7 +471,7 @@ export default function App() {
           )}
         </div>
       </main>
-      {view !== "bom" && (
+      {view !== "bom" && view !== "history" && (
         <aside className="right-panel">
           <RightPanel />
         </aside>
@@ -467,7 +484,6 @@ export default function App() {
         />
       )}
       <CheckoutConfirm />
-      <HistoryGraph />
       <Toaster />
       <KeyboardShortcuts />
     </div>
