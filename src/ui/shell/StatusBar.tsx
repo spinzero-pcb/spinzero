@@ -6,6 +6,8 @@ import { useHistoryStore } from "../../stores/historyStore";
 import { useProjectStore } from "../../stores/projectStore";
 import { useSelectionStore } from "../../stores/selectionStore";
 import { useDiffStore } from "../../stores/diffStore";
+import { useReviewStore } from "../../stores/reviewStore";
+import { useViewStore } from "../../stores/viewStore";
 import { ipc } from "../../lib/ipc";
 import { formatLocalTime, formatRelative } from "../../lib/time";
 import { IconHistory, IconLocate, IconRefresh } from "../icons";
@@ -30,10 +32,11 @@ function SelectionMirror() {
   return <span className="mono statusbar-sel">{text}</span>;
 }
 
-/** The single footer version-control affordance: a chip showing the active revision
- *  that opens the revision-history graph on click. The old separate dropdown + the
- *  standalone "History" button were merged into this one chip (feedback item 1) — every
- *  per-revision action (open / rename / tag / publish / hide / delete) lives in the graph. */
+/** The footer's version-control readout: a chip showing the active revision that reveals
+ *  the History rail on click. It is no longer the *only* way in — version control now has
+ *  an activity-bar icon and a full view — so this is a status indicator with a shortcut
+ *  attached rather than a hidden door. Every per-revision action (open / rename / tag /
+ *  publish / hide / delete) lives on the History surfaces. */
 function VersionChip() {
   const extractions = useProjectStore((s) => s.extractions);
   const activeExtraction = useProjectStore((s) => s.activeExtraction);
@@ -72,10 +75,14 @@ function VersionChip() {
       className={`statusbar-btn ${isOld ? "viewing-old" : ""}`}
       title={
         isOld
-          ? "Reviewing an older version — your KiCad files are unchanged. To write this version to disk, right-click it in the history graph and choose “Update KiCad files”. Click to open the graph."
-          : "Revision history — click to open the graph"
+          ? "Reviewing an older version — your KiCad files are unchanged. To write this version to disk, right-click it in History and choose “Update KiCad files”. Click to open History."
+          : "Revision history — click to open the History panel"
       }
-      onClick={() => useHistoryStore.getState().openGraph()}
+      onClick={() => {
+        useReviewStore.getState().setLeftTab("history");
+        // Reveal the rail if the reader is in full screen, or the click looks broken.
+        useViewStore.getState().setFullscreen(false);
+      }}
     >
       <IconHistory size={12} />
       <span className="mono">{dateText}</span>

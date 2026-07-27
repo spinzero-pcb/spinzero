@@ -96,8 +96,11 @@ function Composer() {
   const submit = () => {
     if (!body.trim()) return;
     // Item 15: stamp the comment with the view it was authored in, so it shows on
-    // that canvas and navigates back there.
-    void create(compose.anchor, body.trim(), severity, useViewStore.getState().view);
+    // that canvas and navigates back there. The composer can only be opened from a
+    // canvas, so "history" is unreachable here — fall back to the design view behind it
+    // rather than inventing a fourth comment view.
+    const vs = useViewStore.getState();
+    void create(compose.anchor, body.trim(), severity, vs.view === "history" ? vs.prevDesignView : vs.view);
   };
 
   const { style, onPointerDown } = useDraggablePos(clampPos(compose.pos ?? null));

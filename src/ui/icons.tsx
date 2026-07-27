@@ -312,3 +312,27 @@ export function IconTag(p: IconProps) {
     </Svg>
   );
 }
+
+/** Enter full screen: four corners pointing outward. */
+export function IconFullscreen(p: IconProps) {
+  return (
+    <Svg {...p}>
+      <path d="M2 5.5V2.5A.5.5 0 0 1 2.5 2H5.5" />
+      <path d="M14 5.5V2.5A.5.5 0 0 0 13.5 2H10.5" />
+      <path d="M2 10.5v3a.5.5 0 0 0 .5.5H5.5" />
+      <path d="M14 10.5v3a.5.5 0 0 1-.5.5H10.5" />
+    </Svg>
+  );
+}
+
+/** Exit full screen: four corners pointing inward. */
+export function IconFullscreenExit(p: IconProps) {
+  return (
+    <Svg {...p}>
+      <path d="M5.5 2v3a.5.5 0 0 1-.5.5H2" />
+      <path d="M10.5 2v3a.5.5 0 0 0 .5.5H14" />
+      <path d="M5.5 14v-3a.5.5 0 0 0-.5-.5H2" />
+      <path d="M10.5 14v-3a.5.5 0 0 1 .5-.5H14" />
+    </Svg>
+  );
+}

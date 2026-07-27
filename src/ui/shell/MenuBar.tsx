@@ -4,6 +4,8 @@ import { getVersion } from "@tauri-apps/api/app";
 import { useProjectStore } from "../../stores/projectStore";
 import { useShellStore } from "../../stores/shellStore";
 import { useSettingsStore, ACCENT_PRESETS, ACCENT_DEFAULT } from "../../stores/settingsStore";
+import { useViewStore } from "../../stores/viewStore";
+import { useShortcutsDialog } from "./KeyboardShortcuts";
 import { ipc } from "../../lib/ipc";
 import { ShellDialogs } from "./ShellDialogs";
 import { IconSpinZero } from "../icons";
@@ -38,6 +40,9 @@ export function MenuBar() {
   const busy = useProjectStore((s) => s.busy);
   const openWizard = useShellStore((s) => s.openWizard);
   const openExisting = useShellStore((s) => s.openExisting);
+  const fullscreen = useViewStore((s) => s.fullscreen);
+  const toggleFullscreen = useViewStore((s) => s.toggleFullscreen);
+  const openShortcuts = useShortcutsDialog((s) => s.setOpen);
   const [openMenu, setOpenMenu] = useState<OpenMenu>(null);
   const [recentOpen, setRecentOpen] = useState(false);
   const [aboutOpen, setAboutOpen] = useState(false);
@@ -190,6 +195,17 @@ export function MenuBar() {
                 className="menu-entry"
                 onClick={() => {
                   setOpenMenu(null);
+                  toggleFullscreen();
+                }}
+              >
+                {fullscreen ? "Exit Full Screen" : "Full Screen"}
+                <span className="menu-shortcut">F11</span>
+              </button>
+              <div className="menu-sep" />
+              <button
+                className="menu-entry"
+                onClick={() => {
+                  setOpenMenu(null);
                   setNameDraft(authorName ?? "");
                   setAppearanceOpen(true);
                 }}
@@ -209,6 +225,17 @@ export function MenuBar() {
           </button>
           {openMenu === "help" && (
             <div className="menu-dropdown">
+              <button
+                className="menu-entry"
+                onClick={() => {
+                  setOpenMenu(null);
+                  openShortcuts(true);
+                }}
+              >
+                Keyboard Shortcuts
+                <span className="menu-shortcut">?</span>
+              </button>
+              <div className="menu-sep" />
               <button
                 className="menu-entry"
                 onClick={() => {
