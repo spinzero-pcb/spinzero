@@ -177,6 +177,11 @@ fn unique_tmp_dir(prefix: &str, rev_id: &str) -> PathBuf {
     std::env::temp_dir().join(format!("{prefix}_{}_{}_{}", std::process::id(), rev_id, n))
 }
 
+/// Surfaced by the commands that would trigger a fresh extraction (viewer switch, diff
+/// prepare) while a crunch is staging into cache/<key>.tmp — blocking avoids the
+/// remove_dir_all race on the shared staging dir. The frontend toasts it verbatim.
+const EXTRACTION_BUSY: &str = "extraction in progress — try again in a moment";
+
 /// Ensure the runtime cache holds `rev`'s extracted bundle, extracting on a miss —
 /// from the live design folder when it still matches the revision, else by
 /// materializing the revision's raw source into a temp dir and extracting that.
@@ -464,6 +469,14 @@ async fn set_active_extraction(
     id: Option<String>,
 ) -> Result<(), String> {
     let handle = current_project(&state)?;
+    // A viewer switch to an un-cached revision re-extracts into cache/<key>.tmp — the same
+    // staging path a live crunch uses — so ensure_lazy's remove_dir_all would race the
+    // crunch (sidecar 'os error 3'). Bail while a crunch runs; the switch is retried once
+    // it settles. (Restores the 'Extraction in progress' guard the pure-viewer-switch path
+    // dropped; the crunch's own re-extract lands the latest revision anyway.)
+    if handle.crunch_running.load(Ordering::SeqCst) {
+        return Err(EXTRACTION_BUSY.into());
+    }
     if let Some(rid) = id.as_deref() {
         let resolved = handle.resolve_rev(rid).ok_or_else(|| format!("unknown revision {rid}"))?;
         view_resolved(&handle, Some(rid), &resolved)?;
@@ -537,9 +550,11 @@ fn checkout_to_disk(
 
     let mut captured = None;
     if !clean {
-        // Capture the dirty working tree FIRST so it is never lost.
+        // Capture the dirty working tree FIRST so it is never lost. Its parent is the
+        // folder's own last captured state (the hash gate), not the viewed revision —
+        // the edits were made on top of what was on disk.
         let git = project::git_info(design_path);
-        let parent = handle.effective_resolved().map(|r| r.revision().id.clone());
+        let parent = sidecar::design_parent_id(handle);
         let cp = checkpoints::snapshot_local(
             &handle.project_dir,
             design_path,
@@ -570,6 +585,15 @@ fn checkout_to_disk(
 fn list_extractions(state: State<AppState>) -> Result<Vec<project::ExtractionMeta>, String> {
     let handle = current_project(&state)?;
     Ok(handle.list_extractions_meta())
+}
+
+/// The revision id the KiCad design folder currently corresponds to (the history
+/// graph's "KiCad files" marker). Independent of the viewer's active revision —
+/// this is exactly the divergence the marker exists to show.
+#[tauri::command]
+fn get_design_head(state: State<AppState>) -> Result<Option<String>, String> {
+    let handle = current_project(&state)?;
+    Ok(sidecar::design_head_id(&handle))
 }
 
 #[tauri::command]
@@ -683,9 +707,34 @@ fn pcb_source_file(hashes: &std::collections::BTreeMap<String, String>) -> Optio
 /// (short-circuits to an empty diff when the cache keys are equal), runs the pure
 /// engine, writes `diff.json` to the machine-local diff cache, GCs it, and returns
 /// the doc + both cache keys + labels. Read-only: no viewer state changes.
+///
+/// The body is multi-second on a cold cache (two extractions + a full board diff), so
+/// the command is `async` and runs it on a blocking thread — the webview event loop and
+/// all other IPC (incl. the "Preparing comparison…" spinner) stay responsive.
 #[tauri::command]
-fn prepare_diff(state: State<AppState>, rev_a: String, rev_b: String) -> Result<DiffHandle, String> {
+async fn prepare_diff(
+    state: State<'_, AppState>,
+    rev_a: String,
+    rev_b: String,
+) -> Result<DiffHandle, String> {
     let handle = current_project(&state)?;
+    tauri::async_runtime::spawn_blocking(move || prepare_diff_blocking(&handle, rev_a, rev_b))
+        .await
+        .map_err(|e| format!("prepare_diff task: {e}"))?
+}
+
+/// The synchronous body of [`prepare_diff`], run on a blocking thread.
+fn prepare_diff_blocking(
+    handle: &Arc<ProjectHandle>,
+    rev_a: String,
+    rev_b: String,
+) -> Result<DiffHandle, String> {
+    // Same staging-dir race as set_active_extraction: prepare_diff materializes both
+    // revisions' caches (ensure_revision_cache below), which shares cache/<key>.tmp with a
+    // live crunch. Don't start while one runs.
+    if handle.crunch_running.load(Ordering::SeqCst) {
+        return Err(EXTRACTION_BUSY.into());
+    }
 
     let resolved_a = handle
         .resolve_rev(&rev_a)
@@ -695,6 +744,7 @@ fn prepare_diff(state: State<AppState>, rev_a: String, rev_b: String) -> Result<
         .ok_or_else(|| format!("unknown revision {rev_b}"))?;
     let rev_meta_a = resolved_a.revision().clone();
     let rev_meta_b = resolved_b.revision().clone();
+    log::info!("prepare_diff: {} → {}", rev_meta_a.id, rev_meta_b.id);
 
     let key_a = cache::cache_key(&rev_meta_a.source_hashes);
     let key_b = cache::cache_key(&rev_meta_b.source_hashes);
@@ -704,6 +754,7 @@ fn prepare_diff(state: State<AppState>, rev_a: String, rev_b: String) -> Result<
     // Both bundles are extracted at the current EXTRACTOR_CACHE_EPOCH, so equal cache
     // keys ⇒ byte-identical bundles ⇒ empty diff. Short-circuit before any extraction.
     if key_a == key_b {
+        log::info!("prepare_diff: revisions are byte-identical — empty diff");
         let doc = diff::empty_doc(&rev_meta_a.id, &label_a, &rev_meta_b.id, &label_b);
         let dkey = diff::diff_key(&key_a, &key_b);
         let path = write_diff_cache(&handle.project_dir, &dkey, &doc)?;
@@ -713,9 +764,16 @@ fn prepare_diff(state: State<AppState>, rev_a: String, rev_b: String) -> Result<
     // Materialize both bundles' caches up front, even when the diff doc itself is
     // served from cache below: the frontend reads both sides' artifacts by cache key
     // right after this returns, and the bundle cache GCs independently of the diff
-    // cache, so a cached doc must not outlive its bundles. (A re-extract is ~1 s.)
-    let cache_dir_a = ensure_revision_cache(&handle, &resolved_a)?;
-    let cache_dir_b = ensure_revision_cache(&handle, &resolved_b)?;
+    // cache, so a cached doc must not outlive its bundles. The two caches key off
+    // disjoint dirs, so extract them in parallel — on a cold cache this is ~1 s instead
+    // of ~1 s + ~1 s back-to-back.
+    let (res_a, res_b) = std::thread::scope(|s| {
+        let ta = s.spawn(|| ensure_revision_cache(handle, &resolved_a));
+        let tb = s.spawn(|| ensure_revision_cache(handle, &resolved_b));
+        (ta.join(), tb.join())
+    });
+    let cache_dir_a = res_a.map_err(|_| "extraction A panicked".to_string())??;
+    let cache_dir_b = res_b.map_err(|_| "extraction B panicked".to_string())??;
 
     // Serve a cached diff.json when both bundles are unchanged. The changeset is a
     // pure function of the two source-identical bundles, but the row labels/revs are
@@ -724,6 +782,7 @@ fn prepare_diff(state: State<AppState>, rev_a: String, rev_b: String) -> Result<
     let cache_path = diff::diff_cache_path(&handle.project_dir, &dkey);
     if let Ok(text) = fs::read_to_string(&cache_path) {
         if let Ok(mut doc) = serde_json::from_str::<diff::DiffDoc>(&text) {
+            log::info!("prepare_diff: served cached diff.json ({} changes)", doc.changes.len());
             doc.a = diff::DiffSide { rev: rev_meta_a.id.clone(), label: label_a.clone() };
             doc.b = diff::DiffSide { rev: rev_meta_b.id.clone(), label: label_b.clone() };
             return Ok(DiffHandle {
@@ -745,8 +804,9 @@ fn prepare_diff(state: State<AppState>, rev_a: String, rev_b: String) -> Result<
     let source_diff = rawstore::diff_source_hashes(&rev_meta_a.source_hashes, &rev_meta_b.source_hashes);
 
     let doc = diff::diff_bundles(&bundle_a, &bundle_b, &source_diff);
+    log::info!("prepare_diff: computed {} changes", doc.changes.len());
     let path = write_diff_cache(&handle.project_dir, &dkey, &doc)?;
-    diff::gc(&handle.project_dir, 8);
+    diff::gc(&handle.project_dir, &dkey, 8); // keep the doc we just published + serve
 
     Ok(DiffHandle { doc, path, cache_key_a: key_a, cache_key_b: key_b, label_a, label_b })
 }
@@ -767,10 +827,18 @@ fn load_diff_bundle(
         None => None,
     };
     // Schematic geometry is best-effort: a parse failure (or an older cache without the
-    // artifact) simply leaves the diff engine on its one-row-per-sheet fallback.
-    let sch_geometry = extras
-        .sch_geometry_json
-        .and_then(|text| serde_json::from_str::<diff::SchGeometry>(&text).ok());
+    // artifact) simply leaves the diff engine on its one-row-per-sheet fallback. Log the
+    // fallback branch so a corrupt geometry.json is distinguishable from an old cache in a
+    // bug report (mirrors the extractor's 'schematic geometry skipped').
+    let sch_geometry = extras.sch_geometry_json.and_then(|text| {
+        match serde_json::from_str::<diff::SchGeometry>(&text) {
+            Ok(g) => Some(g),
+            Err(e) => {
+                log::info!("diff: schematic geometry skipped for {} ({e})", rev.id);
+                None
+            }
+        }
+    });
     Ok(diff::Bundle {
         rev: rev.id.clone(),
         label,
@@ -779,6 +847,7 @@ fn load_diff_bundle(
         geometry,
         sch_geometry,
         pcb_file: pcb_source_file(&rev.source_hashes),
+        comp_params: extras.comp_params,
     })
 }
 
@@ -1244,6 +1313,7 @@ pub fn run() {
             set_active_extraction,
             update_design_files,
             list_extractions,
+            get_design_head,
             label_extraction,
             tag_revision,
             untag_revision,

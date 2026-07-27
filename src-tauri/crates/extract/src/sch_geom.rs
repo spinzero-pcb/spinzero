@@ -11,7 +11,9 @@
 //! only the uuid + a position-free content signature (to label move vs edit) is
 //! needed here, not a pixel-faithful bbox.
 
-use eda_parse_kicad::schematic::{LabelKind, Pt, Schematic, Shape, SymbolInstance};
+use eda_parse_kicad::schematic::{
+    LabelKind, LibPin, LibSymbol, LibText, Pt, Schematic, Shape, SymbolInstance,
+};
 use serde::Serialize;
 
 use crate::design::SheetInfo;
@@ -94,7 +96,7 @@ fn bbox_of(pts: &[Pt]) -> [f64; 4] {
 /// from the component list — get geometry too). Point box at the origin when the
 /// library symbol carries no geometry.
 fn symbol_bbox(sch: &Schematic, sym: &SymbolInstance) -> [f64; 4] {
-    if let Some((min, max)) = sch.lib_for(sym).and_then(|l| l.bbox) {
+    if let Some((min, max)) = sch.lib_for(sym).and_then(|l| l.bbox_for_unit(sym.unit)) {
         let corners = [(min.x, min.y), (max.x, min.y), (max.x, max.y), (min.x, max.y)];
         let pts: Vec<Pt> = corners
             .iter()
@@ -137,6 +139,61 @@ fn fields_sig(sym: &SymbolInstance) -> String {
     parts.join(";")
 }
 
+/// Presentation signature of the *library body* the placed unit draws — the half of a
+/// symbol's appearance that lives in `lib_symbols` rather than on the instance.
+///
+/// Restyling a symbol's pin text (or nudging a pin, hiding one, switching its graphic
+/// style) leaves the instance untouched and often leaves the placed bbox untouched too,
+/// so without this the edit was invisible to the diff. Scoped to the pins/graphics/text
+/// the unit actually draws (`unit == 0 || unit == placed unit`, mirroring the renderer
+/// and [`LibSymbol::bbox_for_unit`]) so an edit confined to U12.A doesn't flag U12.B/.C.
+///
+/// Pin ELECTRICAL type is deliberately excluded: an input→output flip is a semantic
+/// change the changeset reports on its own component row, and folding it in here would
+/// make one user action read as two.
+fn lib_body_sig(lib: &LibSymbol, unit: u32) -> String {
+    let on_unit = |u: u32| u == 0 || u == unit;
+    // Sorted by (number, name, unit) so a library re-emitted in a different element order
+    // — KiCad rewrites the cached block wholesale — doesn't read as an edit.
+    let mut pins: Vec<&LibPin> = lib.pins.iter().filter(|p| on_unit(p.unit)).collect();
+    pins.sort_by(|x, y| {
+        (&x.number, &x.name, x.unit).cmp(&(&y.number, &y.name, y.unit))
+    });
+    let mut parts: Vec<String> = Vec::with_capacity(pins.len() + lib.texts.len() + 1);
+    parts.push(format!(
+        "hdr|pn{}|nm{}|off{}",
+        lib.pin_numbers_hidden as u8, lib.pin_names_hidden as u8, r4(lib.pin_name_offset),
+    ));
+    for p in pins {
+        parts.push(format!(
+            "p{}|{}|{}|{},{},{}|l{}|h{}|zn{}|zb{}",
+            p.number,
+            p.name,
+            p.shape,
+            r4(p.at.x),
+            r4(p.at.y),
+            r4(p.at.angle),
+            r4(p.length),
+            p.hidden as u8,
+            r4(p.name_size),
+            r4(p.number_size),
+        ));
+    }
+    let mut texts: Vec<&LibText> = lib.texts.iter().filter(|t| on_unit(t.unit)).collect();
+    texts.sort_by(|x, y| x.text.cmp(&y.text));
+    for t in texts {
+        parts.push(format!(
+            "t{}|{},{},{}|z{}",
+            t.text,
+            r4(t.at.x),
+            r4(t.at.y),
+            r4(t.at.angle),
+            r4(t.effects.size),
+        ));
+    }
+    parts.join(";")
+}
+
 /// Points describing a sheet graphic's extent.
 fn shape_points(s: &Shape) -> Vec<Pt> {
     match s {
@@ -168,22 +225,37 @@ fn build_sheet(file: &str, sch: &Schematic) -> SheetGeom {
         elems.push(SchElem { uuid: uuid.to_string(), kind, bbox, sig });
     };
 
+    // (cache entry, unit) -> library-body signature. A 100-pin MCU placed as three units
+    // on one sheet would otherwise re-walk its pin list per instance.
+    let mut lib_sigs: std::collections::HashMap<(&str, u32), String> =
+        std::collections::HashMap::new();
+
     for sym in &sch.symbols {
-        let is_power =
-            sch.lib_for(sym).map(|l| l.power).unwrap_or(false) || sym.lib_id.starts_with("power:");
+        let lib = sch.lib_for(sym);
+        let is_power = lib.map(|l| l.power).unwrap_or(false) || sym.lib_id.starts_with("power:");
         let kind = if is_power { "power" } else { "symbol" };
+        let body = match lib {
+            Some(l) => lib_sigs
+                .entry((l.lib_id.as_str(), sym.unit))
+                .or_insert_with(|| lib_body_sig(l, sym.unit))
+                .clone(),
+            None => String::new(),
+        };
         // Signature excludes the symbol's own position (that lives in the bbox), so a pure
         // drag reads as "moved" and a rotation / library swap / field edit reads as
         // "edited". `fields_sig` folds in the visible property fields' presentation (font
         // size, relative position, weight, visibility) so restyling or repositioning a
-        // reference/value label — invisible in the body bbox — is caught too.
+        // reference/value label — invisible in the body bbox — is caught too, and
+        // `lib_body_sig` does the same for the library-side drawing (pin text sizes, pin
+        // geometry and style, body text) that the instance doesn't carry.
         let sig = format!(
-            "{}|u{}|a{}|m{}|{}",
+            "{}|u{}|a{}|m{}|{}|{}",
             sym.lib_id,
             sym.unit,
             r4(sym.at.angle),
             sym.mirror.as_deref().unwrap_or(""),
             fields_sig(sym),
+            body,
         );
         push(&sym.uuid, kind, symbol_bbox(sch, sym), sig);
     }
@@ -323,6 +395,100 @@ mod tests {
         let a = field_sig(FIELDS_SHEET);
         let bigger = FIELDS_SHEET.replacen("(size 1.27 1.27)", "(size 2.54 2.54)", 1);
         assert_ne!(a, field_sig(&bigger), "a field font-size change changes the signature");
+    }
+
+    /// A two-unit symbol whose pins carry explicit name/number text sizes, so the
+    /// library-body signature has something to react to — and so a unit-scoped edit can
+    /// be shown NOT to disturb the other unit.
+    const LIB_SHEET: &str = r##"
+    (kicad_sch (version 20240101) (uuid "root")
+      (lib_symbols
+        (symbol "MCU:U12"
+          (symbol "U12_1_1"
+            (rectangle (start -5 -5) (end 5 5))
+            (pin input line (at -7.62 2.54 0) (length 2.54)
+              (name "GPIO12" (effects (font (size 1.27 1.27))))
+              (number "48" (effects (font (size 1.27 1.27))))))
+          (symbol "U12_2_1"
+            (rectangle (start -5 -5) (end 5 5))
+            (pin passive line (at -7.62 0 0) (length 2.54)
+              (name "VDD" (effects (font (size 1.27 1.27))))
+              (number "50" (effects (font (size 1.27 1.27))))))))
+      (symbol (lib_id "MCU:U12") (at 50 50 0) (unit 1) (uuid "u12a")
+        (property "Reference" "U12" (at 52 48 0) (effects (font (size 1.27 1.27)))))
+      (symbol (lib_id "MCU:U12") (at 80 50 0) (unit 2) (uuid "u12b")
+        (property "Reference" "U12" (at 82 48 0) (effects (font (size 1.27 1.27))))))
+    "##;
+
+    fn sig_of(src: &str, uuid: &str) -> String {
+        let sch = Schematic::parse_str(src).unwrap();
+        build_sheet("root.kicad_sch", &sch)
+            .elements
+            .into_iter()
+            .find(|e| e.uuid == uuid)
+            .unwrap()
+            .sig
+    }
+
+    #[test]
+    fn pin_text_font_size_change_flips_signature() {
+        // The pin NAME's font size grows in the library body. Nothing on the instance
+        // changed and the placed bbox is untouched (pin anchors are where they were), so
+        // this only shows up if the library body is part of the signature.
+        let bigger = LIB_SHEET.replacen(
+            r#"(name "GPIO12" (effects (font (size 1.27 1.27))))"#,
+            r#"(name "GPIO12" (effects (font (size 2.54 2.54))))"#,
+            1,
+        );
+        assert_ne!(
+            sig_of(LIB_SHEET, "u12a"),
+            sig_of(&bigger, "u12a"),
+            "a pin-text font-size change changes the signature"
+        );
+    }
+
+    #[test]
+    fn pin_number_font_size_change_flips_signature() {
+        let bigger = LIB_SHEET.replacen(
+            r#"(number "48" (effects (font (size 1.27 1.27))))"#,
+            r#"(number "48" (effects (font (size 2.54 2.54))))"#,
+            1,
+        );
+        assert_ne!(sig_of(LIB_SHEET, "u12a"), sig_of(&bigger, "u12a"));
+    }
+
+    #[test]
+    fn lib_edit_is_scoped_to_the_placed_unit() {
+        // Restyling unit A's pin text must leave unit B's signature alone — U12.B was not
+        // touched, so it must not read as edited.
+        let bigger = LIB_SHEET.replacen(
+            r#"(name "GPIO12" (effects (font (size 1.27 1.27))))"#,
+            r#"(name "GPIO12" (effects (font (size 2.54 2.54))))"#,
+            1,
+        );
+        assert_eq!(
+            sig_of(LIB_SHEET, "u12b"),
+            sig_of(&bigger, "u12b"),
+            "the untouched unit keeps its signature"
+        );
+    }
+
+    #[test]
+    fn pin_electrical_type_is_not_in_the_signature() {
+        // input → output is a semantic change reported on its own component row by the
+        // diff engine's pin pass; folding it in here would make one edit read as two.
+        let retyped = LIB_SHEET.replacen("(pin input line (at -7.62 2.54 0)", "(pin output line (at -7.62 2.54 0)", 1);
+        assert_eq!(
+            sig_of(LIB_SHEET, "u12a"),
+            sig_of(&retyped, "u12a"),
+            "electrical type stays out of the presentation signature"
+        );
+    }
+
+    #[test]
+    fn pin_move_flips_signature() {
+        let moved = LIB_SHEET.replacen("(at -7.62 2.54 0) (length 2.54)", "(at -7.62 3.81 0) (length 2.54)", 1);
+        assert_ne!(sig_of(LIB_SHEET, "u12a"), sig_of(&moved, "u12a"));
     }
 
     #[test]

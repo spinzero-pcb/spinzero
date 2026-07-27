@@ -38,8 +38,8 @@ function VersionChip() {
   const extractions = useProjectStore((s) => s.extractions);
   const activeExtraction = useProjectStore((s) => s.activeExtraction);
   const diffActive = useDiffStore((s) => s.active);
-  const diffA = useDiffStore((s) => s.a);
-  const diffB = useDiffStore((s) => s.b);
+  const diffA = useDiffStore((s) => s.doc?.a ?? null);
+  const diffB = useDiffStore((s) => s.doc?.b ?? null);
   const exitDiff = useDiffStore((s) => s.exitDiff);
   const latestId = extractions[0]?.id ?? null;
   const shownId = activeExtraction ?? latestId;

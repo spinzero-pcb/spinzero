@@ -81,7 +81,22 @@ fn bundle(indexes: DesignIndexes) -> Bundle {
         geometry: None,
         sch_geometry: None,
         pcb_file: None,
+        comp_params: HashMap::new(),
     }
+}
+
+/// A bundle whose components carry the given property maps (refdes → [(key, val)]),
+/// for exercising the generic symbol-property diff.
+fn bundle_params(indexes: DesignIndexes, params: &[(&str, &[(&str, &str)])]) -> Bundle {
+    let mut b = bundle(indexes);
+    b.comp_params = params
+        .iter()
+        .map(|(refdes, kvs)| {
+            let m = kvs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+            (refdes.to_string(), m)
+        })
+        .collect();
+    b
 }
 
 /// A schematic-geometry element `(uuid, kind, [x,y,w,h], sig)`.
@@ -125,6 +140,150 @@ fn value_change_is_one_electrical_modify() {
     assert!(c.title.contains("C14"), "title names the part: {}", c.title);
     assert!(c.title.contains("100n") && c.title.contains("1u"), "title shows both values: {}", c.title);
     assert_eq!(doc.stats.electrical, 1);
+}
+
+/// A terminal carrying an explicit pin name + electrical type (`term` leaves both blank).
+fn term_typed(d: &str, p: &str, pn: &str, pt: &str) -> TerminalLite {
+    TerminalLite { d: d.into(), p: p.into(), pn: pn.into(), pt: pt.into() }
+}
+
+#[test]
+fn pin_electrical_type_change_is_flagged() {
+    // U12 pin 48 flips input → output. Connectivity, fields and placement are all
+    // identical, so without the pin pass this edit produced no row at all.
+    let mut a = empty_indexes();
+    a.components.insert("U12".into(), comp("F28P559", "LQFP-100", false));
+    a.nets.insert("GPIO12".into(), net(vec![term_typed("U12", "48", "GPIO12", "input")]));
+    let mut b = empty_indexes();
+    b.components.insert("U12".into(), comp("F28P559", "LQFP-100", false));
+    b.nets.insert("GPIO12".into(), net(vec![term_typed("U12", "48", "GPIO12", "output")]));
+
+    let doc = diff_bundles(&bundle(a), &bundle(b), &no_source_diff());
+    let pin: Vec<_> = doc.changes.iter().filter(|c| c.title.contains("pin 48")).collect();
+    assert_eq!(pin.len(), 1, "exactly one pin row: {:?}", doc.changes);
+    let c = pin[0];
+    assert_eq!(c.impact, Impact::Electrical, "a retyped pin is an electrical change");
+    assert_eq!(c.kind, Kind::Modified);
+    assert!(c.title.contains("U12"), "title names the part: {}", c.title);
+    assert!(
+        c.title.contains("input") && c.title.contains("output"),
+        "title shows both types: {}",
+        c.title
+    );
+    assert!(c.detail.contains("GPIO12"), "detail carries the pin name: {}", c.detail);
+}
+
+#[test]
+fn unchanged_pin_type_produces_no_row() {
+    let mut a = empty_indexes();
+    a.components.insert("U12".into(), comp("F28P559", "LQFP-100", false));
+    a.nets.insert("GPIO12".into(), net(vec![term_typed("U12", "48", "GPIO12", "input")]));
+    let mut b = empty_indexes();
+    b.components.insert("U12".into(), comp("F28P559", "LQFP-100", false));
+    b.nets.insert("GPIO12".into(), net(vec![term_typed("U12", "48", "GPIO12", "input")]));
+
+    let doc = diff_bundles(&bundle(a), &bundle(b), &no_source_diff());
+    assert!(doc.changes.is_empty(), "identical pins diff clean: {:?}", doc.changes);
+}
+
+#[test]
+fn pin_type_change_follows_a_reannotation() {
+    // U12 → U15 re-annotation *and* a retyped pin: the pin row must land on the new
+    // refdes rather than reading as a vanished pin on the old one.
+    let mut a = empty_indexes();
+    a.components.insert("U12".into(), comp("F28P559", "LQFP-100", false));
+    a.nets.insert("GPIO12".into(), net(vec![term_typed("U12", "48", "GPIO12", "input")]));
+    let mut b = empty_indexes();
+    b.components.insert("U15".into(), comp("F28P559", "LQFP-100", false));
+    b.nets.insert("GPIO12".into(), net(vec![term_typed("U15", "48", "GPIO12", "output")]));
+
+    let doc = diff_bundles(&bundle(a), &bundle(b), &no_source_diff());
+    let pin = doc
+        .changes
+        .iter()
+        .find(|c| c.title.contains("pin 48"))
+        .expect("the retyped pin is reported");
+    assert!(pin.title.contains("U15"), "row uses the new refdes: {}", pin.title);
+}
+
+#[test]
+fn manufacturer_change_is_flagged() {
+    let mut a = empty_indexes();
+    let mut ca = comp("10k", "R_0402", false);
+    ca.mfr = "Yageo".into();
+    a.components.insert("R49".into(), ca);
+    let mut b = empty_indexes();
+    let mut cb = comp("10k", "R_0402", false);
+    cb.mfr = "Vishay".into();
+    b.components.insert("R49".into(), cb);
+
+    let doc = diff_bundles(&bundle(a), &bundle(b), &no_source_diff());
+    let c = doc
+        .changes
+        .iter()
+        .find(|c| c.group == Group::Component && c.title.contains("R49"))
+        .expect("R49 change present");
+    assert_eq!(c.kind, Kind::Modified);
+    assert!(
+        c.title.contains("Manufacturer") && c.title.contains("Yageo") && c.title.contains("Vishay"),
+        "title names the manufacturer change: {}",
+        c.title
+    );
+}
+
+#[test]
+fn arbitrary_symbol_properties_are_flagged() {
+    // R49: Package, Tolerance and Automotive Grade all edited — none is a first-class
+    // CompLite field, so they must come through the generic property diff, folded into
+    // one component row (headline + detail).
+    let mut a = empty_indexes();
+    a.components.insert("R49".into(), comp("10k", "R_0402", false));
+    let mut b = empty_indexes();
+    b.components.insert("R49".into(), comp("10k", "R_0402", false));
+
+    let pa: &[(&str, &[(&str, &str)])] = &[(
+        "R49",
+        &[("Package", "0402"), ("Tolerance", "1%"), ("Automotive Grade", "No")],
+    )];
+    let pb: &[(&str, &[(&str, &str)])] = &[(
+        "R49",
+        &[("Package", "0603"), ("Tolerance", "5%"), ("Automotive Grade", "AEC-Q200")],
+    )];
+
+    let doc = diff_bundles(&bundle_params(a, pa), &bundle_params(b, pb), &no_source_diff());
+    let comp_changes: Vec<_> =
+        doc.changes.iter().filter(|c| c.group == Group::Component && c.title.contains("R49")).collect();
+    assert_eq!(comp_changes.len(), 1, "one folded component row: {:?}", comp_changes);
+    let c = comp_changes[0];
+    let all = format!("{} | {}", c.title, c.detail);
+    for needle in ["Package", "0402", "0603", "Tolerance", "1%", "5%", "Automotive Grade", "AEC-Q200"] {
+        assert!(all.contains(needle), "row mentions {needle}: {all}");
+    }
+}
+
+#[test]
+fn internal_and_documentation_props_are_ignored() {
+    // ki_* metadata, Datasheet and Description churn must NOT produce a row on their own.
+    let mut a = empty_indexes();
+    a.components.insert("R49".into(), comp("10k", "R_0402", false));
+    let mut b = empty_indexes();
+    b.components.insert("R49".into(), comp("10k", "R_0402", false));
+
+    let pa: &[(&str, &[(&str, &str)])] = &[(
+        "R49",
+        &[("ki_keywords", "res"), ("Datasheet", "~"), ("Description", "old")],
+    )];
+    let pb: &[(&str, &[(&str, &str)])] = &[(
+        "R49",
+        &[("ki_keywords", "resistor"), ("Datasheet", "http://x"), ("Description", "new")],
+    )];
+
+    let doc = diff_bundles(&bundle_params(a, pa), &bundle_params(b, pb), &no_source_diff());
+    assert!(
+        !doc.changes.iter().any(|c| c.group == Group::Component && c.title.contains("R49")),
+        "no component row for internal/documentation-only churn: {:?}",
+        doc.changes
+    );
 }
 
 #[test]
@@ -395,7 +554,7 @@ fn placement_side_flip() {
 
 fn geom_with_seg(_net_name: &str, xy: [f64; 4]) -> GeomTracks {
     GeomTracks {
-        seg: GeomSegCol {
+        seg: GeomTrackCol {
             xy: xy.to_vec(),
             w: vec![0.25],
             layer: vec![0],
@@ -522,6 +681,58 @@ fn zone_area_delta_with_threshold() {
     b2.geometry = Some(make((100.5_f64).sqrt())); // 100.5, delta 0.5 mm²
     let doc2 = diff_bundles(&a2, &b2, &changed(&["board.kicad_pcb"]));
     assert!(!doc2.changes.iter().any(|c| c.group == Group::Zone), "sub-threshold zone jitter ignored");
+}
+
+#[test]
+fn zone_reshape_at_constant_area() {
+    // A GND pour that re-flows around a re-routed track keeps its total area but shifts
+    // a copper notch. The area-delta test is blind to it; the shape (symmetric-diff)
+    // test must still flag one zone change. Same 10×10 square, but the 2×2 top-edge
+    // notch sits on the left in A and on the right in B → area delta 0, A △ B = 8 mm².
+    let make = |notch_x0: f64| Geometry {
+        layers: vec![GeomLayer { name: "F.Cu".into(), role: "copper".into() }],
+        nets: vec![String::new(), "GND".into()],
+        zones: vec![GeomZone {
+            layer: 0,
+            net: 1,
+            filled: true,
+            pts: vec![
+                0.0, 0.0, 10.0, 0.0, 10.0, 10.0, // bottom + right edge
+                notch_x0 + 2.0, 10.0, // step down into the notch
+                notch_x0 + 2.0, 8.0,
+                notch_x0, 8.0,
+                notch_x0, 10.0, // back up out of the notch
+                0.0, 10.0, // left edge
+            ],
+        }],
+        ..Default::default()
+    };
+    let mut a = bundle(empty_indexes());
+    a.geometry = Some(make(1.0)); // notch at x ∈ [1, 3]
+    let mut b = bundle(empty_indexes());
+    b.geometry = Some(make(7.0)); // notch at x ∈ [7, 9]
+
+    let doc = diff_bundles(&a, &b, &changed(&["board.kicad_pcb"]));
+    let z: Vec<_> = doc.changes.iter().filter(|c| c.group == Group::Zone).collect();
+    assert_eq!(z.len(), 1, "reshaped pour at constant area, got {z:?}");
+    assert_eq!(z[0].kind, Kind::Modified);
+    assert!(z[0].title.contains("GND") && z[0].title.contains("F.Cu"), "{}", z[0].title);
+    assert!(z[0].title.contains("reshaped"), "{}", z[0].title);
+    let pcb = z[0].anchors.pcb.as_ref().expect("pcb anchor");
+    assert_eq!(pcb.net.as_deref(), Some("GND"));
+    assert_eq!(pcb.layers, vec!["F.Cu"]);
+
+    // A pour that only nudged (sub-mm² symmetric difference) must NOT flag: shift the
+    // notch by 0.1 mm → A △ B ≈ 2 × (0.1 × 2) = 0.4 mm², below the floor.
+    let mut a2 = bundle(empty_indexes());
+    a2.geometry = Some(make(1.0));
+    let mut b2 = bundle(empty_indexes());
+    b2.geometry = Some(make(1.1));
+    let doc2 = diff_bundles(&a2, &b2, &changed(&["board.kicad_pcb"]));
+    assert!(
+        !doc2.changes.iter().any(|c| c.group == Group::Zone),
+        "sub-threshold reshape ignored"
+    );
 }
 
 #[test]

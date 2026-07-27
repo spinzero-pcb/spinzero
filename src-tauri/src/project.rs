@@ -548,12 +548,22 @@ impl ProjectHandle {
     /// true, a checkout can overwrite the working tree without losing anything (a
     /// "clean" tree); when false there are un-captured edits and the checkout must warn.
     pub fn source_is_captured(&self, live: &BTreeMap<String, String>) -> bool {
+        self.find_rev_id_by_hashes(live).is_some()
+    }
+
+    /// The id of the revision/checkpoint whose content equals `hashes`, if any.
+    /// Ids are content-derived (same hashing in both stores), so a published
+    /// revision and its local twin resolve to the same id.
+    pub fn find_rev_id_by_hashes(&self, hashes: &BTreeMap<String, String>) -> Option<String> {
         crate::rawstore::list_revisions(&self.project_dir)
-            .iter()
-            .any(|r| &r.source_hashes == live)
-            || crate::checkpoints::list_checkpoints(&self.project_dir)
-                .iter()
-                .any(|r| &r.source_hashes == live)
+            .into_iter()
+            .find(|r| &r.source_hashes == hashes)
+            .or_else(|| {
+                crate::checkpoints::list_checkpoints(&self.project_dir)
+                    .into_iter()
+                    .find(|r| &r.source_hashes == hashes)
+            })
+            .map(|r| r.id)
     }
 
     /// The effective revision id served to the viewer. None if nothing has been
@@ -582,43 +592,10 @@ impl ProjectHandle {
     /// The revision history as `ExtractionMeta`, newest-first — the picker's
     /// data source: raw-store revisions mapped onto the picker row shape.
     pub fn list_extractions_meta(&self) -> Vec<ExtractionMeta> {
-        {
-            // Merge the synced (published) history with this machine's local-only
-            // checkpoints. A published checkpoint shares its id with the synced
-            // revision, so it appears once (as published); only checkpoints with no
-            // synced twin are added as local-only rows.
-            let to_meta = |r: crate::rawstore::Revision, published: bool, is_checkpoint: bool| {
-                ExtractionMeta {
-                    id: r.id,
-                    label: r.label,
-                    message: r.message,
-                    created_at: r.ts,
-                    design_tool: Some("kicad".into()),
-                    git_hash: r.git_hash,
-                    git_branch: r.git_branch,
-                    git_dirty: r.git_dirty,
-                    source_hashes: r.source_hashes,
-                    parents: r.parents.into_iter().collect(),
-                    tags: r.tags,
-                    hidden: r.hidden,
-                    published,
-                    is_checkpoint,
-                    author: Some(r.author),
-                }
-            };
-            let synced = crate::rawstore::list_revisions(&self.project_dir);
-            let synced_ids: std::collections::HashSet<String> =
-                synced.iter().map(|r| r.id.clone()).collect();
-            let mut metas: Vec<ExtractionMeta> =
-                synced.into_iter().map(|r| to_meta(r, true, false)).collect();
-            for cp in crate::checkpoints::list_checkpoints(&self.project_dir) {
-                if !synced_ids.contains(&cp.id) {
-                    metas.push(to_meta(cp, false, true));
-                }
-            }
-            metas.sort_by(|a, b| b.created_at.cmp(&a.created_at));
-            metas
-        }
+        merge_revision_metas(
+            crate::rawstore::list_revisions(&self.project_dir),
+            crate::checkpoints::list_checkpoints(&self.project_dir),
+        )
     }
 
     pub fn info(&self) -> ProjectInfo {
@@ -640,6 +617,70 @@ impl ProjectHandle {
             extraction_count,
         }
     }
+}
+
+/// Merge the synced (published) history with this machine's local-only checkpoints into
+/// the picker's `ExtractionMeta` rows, newest-first. A published checkpoint shares its id
+/// with the synced revision, so it appears once (as published); only checkpoints with no
+/// synced twin are added as local-only rows.
+///
+/// A publish records the *nearest already-published* ancestor as its parent, so a
+/// revision published straight from a local checkpoint (whose ancestors are all still
+/// local) records NO parent and looks like a DAG root. This machine still holds that
+/// checkpoint's immediate parent, so it's folded into the published row's parents —
+/// otherwise the merged history shows the revision as rootless and "Compare with
+/// previous" is wrongly disabled even though its predecessor is right there. Appended as
+/// a fallback (the published parent, when present, keeps priority). Purely a local-view
+/// enrichment: a teammate without these checkpoints still reads the published pointer.
+fn merge_revision_metas(
+    synced: Vec<crate::rawstore::Revision>,
+    checkpoints: Vec<crate::rawstore::Revision>,
+) -> Vec<ExtractionMeta> {
+    let to_meta = |r: crate::rawstore::Revision, published: bool, is_checkpoint: bool| ExtractionMeta {
+        id: r.id,
+        label: r.label,
+        message: r.message,
+        created_at: r.ts,
+        design_tool: Some("kicad".into()),
+        git_hash: r.git_hash,
+        git_branch: r.git_branch,
+        git_dirty: r.git_dirty,
+        source_hashes: r.source_hashes,
+        parents: r.parents.into_iter().collect(),
+        tags: r.tags,
+        hidden: r.hidden,
+        published,
+        is_checkpoint,
+        author: Some(r.author),
+    };
+    let synced_ids: std::collections::HashSet<String> =
+        synced.iter().map(|r| r.id.clone()).collect();
+    let cp_parents: std::collections::HashMap<String, Vec<String>> = checkpoints
+        .iter()
+        .map(|c| (c.id.clone(), c.parents.iter().cloned().collect()))
+        .collect();
+
+    let mut metas: Vec<ExtractionMeta> = synced
+        .into_iter()
+        .map(|r| {
+            let mut m = to_meta(r, true, false);
+            if let Some(extra) = cp_parents.get(&m.id) {
+                for p in extra {
+                    if !m.parents.contains(p) {
+                        m.parents.push(p.clone());
+                    }
+                }
+            }
+            m
+        })
+        .collect();
+    for cp in checkpoints {
+        if !synced_ids.contains(&cp.id) {
+            metas.push(to_meta(cp, false, true));
+        }
+    }
+    metas.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    metas
 }
 
 // ------------------------------------------------------------ create / open
@@ -861,5 +902,62 @@ mod detect_tests {
         let det = detect_design(&d).expect("detected");
         assert!(det.legacy);
         fs::remove_dir_all(&d).ok();
+    }
+}
+
+#[cfg(test)]
+mod merge_tests {
+    use super::*;
+
+    fn rev(id: &str, ts: &str, parents: &[&str]) -> crate::rawstore::Revision {
+        crate::rawstore::Revision {
+            id: id.into(),
+            ts: ts.into(),
+            author: "a".into(),
+            root: String::new(),
+            source_hashes: std::collections::BTreeMap::new(),
+            label: None,
+            message: None,
+            pinned: false,
+            parents: parents.iter().map(|s| s.to_string()).collect(),
+            tags: Vec::new(),
+            hidden: false,
+            git_hash: None,
+            git_branch: None,
+            git_dirty: None,
+        }
+    }
+
+    #[test]
+    fn published_from_local_checkpoint_inherits_local_parent() {
+        // "B" was published straight from a local checkpoint whose ancestors are all
+        // still local, so its synced record carries no parent. The merged view must
+        // still link it to its local predecessor "A" — otherwise the DAG shows B as a
+        // root and "Compare with previous" is wrongly disabled.
+        let synced = vec![rev("B", "2026-01-02", &[])];
+        let checkpoints = vec![rev("B", "2026-01-02", &["A"]), rev("A", "2026-01-01", &[])];
+        let metas = merge_revision_metas(synced, checkpoints);
+
+        let b = metas.iter().find(|m| m.id == "B").expect("B present");
+        assert!(b.published, "B stays published");
+        assert!(!b.is_checkpoint, "the published twin wins over the checkpoint twin");
+        assert!(b.parents.contains(&"A".to_string()), "B inherits local parent A, got {:?}", b.parents);
+        let a = metas.iter().find(|m| m.id == "A").expect("A present");
+        assert!(a.is_checkpoint && !a.published, "A is a local-only checkpoint row");
+        assert_eq!(metas.first().map(|m| m.id.as_str()), Some("B"), "newest-first");
+    }
+
+    #[test]
+    fn published_parent_keeps_priority_over_local_twin() {
+        // Normal case: B's synced parent P is already published (present). The local
+        // twin records the same parent — the union must not duplicate it, and the
+        // published pointer stays first so parentOf keeps picking it.
+        let synced = vec![rev("B", "2026-01-02", &["P"]), rev("P", "2026-01-01", &[])];
+        let checkpoints = vec![rev("B", "2026-01-02", &["P"])];
+        let metas = merge_revision_metas(synced, checkpoints);
+
+        let b = metas.iter().find(|m| m.id == "B").unwrap();
+        assert_eq!(b.parents.first().map(String::as_str), Some("P"), "published parent stays first");
+        assert_eq!(b.parents.len(), 1, "no duplicate parent, got {:?}", b.parents);
     }
 }

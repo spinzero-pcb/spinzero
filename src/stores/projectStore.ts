@@ -22,6 +22,9 @@ interface ProjectState {
   extractions: ExtractionMeta[];
   /** The extraction shown in the viewer; null = latest/live. */
   activeExtraction: string | null;
+  /** The revision the KiCad design folder currently matches (null = unknown) —
+   *  shown as the "KiCad files" marker so viewing-vs-disk divergence is visible. */
+  designHead: string | null;
   /** Read-only mode: the project's design folder is missing on this machine. */
   designPathMissing: boolean;
   busy: boolean;
@@ -40,7 +43,11 @@ interface ProjectState {
     class?: string | null;
   }) => Promise<void>;
   relinkDesignPath: (newDesignPath: string) => Promise<void>;
-  setActiveExtraction: (id: string | null) => Promise<void>;
+  /** Pin the viewer to a revision. Resolves `true` when the switch landed, `false` when
+   *  it was skipped (a switch/update was already in flight) or the IPC failed — so a
+   *  caller like the diff enter can detect a silent no-op instead of proceeding on the
+   *  wrong revision. */
+  setActiveExtraction: (id: string | null) => Promise<boolean>;
   updateDesignFiles: (id: string) => Promise<void>;
   labelExtraction: (id: string, label: string | null) => Promise<void>;
   setTag: (id: string, name: string, message?: string | null) => Promise<void>;
@@ -108,6 +115,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   layers: [],
   extractions: [],
   activeExtraction: null,
+  designHead: null,
   designPathMissing: false,
   busy: false,
   errorMsg: null,
@@ -136,7 +144,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     set({ busy: true, errorMsg: null });
     try {
       resetForNewProject();
-      set({ summary: null, sheets: [], layers: [], extractions: [] });
+      set({ summary: null, sheets: [], layers: [], extractions: [], designHead: null });
       const project = await ipc.openProject(projectDir);
       set(adopt(project));
       // A failed recents refresh must not report the (already-open) project as failed —
@@ -177,7 +185,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     set({ busy: true, errorMsg: null });
     try {
       resetForNewProject();
-      set({ summary: null, sheets: [], layers: [], extractions: [] });
+      set({ summary: null, sheets: [], layers: [], extractions: [], designHead: null });
       const project = await ipc.createProject(args);
       set({ ...adopt(project), recents: await ipc.getRecentProjects() });
       // First extraction runs in the background; the design loads off the crunch
@@ -208,7 +216,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   // Pure viewer switch: the design folder on disk is never touched, so there is
   // nothing to confirm. Writing files back is the separate updateDesignFiles action.
   setActiveExtraction: async (id) => {
-    if (get().busy) return; // don't overlap another switch/update
+    if (get().busy) return false; // don't overlap another switch/update — caller sees the no-op
     set({ busy: true });
     try {
       await ipc.setActiveExtraction(id);
@@ -218,8 +226,10 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       sel.setHighlights([], "sch");
       sel.setSelection(null, "sch");
       await Promise.all([get().refreshIndex(), useDesignStore.getState().load()]);
+      return true;
     } catch (e) {
       useToastStore.getState().push({ kind: "error", title: "Couldn’t switch revision", message: String(e) });
+      return false;
     } finally {
       set({ busy: false });
     }
@@ -304,16 +314,17 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     const dir = get().project?.project_dir;
     for (let attempt = 0; attempt < 6; attempt++) {
       try {
-        const [summary, sheets, layers, extractions] = await Promise.all([
+        const [summary, sheets, layers, extractions, designHead] = await Promise.all([
           ipc.getProjectSummary(),
           ipc.listSheets(),
           ipc.listLayers(),
           ipc.listExtractions(),
+          ipc.getDesignHead(),
         ]);
         // The user may have switched projects while we awaited; a stale iteration of this
         // loop (it can run up to ~10s) must not overwrite the new project's rows.
         if (get().project?.project_dir !== dir) return;
-        set({ summary, sheets, layers, extractions: extractions.map(normalizeExtraction) });
+        set({ summary, sheets, layers, extractions: extractions.map(normalizeExtraction), designHead });
         if (summary && sheets.length > 0) {
           void useSelectionStore.getState().loadPinned(); // item 22: per-project highlights
           return;

@@ -159,7 +159,8 @@ pub(crate) struct RevEvent {
     label: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pinned: Option<bool>,
-    /// Revision this was derived from (the active revision at crunch time). None = root.
+    /// Revision this was derived from (what the design folder descended from at
+    /// crunch time — the hash-gate state, not the viewed revision). None = root.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     parent: Option<String>,
     /// Tag name for "tag"/"untag" actions (git-tag semantics, unique by name).

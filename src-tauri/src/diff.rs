@@ -89,6 +89,26 @@ pub struct Change {
     pub emph_b: Option<String>,
 }
 
+impl Default for Change {
+    /// The defaulted shape every construction site shares: no id yet (assigned last,
+    /// by ordinal), no detail, no emphasis, both-sided, empty anchors. Sites fill in
+    /// the signal fields (group/kind/impact/title/anchors) and `..Default::default()`.
+    fn default() -> Self {
+        Change {
+            id: String::new(),
+            group: Group::Component,
+            kind: Kind::Modified,
+            impact: Impact::Cosmetic,
+            title: String::new(),
+            detail: String::new(),
+            anchors: Anchors::default(),
+            side: Side::Both,
+            emph_a: None,
+            emph_b: None,
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
 #[serde(rename_all = "lowercase")]
 pub enum Group {
@@ -246,26 +266,19 @@ pub struct GeomComp {
 
 #[derive(Deserialize, Default, Clone)]
 pub struct GeomTracks {
+    /// Straight segments — `xy` packed 4 per element `[x1,y1,x2,y2]`.
     #[serde(default)]
-    pub seg: GeomSegCol,
+    pub seg: GeomTrackCol,
+    /// Arcs — `xy` packed 6 per element `[sx,sy,mx,my,ex,ey]`.
     #[serde(default)]
-    pub arc: GeomArcCol,
+    pub arc: GeomTrackCol,
 }
 
+/// A struct-of-arrays column of track primitives (segments or arcs — identical shape,
+/// only the `xy` stride differs, so one struct serves both `seg` and `arc`). `xy` holds
+/// the packed coordinates; `w`/`layer`/`net` are one entry per primitive.
 #[derive(Deserialize, Default, Clone)]
-pub struct GeomSegCol {
-    #[serde(default)]
-    pub xy: Vec<f64>,
-    #[serde(default)]
-    pub w: Vec<f64>,
-    #[serde(default)]
-    pub layer: Vec<u16>,
-    #[serde(default)]
-    pub net: Vec<u32>,
-}
-
-#[derive(Deserialize, Default, Clone)]
-pub struct GeomArcCol {
+pub struct GeomTrackCol {
     #[serde(default)]
     pub xy: Vec<f64>,
     #[serde(default)]
@@ -391,6 +404,10 @@ pub struct Bundle {
     pub sch_geometry: Option<SchGeometry>,
     /// The `.kicad_pcb` source file name, for PCB-pass pruning.
     pub pcb_file: Option<String>,
+    /// Per-component (refdes → full property map). Lets the component pass flag edits
+    /// to arbitrary symbol fields (Package, Tolerance, Automotive Grade, …) that aren't
+    /// first-class on `CompLite`. Empty for older caches.
+    pub comp_params: HashMap<String, std::collections::BTreeMap<String, String>>,
 }
 
 // ============================================================ tuning constants
@@ -415,7 +432,14 @@ const ANGLE_EPS_DEG: f64 = 0.01;
 const NET_RENAME_JACCARD: f64 = 0.7;
 
 /// Zone area deltas below this (mm²) are refill noise, not a change (plan §2, "~1 mm²").
+/// The same floor gates the shape (symmetric-difference) signal — copper that moved by
+/// less than a square millimetre isn't worth a row either.
 const ZONE_AREA_EPS_MM2: f64 = 1.0;
+
+/// Scanline spacing (mm) for the zone shape (symmetric-difference) estimate. Fine enough
+/// to resolve a track-width copper notch; the result only feeds the ~1 mm² threshold, so
+/// sub-notch precision isn't needed.
+const ZONE_SCAN_STEP_MM: f64 = 0.05;
 
 // ================================================================= entry point
 
@@ -456,6 +480,7 @@ pub fn diff_bundles(
     // --- semantic groups over the design.json indexes ---
     let comp_delta = diff_components(a, b, &mut raw);
     diff_nets(a, b, &comp_delta, &mut raw);
+    diff_pins(a, b, &comp_delta, &mut raw);
     diff_sheets(a, b, &mut raw);
     diff_docs(a, b, &mut raw);
 
@@ -650,9 +675,9 @@ fn sch_kind_noun(kind: &str) -> &'static str {
 /// The dominant element in a cluster (highest priority present), whose noun titles the
 /// row — a symbol drag that also stretched its wires reads as "power symbol", not "wire".
 fn sch_cluster_noun(members: &[ChangedElem]) -> &'static str {
-    const PRIORITY: [&str; 12] = [
+    const PRIORITY: [&str; 11] = [
         "power", "symbol", "hier_label", "global_label", "label", "text", "graphic",
-        "netclass_flag", "bus", "bus_entry", "wire", "junction",
+        "netclass_flag", "bus", "wire", "junction",
     ];
     for k in PRIORITY {
         if members.iter().any(|m| m.kind == k) {
@@ -858,9 +883,6 @@ fn diff_sch_graphics(
                 anchors.schematic_a = Some(SchematicAnchor { sheet: sheet_num, uuids: a_uuids });
             }
             raw.push(Change {
-                id: String::new(),
-                emph_a: None,
-                emph_b: None,
                 group: Group::Sheet,
                 kind,
                 impact: Impact::Cosmetic,
@@ -868,6 +890,7 @@ fn diff_sch_graphics(
                 detail,
                 anchors,
                 side,
+                ..Default::default()
             });
         }
     }
@@ -913,9 +936,6 @@ fn graphical_edit_fallback(
             .map(|s| s.name.clone())
             .unwrap_or_else(|| num.to_string());
         raw.push(Change {
-            id: String::new(),
-            emph_a: None,
-            emph_b: None,
             group: Group::Sheet,
             kind: Kind::Modified,
             impact: Impact::Cosmetic,
@@ -927,6 +947,7 @@ fn graphical_edit_fallback(
                 pcb: None,
             },
             side: Side::Both,
+            ..Default::default()
         });
     }
 }
@@ -946,6 +967,22 @@ pub struct CompDelta {
     pub removed: HashSet<String>,
 }
 
+/// True for symbol properties the component pass already reports elsewhere (as a
+/// dedicated field row or the DNP flip), plus KiCad-internal `ki_*` library metadata
+/// and pure-documentation fields — none of which should surface again through the
+/// generic property diff.
+fn is_first_class_param(key: &str) -> bool {
+    matches!(
+        key,
+        // Reported as their own rows above.
+        "Reference" | "Value" | "Footprint" | "MPN" | "Manufacturer"
+        // DNP is a dedicated flip.
+        | "kicad_dnp"
+        // Documentation, not an electrical attribute — kept out to avoid noise.
+        | "Description" | "Datasheet"
+    ) || key.starts_with("ki_")
+}
+
 /// Component field comparison + re-annotation rename folding (plan §2).
 fn diff_components(a: &Bundle, b: &Bundle, out: &mut Vec<Change>) -> CompDelta {
     let mut delta = CompDelta::default();
@@ -961,6 +998,10 @@ fn diff_components(a: &Bundle, b: &Bundle, out: &mut Vec<Change>) -> CompDelta {
     // Fold re-annotations: a removed R12 + added R15 with equal (value, footprint) and
     // ~equal placement is ONE rename, not add+remove. Match greedily in sorted order so
     // the pairing is deterministic; each side's candidate is consumed once.
+    // Positions are read O(1) from a per-bundle reference→(x,y) index built once here,
+    // not by re-scanning geometry.components for every (ra, rb) candidate pair.
+    let pos_a = comp_pos_index(a);
+    let pos_b = comp_pos_index(b);
     let mut consumed_b: HashSet<&String> = HashSet::new();
     let mut folded_a: HashSet<&String> = HashSet::new();
     for ra in &only_a {
@@ -973,7 +1014,10 @@ fn diff_components(a: &Bundle, b: &Bundle, out: &mut Vec<Change>) -> CompDelta {
             let comp_b = &cb[*rb];
             if comp_a.value == comp_b.value
                 && comp_a.fp == comp_b.fp
-                && placements_match(a, b, ra, rb)
+                && placements_match(
+                    pos_a.get(ra.as_str()).copied(),
+                    pos_b.get(rb.as_str()).copied(),
+                )
             {
                 best = Some(*rb);
                 break;
@@ -988,9 +1032,6 @@ fn diff_components(a: &Bundle, b: &Bundle, out: &mut Vec<Change>) -> CompDelta {
             let mut anchors = comp_anchors(b, rb);
             set_schematic_a(&mut anchors, comp_anchors(a, ra));
             out.push(Change {
-                id: String::new(),
-                emph_a: None,
-                emph_b: None,
                 group: Group::Component,
                 kind: Kind::Renamed,
                 impact: Impact::Cosmetic,
@@ -998,6 +1039,7 @@ fn diff_components(a: &Bundle, b: &Bundle, out: &mut Vec<Change>) -> CompDelta {
                 detail: format!("same value {} / footprint {}", disp(&comp_a.value), disp(&comp_a.fp)),
                 anchors,
                 side: Side::Both,
+                ..Default::default()
             });
         }
     }
@@ -1010,9 +1052,6 @@ fn diff_components(a: &Bundle, b: &Bundle, out: &mut Vec<Change>) -> CompDelta {
         delta.added.insert(rb.to_string());
         let c = &cb[*rb];
         out.push(Change {
-            id: String::new(),
-            emph_a: None,
-            emph_b: None,
             group: Group::Component,
             kind: Kind::Added,
             impact: Impact::Electrical,
@@ -1020,6 +1059,7 @@ fn diff_components(a: &Bundle, b: &Bundle, out: &mut Vec<Change>) -> CompDelta {
             detail: comp_summary(c),
             anchors: comp_anchors(b, rb),
             side: Side::B,
+            ..Default::default()
         });
     }
     for ra in &only_a {
@@ -1033,9 +1073,6 @@ fn diff_components(a: &Bundle, b: &Bundle, out: &mut Vec<Change>) -> CompDelta {
         delta.removed.insert(ra.to_string());
         let c = &ca[*ra];
         out.push(Change {
-            id: String::new(),
-            emph_a: None,
-            emph_b: None,
             group: Group::Component,
             kind: Kind::Removed,
             impact: Impact::Electrical,
@@ -1043,6 +1080,7 @@ fn diff_components(a: &Bundle, b: &Bundle, out: &mut Vec<Change>) -> CompDelta {
             detail: comp_summary(c),
             anchors: comp_anchors(a, ra),
             side: Side::A,
+            ..Default::default()
         });
     }
 
@@ -1060,6 +1098,30 @@ fn diff_components(a: &Bundle, b: &Bundle, out: &mut Vec<Change>) -> CompDelta {
         }
         if x.mpn != y.mpn {
             fields.push(("MPN", &x.mpn, &y.mpn));
+        }
+        if x.mfr != y.mfr {
+            fields.push(("Manufacturer", &x.mfr, &y.mfr));
+        }
+        // Edits to arbitrary symbol properties (Package, Tolerance, Automotive Grade,
+        // Voltage, …) that `CompLite` doesn't surface. Compared over the union of both
+        // sides' keys so an added/removed property registers too. Keys already reported
+        // as first-class rows above — and KiCad-internal `ki_*` metadata — are skipped
+        // so nothing is double-counted.
+        let empty = std::collections::BTreeMap::new();
+        let pa = a.comp_params.get(r.as_str()).unwrap_or(&empty);
+        let pb = b.comp_params.get(r.as_str()).unwrap_or(&empty);
+        let mut param_keys: Vec<&String> = pa.keys().chain(pb.keys()).collect();
+        param_keys.sort_unstable();
+        param_keys.dedup();
+        for key in param_keys {
+            if is_first_class_param(key) {
+                continue;
+            }
+            let old = pa.get(key).map(String::as_str).unwrap_or("");
+            let new = pb.get(key).map(String::as_str).unwrap_or("");
+            if old != new {
+                fields.push((key.as_str(), old, new));
+            }
         }
         let dnp_flip = x.dnp != y.dnp;
 
@@ -1079,9 +1141,6 @@ fn diff_components(a: &Bundle, b: &Bundle, out: &mut Vec<Change>) -> CompDelta {
                 let mut anchors = comp_anchors(b, r);
                 set_schematic_a(&mut anchors, comp_anchors(a, r));
                 out.push(Change {
-                    id: String::new(),
-                    emph_a: None,
-                    emph_b: None,
                     group: Group::Component,
                     kind: Kind::Moved,
                     impact: Impact::Cosmetic,
@@ -1089,6 +1148,7 @@ fn diff_components(a: &Bundle, b: &Bundle, out: &mut Vec<Change>) -> CompDelta {
                     detail: String::new(),
                     anchors,
                     side: Side::Both,
+                    ..Default::default()
                 });
             }
         }
@@ -1115,8 +1175,9 @@ fn diff_components(a: &Bundle, b: &Bundle, out: &mut Vec<Change>) -> CompDelta {
                 extra.push(if y.dnp { "marked DNP".into() } else { "un-marked DNP".into() });
             }
             detail = extra.join("; ");
-            // value/footprint/mpn are electrical-ish; footprint is placement-relevant
-            // but treated electrical here (it changes the land pattern / part).
+            // value/footprint/mpn/manufacturer and the part-attribute properties
+            // (Package, Tolerance, Automotive Grade, …) are all electrical-ish; footprint
+            // is placement-relevant but treated electrical here (land pattern / part).
             impact = Impact::Electrical;
         } else {
             // DNP-only flip.
@@ -1127,7 +1188,6 @@ fn diff_components(a: &Bundle, b: &Bundle, out: &mut Vec<Change>) -> CompDelta {
         let mut anchors = comp_anchors(b, r);
         set_schematic_a(&mut anchors, comp_anchors(a, r));
         out.push(Change {
-            id: String::new(),
             emph_a: emph.0,
             emph_b: emph.1,
             group: Group::Component,
@@ -1137,6 +1197,7 @@ fn diff_components(a: &Bundle, b: &Bundle, out: &mut Vec<Change>) -> CompDelta {
             detail,
             anchors,
             side: Side::Both,
+            ..Default::default()
         });
     }
     delta
@@ -1155,18 +1216,24 @@ fn set_schematic_a(anchors: &mut Anchors, a_side: Anchors) {
 /// Two refdes occupy ~the same board position (for re-annotation folding). If neither
 /// side has PCB geometry, position is unknown → treat as matching (value+fp equality
 /// alone then carries the fold, which is the schematic-only case).
-fn placements_match(a: &Bundle, b: &Bundle, ra: &str, rb: &str) -> bool {
-    let pa = comp_pos(a, ra);
-    let pb = comp_pos(b, rb);
+fn placements_match(pa: Option<(f64, f64)>, pb: Option<(f64, f64)>) -> bool {
     match (pa, pb) {
         (Some((xa, ya)), Some((xb, yb))) => (xa - xb).abs() < POS_EPS_MM && (ya - yb).abs() < POS_EPS_MM,
         _ => true,
     }
 }
 
-fn comp_pos(bundle: &Bundle, refdes: &str) -> Option<(f64, f64)> {
-    let g = bundle.geometry.as_ref()?;
-    g.components.iter().find(|c| c.reference == refdes).map(|c| (c.x, c.y))
+/// Build reference → (x, y) once per bundle so re-annotation matching is an O(1) lookup
+/// per candidate pair instead of a linear scan of geometry.components. First occurrence
+/// wins, matching the old `find()`'s first-hit behaviour on a duplicated refdes.
+fn comp_pos_index(bundle: &Bundle) -> HashMap<&str, (f64, f64)> {
+    let mut m: HashMap<&str, (f64, f64)> = HashMap::new();
+    if let Some(g) = bundle.geometry.as_ref() {
+        for c in &g.components {
+            m.entry(c.reference.as_str()).or_insert((c.x, c.y));
+        }
+    }
+    m
 }
 
 fn comp_summary(c: &crate::design::CompLite) -> String {
@@ -1210,6 +1277,86 @@ fn comp_anchors(bundle: &Bundle, refdes: &str) -> Anchors {
     anchors
 }
 
+// ================================================================= pin diff
+
+/// `(refdes, pin number)` → `(electrical type, pin name)`, gathered from every net's
+/// terminal list — design.json's only per-pin record. A-side designators are
+/// canonicalized through `rename` so a re-annotated part keeps its pins. A pin listed on
+/// several nets with conflicting types is dropped as ambiguous rather than guessed at.
+///
+/// Unconnected pins have no terminal anywhere, so they are invisible to this index; the
+/// library-body signature (`sch_geom::lib_body_sig`) still surfaces such an edit as a
+/// graphical row on the sheet.
+fn pin_type_index<'a>(
+    bundle: &'a Bundle,
+    rename: &HashMap<&str, &str>,
+) -> BTreeMap<(String, String), (&'a str, &'a str)> {
+    let mut out: BTreeMap<(String, String), (&str, &str)> = BTreeMap::new();
+    let mut ambiguous: HashSet<(String, String)> = HashSet::new();
+    for net in bundle.indexes.nets.values() {
+        for t in &net.terminals {
+            let d = rename.get(t.d.as_str()).copied().unwrap_or(t.d.as_str());
+            let key = (d.to_string(), t.p.clone());
+            match out.get(&key) {
+                Some((etype, _)) if *etype != t.pt.as_str() => {
+                    ambiguous.insert(key);
+                }
+                Some(_) => {}
+                None => {
+                    out.insert(key, (t.pt.as_str(), t.pn.as_str()));
+                }
+            }
+        }
+    }
+    for key in ambiguous {
+        out.remove(&key);
+    }
+    out
+}
+
+/// Pin electrical-type edits (`input` → `output`, `passive` → `power_in`, …).
+///
+/// A pin's electrical type lives in the *library symbol*, not on the placed instance, so
+/// none of the component/net passes above see it: the netlist connectivity is unchanged,
+/// every field is unchanged, and nothing moved. It is a genuine electrical statement
+/// though — it changes what the part drives and what ERC will accept — so it gets its own
+/// `Electrical` row, anchored to the owning component on both canvases.
+fn diff_pins(a: &Bundle, b: &Bundle, comps: &CompDelta, out: &mut Vec<Change>) {
+    let rename: HashMap<&str, &str> =
+        comps.renamed.iter().map(|(x, y)| (x.as_str(), y.as_str())).collect();
+    let ia = pin_type_index(a, &rename);
+    let ib = pin_type_index(b, &HashMap::new());
+
+    for ((refdes, pin), (old, name_a)) in &ia {
+        // A pin that vanished (or whose component did) is already told by the net
+        // membership / component removal row — only a *retyped* surviving pin lands here.
+        let Some((new, name_b)) = ib.get(&(refdes.clone(), pin.clone())) else { continue };
+        if old == new {
+            continue;
+        }
+        let name = if name_b.is_empty() { *name_a } else { *name_b };
+        let detail = if name.is_empty() || name == "~" {
+            String::new()
+        } else {
+            format!("pin name '{name}'")
+        };
+        let mut anchors = comp_anchors(b, refdes);
+        set_schematic_a(&mut anchors, comp_anchors(a, refdes));
+        out.push(Change {
+            group: Group::Component,
+            kind: Kind::Modified,
+            impact: Impact::Electrical,
+            title: format!("{refdes} pin {pin} electrical type {} → {}", disp(old), disp(new)),
+            detail,
+            anchors,
+            side: Side::Both,
+            // No emphasis: the electrical type is not drawn on either canvas, so there is
+            // no text for the renderer to tint.
+            ..Default::default()
+        });
+    }
+}
+
 // ================================================================= net diff
 
 /// Net membership diff with name-rename folding (Jaccard on the terminal set) and
@@ -1237,11 +1384,14 @@ fn diff_nets(a: &Bundle, b: &Bundle, comps: &CompDelta, out: &mut Vec<Change>) {
     // >= threshold is one rename. Score every candidate pair; take the highest, then
     // the next, greedily but deterministically (sorted candidate order breaks ties).
     let mut candidates: Vec<(String, &String, &String)> = Vec::new(); // (jac-key, a, b)
+    // tb depends only on rb — build each B-side terminal set once, not once per (ra, rb)
+    // pair (the inner loop otherwise rebuilds a fresh BTreeSet of formatted strings for
+    // every A candidate).
+    let tb_sets: Vec<BTreeSet<String>> = only_b.iter().map(|rb| terminal_set(&nb[*rb])).collect();
     for ra in &only_a {
         let ta = terminal_set_mapped(&na[*ra], &rename);
-        for rb in &only_b {
-            let tb = terminal_set(&nb[*rb]);
-            let j = jaccard(&ta, &tb);
+        for (rb, tb) in only_b.iter().zip(tb_sets.iter()) {
+            let j = jaccard(&ta, tb);
             if j >= NET_RENAME_JACCARD {
                 // Store 1-j zero-padded so ascending sort = best-first, then names.
                 candidates.push((format!("{:08.5}", 1.0 - j), *ra, *rb));
@@ -1261,9 +1411,6 @@ fn diff_nets(a: &Bundle, b: &Bundle, comps: &CompDelta, out: &mut Vec<Change>) {
         let mut anchors = net_anchors(b, rb);
         set_schematic_a(&mut anchors, net_anchors(a, ra));
         out.push(Change {
-            id: String::new(),
-            emph_a: None,
-            emph_b: None,
             group: Group::Net,
             kind: Kind::Renamed,
             impact: Impact::Electrical,
@@ -1271,6 +1418,7 @@ fn diff_nets(a: &Bundle, b: &Bundle, comps: &CompDelta, out: &mut Vec<Change>) {
             detail: format!("same {n_pins} pin{}", plural(n_pins)),
             anchors,
             side: Side::Both,
+            ..Default::default()
         });
     }
 
@@ -1282,9 +1430,6 @@ fn diff_nets(a: &Bundle, b: &Bundle, comps: &CompDelta, out: &mut Vec<Change>) {
         let n = &nb[*rb];
         let cnt = n.terminals.len();
         out.push(Change {
-            id: String::new(),
-            emph_a: None,
-            emph_b: None,
             group: Group::Net,
             kind: Kind::Added,
             impact: Impact::Electrical,
@@ -1292,6 +1437,7 @@ fn diff_nets(a: &Bundle, b: &Bundle, comps: &CompDelta, out: &mut Vec<Change>) {
             detail: format!("{cnt} pin{}", plural(cnt)),
             anchors: net_anchors(b, rb),
             side: Side::B,
+            ..Default::default()
         });
     }
     for ra in &only_a {
@@ -1301,9 +1447,6 @@ fn diff_nets(a: &Bundle, b: &Bundle, comps: &CompDelta, out: &mut Vec<Change>) {
         let n = &na[*ra];
         let cnt = n.terminals.len();
         out.push(Change {
-            id: String::new(),
-            emph_a: None,
-            emph_b: None,
             group: Group::Net,
             kind: Kind::Removed,
             impact: Impact::Electrical,
@@ -1311,6 +1454,7 @@ fn diff_nets(a: &Bundle, b: &Bundle, comps: &CompDelta, out: &mut Vec<Change>) {
             detail: format!("{cnt} pin{}", plural(cnt)),
             anchors: net_anchors(a, ra),
             side: Side::A,
+            ..Default::default()
         });
     }
 
@@ -1358,9 +1502,6 @@ fn diff_nets(a: &Bundle, b: &Bundle, comps: &CompDelta, out: &mut Vec<Change>) {
             set_schematic_a(&mut anchors, net_anchors(a, &from));
         }
         out.push(Change {
-            id: String::new(),
-            emph_a: None,
-            emph_b: None,
             group: Group::Net,
             kind: Kind::Modified,
             impact: Impact::Electrical,
@@ -1368,6 +1509,7 @@ fn diff_nets(a: &Bundle, b: &Bundle, comps: &CompDelta, out: &mut Vec<Change>) {
             detail: String::new(),
             anchors,
             side: Side::Both,
+            ..Default::default()
         });
     }
 
@@ -1405,9 +1547,6 @@ fn diff_nets(a: &Bundle, b: &Bundle, comps: &CompDelta, out: &mut Vec<Change>) {
             bits.push(format!("−{removed}"));
         }
         out.push(Change {
-            id: String::new(),
-            emph_a: None,
-            emph_b: None,
             group: Group::Net,
             kind: Kind::Modified,
             impact: Impact::Electrical,
@@ -1419,6 +1558,7 @@ fn diff_nets(a: &Bundle, b: &Bundle, comps: &CompDelta, out: &mut Vec<Change>) {
                 anchors
             },
             side: Side::Both,
+            ..Default::default()
         });
     }
 }
@@ -1530,9 +1670,6 @@ fn diff_sheets(a: &Bundle, b: &Bundle, out: &mut Vec<Change>) {
     for (name, num) in &names_b {
         if !names_a.contains_key(name) {
             out.push(Change {
-                id: String::new(),
-                emph_a: None,
-                emph_b: None,
                 group: Group::Sheet,
                 kind: Kind::Added,
                 impact: Impact::Doc,
@@ -1544,15 +1681,13 @@ fn diff_sheets(a: &Bundle, b: &Bundle, out: &mut Vec<Change>) {
                     pcb: None,
                 },
                 side: Side::B,
+                ..Default::default()
             });
         }
     }
     for (name, num) in &names_a {
         if !names_b.contains_key(name) {
             out.push(Change {
-                id: String::new(),
-                emph_a: None,
-                emph_b: None,
                 group: Group::Sheet,
                 kind: Kind::Removed,
                 impact: Impact::Doc,
@@ -1564,6 +1699,7 @@ fn diff_sheets(a: &Bundle, b: &Bundle, out: &mut Vec<Change>) {
                     pcb: None,
                 },
                 side: Side::A,
+                ..Default::default()
             });
         }
     }
@@ -1589,9 +1725,6 @@ fn diff_docs(a: &Bundle, b: &Bundle, out: &mut Vec<Change>) {
     for (label, old, new) in fields {
         if old != new {
             out.push(Change {
-                id: String::new(),
-                emph_a: None,
-                emph_b: None,
                 group: Group::Doc,
                 kind: Kind::Modified,
                 impact: Impact::Doc,
@@ -1599,6 +1732,7 @@ fn diff_docs(a: &Bundle, b: &Bundle, out: &mut Vec<Change>) {
                 detail: String::new(),
                 anchors: Anchors::default(),
                 side: Side::Both,
+                ..Default::default()
             });
         }
     }
@@ -1709,9 +1843,6 @@ fn diff_placement(a: &Geometry, b: &Geometry, out: &mut Vec<Change>) {
         }
         let layers = side_b.into_iter().collect();
         out.push(Change {
-            id: String::new(),
-            emph_a: None,
-            emph_b: None,
             group: Group::Placement,
             kind: Kind::Moved,
             impact: Impact::Placement,
@@ -1729,6 +1860,7 @@ fn diff_placement(a: &Geometry, b: &Geometry, out: &mut Vec<Change>) {
                 }),
             },
             side: Side::Both,
+            ..Default::default()
         });
     }
 }
@@ -1804,9 +1936,6 @@ fn diff_routing(a: &Geometry, b: &Geometry, out: &mut Vec<Change>) {
             bits.push(format!("−{removed}"));
         }
         out.push(Change {
-            id: String::new(),
-            emph_a: None,
-            emph_b: None,
             group: Group::Routing,
             kind,
             impact: Impact::Electrical,
@@ -1824,6 +1953,7 @@ fn diff_routing(a: &Geometry, b: &Geometry, out: &mut Vec<Change>) {
                 }),
             },
             side: Side::Both,
+            ..Default::default()
         });
     }
 
@@ -1891,9 +2021,6 @@ fn diff_vias(a: &Geometry, b: &Geometry, out: &mut Vec<Change>) {
             bits.push(format!("−{}", removed.len()));
         }
         out.push(Change {
-            id: String::new(),
-            emph_a: None,
-            emph_b: None,
             group: Group::Routing,
             kind,
             impact: Impact::Electrical,
@@ -1911,6 +2038,7 @@ fn diff_vias(a: &Geometry, b: &Geometry, out: &mut Vec<Change>) {
                 }),
             },
             side: Side::Both,
+            ..Default::default()
         });
     }
 }
@@ -1924,29 +2052,20 @@ fn routing_hashes(g: &Geometry) -> HashMap<(String, String), HashSet<u64>> {
     let ln = |i: u16| g.layers.get(i as usize).map(|l| l.name.clone()).unwrap_or_default();
     let nn = |i: u32| g.nets.get(i as usize).cloned().unwrap_or_default();
 
-    // straight segments: [x1,y1,x2,y2] per seg.
-    for (i, w) in g.tracks.seg.w.iter().enumerate() {
-        let o = i * 4;
-        if o + 4 > g.tracks.seg.xy.len() {
-            break;
+    // seg = [x1,y1,x2,y2] (stride 4), arc = [sx,sy,mx,my,ex,ey] (stride 6). Same column
+    // shape, so one loop parameterized by (kind, stride) covers both.
+    for (kind, col, stride) in [("seg", &g.tracks.seg, 4), ("arc", &g.tracks.arc, 6)] {
+        for (i, w) in col.w.iter().enumerate() {
+            let o = i * stride;
+            if o + stride > col.xy.len() {
+                break;
+            }
+            let layer = ln(*col.layer.get(i).unwrap_or(&0));
+            let net = nn(*col.net.get(i).unwrap_or(&0));
+            let coords = &col.xy[o..o + stride];
+            let h = hash_prim(kind, &layer, &net, coords, *w);
+            m.entry((layer, net)).or_default().insert(h);
         }
-        let layer = ln(*g.tracks.seg.layer.get(i).unwrap_or(&0));
-        let net = nn(*g.tracks.seg.net.get(i).unwrap_or(&0));
-        let coords = &g.tracks.seg.xy[o..o + 4];
-        let h = hash_prim("seg", &layer, &net, coords, *w);
-        m.entry((layer, net)).or_default().insert(h);
-    }
-    // arcs: [sx,sy,mx,my,ex,ey] per arc.
-    for (i, w) in g.tracks.arc.w.iter().enumerate() {
-        let o = i * 6;
-        if o + 6 > g.tracks.arc.xy.len() {
-            break;
-        }
-        let layer = ln(*g.tracks.arc.layer.get(i).unwrap_or(&0));
-        let net = nn(*g.tracks.arc.net.get(i).unwrap_or(&0));
-        let coords = &g.tracks.arc.xy[o..o + 6];
-        let h = hash_prim("arc", &layer, &net, coords, *w);
-        m.entry((layer, net)).or_default().insert(h);
     }
     m
 }
@@ -1997,41 +2116,71 @@ fn hash_prim(kind: &str, layer: &str, net: &str, coords: &[f64], width: f64) -> 
 
 // ================================================================ zone diff
 
-/// Zone (copper pour) diff per (layer, net): filled-area delta with a noise threshold.
-/// Comparing fill polygons vertex-by-vertex is refill jitter, so we compare total area.
+/// Zone (copper pour) diff per (layer, net), on two signals both gated by the same
+/// ~1 mm² noise floor:
+///   • area delta — a pour added / removed / grown / shrunk.
+///   • shape      — a pour that kept its area but RE-FLOWED, e.g. around a re-routed
+///     track: the copper notch moves, so the total area barely changes yet the pour is
+///     genuinely different. Area-only comparison is blind to this (the bug this fixes).
+/// Comparing fill polygons vertex-by-vertex would trip on refill jitter, so the shape
+/// signal measures the actual differing area (A △ B) and holds it to the same floor.
 fn diff_zones(a: &Geometry, b: &Geometry, out: &mut Vec<Change>) {
-    let area_a = zone_areas(a);
-    let area_b = zone_areas(b);
+    let polys_a = zone_polys(a);
+    let polys_b = zone_polys(b);
+    let area = |m: &HashMap<(String, String), Vec<&[f64]>>, k: &(String, String)| {
+        m.get(k).map(|ps| ps.iter().map(|p| ring_area(p)).sum::<f64>()).unwrap_or(0.0)
+    };
 
     let mut keys: BTreeSet<(String, String)> = BTreeSet::new();
-    keys.extend(area_a.keys().cloned());
-    keys.extend(area_b.keys().cloned());
+    keys.extend(polys_a.keys().cloned());
+    keys.extend(polys_b.keys().cloned());
 
-    for (layer, net) in keys {
-        let aa = area_a.get(&(layer.clone(), net.clone())).copied().unwrap_or(0.0);
-        let ab = area_b.get(&(layer.clone(), net.clone())).copied().unwrap_or(0.0);
+    for key in keys {
+        let (layer, net) = key.clone();
+        let aa = area(&polys_a, &key);
+        let ab = area(&polys_b, &key);
         let delta = ab - aa;
-        if delta.abs() < ZONE_AREA_EPS_MM2 {
-            continue;
-        }
         let net_disp = if net.is_empty() { "(no net)".to_string() } else { net.clone() };
-        let (kind, verb) = if aa == 0.0 {
-            (Kind::Added, "added on")
-        } else if ab == 0.0 {
-            (Kind::Removed, "removed from")
-        } else if delta > 0.0 {
-            (Kind::Modified, "grew on")
+
+        let (kind, title) = if delta.abs() >= ZONE_AREA_EPS_MM2 {
+            // Area moved enough on its own — the classic add/remove/grow/shrink row.
+            let verb = if aa == 0.0 {
+                "added on"
+            } else if ab == 0.0 {
+                "removed from"
+            } else if delta > 0.0 {
+                "grew on"
+            } else {
+                "shrank on"
+            };
+            let kind = if aa == 0.0 {
+                Kind::Added
+            } else if ab == 0.0 {
+                Kind::Removed
+            } else {
+                Kind::Modified
+            };
+            (kind, format!("{net_disp} pour {verb} {layer} ({:+.0} mm²)", delta))
         } else {
-            (Kind::Modified, "shrank on")
+            // Area held steady — did the pour re-flow? Measure the moved copper. Both
+            // sides present here (a pour that only exists on one side has |delta| ≥ its
+            // whole area, caught above unless it's sub-threshold tiny — then symdiff is
+            // that same tiny area and stays below the floor too).
+            let moved = zone_symdiff_area(
+                polys_a.get(&key).map(Vec::as_slice).unwrap_or(&[]),
+                polys_b.get(&key).map(Vec::as_slice).unwrap_or(&[]),
+            );
+            if moved < ZONE_AREA_EPS_MM2 {
+                continue;
+            }
+            (Kind::Modified, format!("{net_disp} pour reshaped on {layer} (~{:.0} mm²)", moved))
         };
+
         out.push(Change {
-            id: String::new(),
-            emph_a: None,
-            emph_b: None,
             group: Group::Zone,
             kind,
             impact: Impact::Placement,
-            title: format!("{net_disp} pour {verb} {layer} ({:+.0} mm²)", delta),
+            title,
             detail: String::new(),
             anchors: Anchors {
                 schematic: None,
@@ -2045,22 +2194,155 @@ fn diff_zones(a: &Geometry, b: &Geometry, out: &mut Vec<Change>) {
                 }),
             },
             side: Side::Both,
+            ..Default::default()
         });
     }
 }
 
-/// (layer-name, net-name) -> total filled area (mm²), summed over filled zones.
-fn zone_areas(g: &Geometry) -> HashMap<(String, String), f64> {
-    let mut m: HashMap<(String, String), f64> = HashMap::new();
+/// (layer-name, net-name) -> the filled fill polygons (each a flat `[x,y,…]` ring),
+/// borrowed from the geometry. Unfilled/keepout zones and rings with fewer than three
+/// points carry no measurable copper and are dropped.
+fn zone_polys(g: &Geometry) -> HashMap<(String, String), Vec<&[f64]>> {
+    let mut m: HashMap<(String, String), Vec<&[f64]>> = HashMap::new();
     for z in &g.zones {
-        if !z.filled {
+        if !z.filled || z.pts.len() < 6 {
             continue;
         }
         let layer = g.layers.get(z.layer as usize).map(|l| l.name.clone()).unwrap_or_default();
         let net = g.nets.get(z.net as usize).cloned().unwrap_or_default();
-        *m.entry((layer, net)).or_insert(0.0) += ring_area(&z.pts);
+        m.entry((layer, net)).or_default().push(z.pts.as_slice());
     }
     m
+}
+
+/// Estimated area (mm²) of the symmetric difference of two fill-polygon sets on one
+/// (layer, net) — the copper filled on exactly one side. Byte-identical polygons appear
+/// on both sides and cancel out of A △ B (fill islands never overlap within a net), so
+/// they're dropped first: a localized re-flow then only measures its own neighbourhood,
+/// and whole-board refill jitter (near-identical rings) nets close to zero. The
+/// remainder is integrated over horizontal scanlines — exact in x (each side's filled
+/// spans come from even-odd pairing of its edge crossings), sampled every
+/// `ZONE_SCAN_STEP_MM` in y.
+fn zone_symdiff_area(pa: &[&[f64]], pb: &[&[f64]]) -> f64 {
+    // Drop polygons present identically on both sides (multiset-aware).
+    let mut bcount: HashMap<u64, usize> = HashMap::new();
+    for p in pb {
+        *bcount.entry(poly_hash(p)).or_insert(0) += 1;
+    }
+    let mut ua: Vec<&[f64]> = Vec::new();
+    for &p in pa {
+        match bcount.get_mut(&poly_hash(p)) {
+            Some(c) if *c > 0 => *c -= 1, // cancels an identical B polygon
+            _ => ua.push(p),
+        }
+    }
+    let mut ub: Vec<&[f64]> = Vec::new();
+    for &p in pb {
+        if let Some(c) = bcount.get_mut(&poly_hash(p)) {
+            if *c > 0 {
+                *c -= 1;
+                ub.push(p);
+            }
+        }
+    }
+    if ua.is_empty() && ub.is_empty() {
+        return 0.0;
+    }
+
+    let (mut ymin, mut ymax) = (f64::INFINITY, f64::NEG_INFINITY);
+    for p in ua.iter().chain(ub.iter()) {
+        let mut i = 1;
+        while i < p.len() {
+            ymin = ymin.min(p[i]);
+            ymax = ymax.max(p[i]);
+            i += 2;
+        }
+    }
+    if ymax <= ymin {
+        return 0.0; // degenerate (zero-height) — no area to sweep
+    }
+
+    let step = ZONE_SCAN_STEP_MM;
+    let mut area = 0.0;
+    let mut y = ymin + step * 0.5;
+    while y < ymax {
+        area += span_symdiff_len(&scan_spans(&ua, y), &scan_spans(&ub, y)) * step;
+        y += step;
+    }
+    area
+}
+
+/// FNV-1a over a fill ring's fixed-point (1e-4 mm) coordinates — the same rounding the
+/// extractor and overlay use, so "identical polygon" means the same thing everywhere.
+fn poly_hash(pts: &[f64]) -> u64 {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for c in pts {
+        let q = (c * 1e4).round() as i64;
+        for &byte in &q.to_le_bytes() {
+            h ^= byte as u64;
+            h = h.wrapping_mul(0x100000001b3);
+        }
+    }
+    h
+}
+
+/// The sorted, pairwise-disjoint x-intervals filled by `polys` at height `y`. Every
+/// polygon is a simple ring and islands are mutually disjoint, so even-odd pairing of
+/// all edge crossings yields the filled spans directly. Edges are counted half-open in y
+/// (`(y1 > y) != (y2 > y)`) so a scanline grazing a shared vertex isn't double-counted.
+fn scan_spans(polys: &[&[f64]], y: f64) -> Vec<(f64, f64)> {
+    let mut xs: Vec<f64> = Vec::new();
+    for p in polys {
+        let n = p.len() / 2;
+        for i in 0..n {
+            let j = (i + 1) % n;
+            let (x1, y1) = (p[2 * i], p[2 * i + 1]);
+            let (x2, y2) = (p[2 * j], p[2 * j + 1]);
+            if (y1 > y) != (y2 > y) {
+                xs.push(x1 + (x2 - x1) * (y - y1) / (y2 - y1));
+            }
+        }
+    }
+    xs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let mut spans = Vec::with_capacity(xs.len() / 2);
+    let mut i = 0;
+    while i + 1 < xs.len() {
+        spans.push((xs[i], xs[i + 1]));
+        i += 2;
+    }
+    spans
+}
+
+/// Total length covered by exactly one of two span lists — the 1-D symmetric difference.
+fn span_symdiff_len(a: &[(f64, f64)], b: &[(f64, f64)]) -> f64 {
+    // Sweep interval endpoints; accumulate length while exactly one side is "inside".
+    let mut ev: Vec<(f64, i8)> = Vec::with_capacity((a.len() + b.len()) * 2);
+    for &(s, e) in a {
+        ev.push((s, 1));
+        ev.push((e, -1));
+    }
+    for &(s, e) in b {
+        ev.push((s, 2));
+        ev.push((e, -2));
+    }
+    ev.sort_by(|x, y| x.0.partial_cmp(&y.0).unwrap_or(std::cmp::Ordering::Equal));
+    let (mut da, mut db) = (0i32, 0i32);
+    let mut last = 0.0;
+    let mut total = 0.0;
+    let mut started = false;
+    for (x, d) in ev {
+        if started && (da > 0) != (db > 0) {
+            total += x - last;
+        }
+        if d.abs() == 1 {
+            da += d.signum() as i32;
+        } else {
+            db += d.signum() as i32;
+        }
+        last = x;
+        started = true;
+    }
+    total
 }
 
 /// Shoelace area of a flat `[x,y,…]` ring (absolute value, mm²).
@@ -2215,9 +2497,6 @@ fn diff_graphics_and_text(a: &Geometry, b: &Geometry, comp_delta: &CompDelta, ou
     for (kind, rows) in [(Kind::Modified, paired), (Kind::Moved, moves)] {
         for (title, detail, layer, bbox) in rows {
             out.push(Change {
-                id: String::new(),
-                emph_a: None,
-                emph_b: None,
                 group: Group::Text,
                 kind,
                 impact: impact_of(&layer),
@@ -2229,6 +2508,7 @@ fn diff_graphics_and_text(a: &Geometry, b: &Geometry, comp_delta: &CompDelta, ou
                     pcb: Some(PcbAnchor { bbox: Some(bbox), layers: vec![layer], comp: None, net: None, vias: false }),
                 },
                 side: Side::Both,
+                ..Default::default()
             });
         }
     }
@@ -2270,9 +2550,6 @@ fn diff_graphics_and_text(a: &Geometry, b: &Geometry, comp_delta: &CompDelta, ou
             format!("{noun} changed on {layer} ({})", bits.join(" "))
         };
         out.push(Change {
-            id: String::new(),
-            emph_a: None,
-            emph_b: None,
             group,
             kind: Kind::Modified,
             impact,
@@ -2284,6 +2561,7 @@ fn diff_graphics_and_text(a: &Geometry, b: &Geometry, comp_delta: &CompDelta, ou
                 pcb: Some(PcbAnchor { bbox: None, layers: vec![layer], comp: None, net: None, vias: false }),
             },
             side: Side::Both,
+            ..Default::default()
         });
     }
 }
@@ -2363,9 +2641,6 @@ fn push_text_addremove(out: &mut Vec<Change>, g: &Geometry, idxs: &[usize], kind
     };
     for (layer, role, text, at) in items {
         out.push(Change {
-            id: String::new(),
-            emph_a: None,
-            emph_b: None,
             group: Group::Text,
             kind,
             impact: layer_impact(&layer, &role),
@@ -2373,6 +2648,7 @@ fn push_text_addremove(out: &mut Vec<Change>, g: &Geometry, idxs: &[usize], kind
             detail: String::new(),
             anchors: pcb_point_anchor(&layer, at),
             side,
+            ..Default::default()
         });
     }
 }
@@ -2499,8 +2775,13 @@ pub fn diff_key(cache_key_a: &str, cache_key_b: &str) -> String {
     //    component row, layer-function nouns ("Courtyard changed", not "Silk").
     // 6: via changes get one per-net row (`vias` anchor marker) instead of folding
     //    into every spanned layer's "segments" row.
-    // 7: bus entries title as "bus entry" (cluster-noun priority), not "element".
-    const DIFF_ENGINE_VERSION: &str = "7";
+    // 7: zones also diff on shape — a pour that re-flowed at constant area (e.g. around
+    //    a re-routed track) now emits a "reshaped" row the area-only test missed.
+    // 8: component property edits (Package, Manufacturer, Tolerance, …) get their own rows.
+    // 9: pin electrical-type edits get their own row, and the schematic element signature
+    //    folds in the library body (pin text sizes, pin geometry) so a lib-side restyle
+    //    no longer reads as "no change".
+    const DIFF_ENGINE_VERSION: &str = "9";
     let mut h = blake3::Hasher::new();
     h.update(DIFF_ENGINE_VERSION.as_bytes());
     h.update(b" ");
@@ -2515,17 +2796,27 @@ pub fn diff_cache_path(project_dir: &Path, key: &str) -> PathBuf {
     diff_cache_root(project_dir).join(format!("{key}.json"))
 }
 
-/// Bound the diff cache: keep the newest `max_entries` files, delete the rest.
-/// Regenerable, so eviction is always safe. Best-effort; never errors. Mirrors
-/// `cache::gc`.
-pub fn gc(project_dir: &Path, max_entries: usize) {
+/// Bound the diff cache: keep `{keep}.json` plus the newest `max_entries` files, delete
+/// the rest. `keep` protects the doc just written and handed to the frontend, so a
+/// concurrent prepare_diff's gc (>`max_entries` distinct pairs compared) can't evict the
+/// file the caller is about to serve. Regenerable, so eviction is otherwise safe.
+/// Best-effort; never errors. Mirrors `cache::gc` (which keeps the same protection for
+/// bundle dirs).
+pub fn gc(project_dir: &Path, keep: &str, max_entries: usize) {
     let root = diff_cache_root(project_dir);
     let Ok(rd) = std::fs::read_dir(&root) else {
         return;
     };
+    let keep_file = format!("{keep}.json");
     let mut files: Vec<(std::time::SystemTime, PathBuf)> = Vec::new();
     for e in rd.flatten() {
         if !e.file_type().map(|t| t.is_file()).unwrap_or(false) {
+            continue;
+        }
+        // Only published `.json` docs are cache entries; leave a concurrent writer's
+        // short-lived `.json.tmp` alone (neither count it nor delete it out from under
+        // the rename).
+        if !e.file_name().to_string_lossy().ends_with(".json") {
             continue;
         }
         let mtime = e
@@ -2536,9 +2827,11 @@ pub fn gc(project_dir: &Path, max_entries: usize) {
     }
     files.sort_by(|a, b| b.0.cmp(&a.0)); // newest first
     for (i, (_, path)) in files.iter().enumerate() {
-        if i >= max_entries {
-            let _ = std::fs::remove_file(path);
+        let is_keep = path.file_name().map(|n| n == keep_file.as_str()).unwrap_or(false);
+        if is_keep || i < max_entries {
+            continue;
         }
+        let _ = std::fs::remove_file(path);
     }
 }
 

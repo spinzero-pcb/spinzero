@@ -42,12 +42,9 @@ const DOC: DiffDoc = {
 function reset() {
   useDiffStore.setState({
     active: false,
-    a: null,
     cacheKeyA: null,
-    b: null,
     cacheKeyB: null,
     doc: null,
-    mode: "sideBySide",
     focusedChangeId: null,
     seen: new Set(),
     preparing: false,
@@ -117,8 +114,8 @@ describe("diffStore enter/exit/step/seen", () => {
 
     const s = useDiffStore.getState();
     expect(s.active).toBe(true);
-    expect(s.a?.rev).toBe("rA");
-    expect(s.b?.rev).toBe("rB");
+    expect(s.doc?.a.rev).toBe("rA");
+    expect(s.doc?.b.rev).toBe("rB");
     expect(s.cacheKeyA).toBe("keyA");
     expect(s.doc?.changes.length).toBe(3);
     // prepare_diff was called old → new.
@@ -144,31 +141,8 @@ describe("diffStore enter/exit/step/seen", () => {
     const s = useDiffStore.getState();
     expect(s.active).toBe(false);
     expect(s.doc).toBeNull();
-    expect(s.a).toBeNull();
     expect(s.cacheKeyA).toBeNull();
     expect(s.seen.size).toBe(0);
-  });
-
-  it("next/prev walk the ordered change sequence", async () => {
-    mockIPC((cmd) => {
-      if (cmd === "prepare_diff")
-        return { doc: DOC, path: "p", cache_key_a: "keyA", cache_key_b: "keyB", label_a: "older", label_b: "newer" };
-      throw new Error(cmd);
-    });
-    await useDiffStore.getState().enterDiff("rA", "rB");
-    // Nothing focused on enter; the first `next` lands on the first ordered change.
-    // Ordered walk: ch_2 (comp, sheet1), ch_0 (comp, sheet2), ch_1 (routing).
-    expect(useDiffStore.getState().focusedChangeId).toBeNull();
-    useDiffStore.getState().next();
-    expect(useDiffStore.getState().focusedChangeId).toBe("ch_2");
-    useDiffStore.getState().next();
-    expect(useDiffStore.getState().focusedChangeId).toBe("ch_0");
-    useDiffStore.getState().next();
-    expect(useDiffStore.getState().focusedChangeId).toBe("ch_1");
-    useDiffStore.getState().next(); // clamps at the end
-    expect(useDiffStore.getState().focusedChangeId).toBe("ch_1");
-    useDiffStore.getState().prev();
-    expect(useDiffStore.getState().focusedChangeId).toBe("ch_0");
   });
 
   it("focusChange solos the change; showAllChanges restores the overview", async () => {
@@ -202,9 +176,10 @@ describe("diffStore enter/exit/step/seen", () => {
       active: null,
     });
     await useDiffStore.getState().enterDiff("rA", "rB");
-    // Focusing isolates the change's own layer…
+    // Focusing isolates the change's own layer (Edge.Cuts rides along to frame it —
+    // the one-visible-change case of the same rule shift-click uses)…
     useDiffStore.getState().focusChange("ch_1"); // routing on In2.Cu
-    expect(usePcbViewStore.getState().hidden).toEqual(new Set(["F.Cu", "B.Cu", "Edge.Cuts"]));
+    expect(usePcbViewStore.getState().hidden).toEqual(new Set(["F.Cu", "B.Cu"]));
     // …and shift-clicking in a change on ANOTHER layer must reveal that layer too,
     // or the GPU mask shows it into a hidden layer and nothing appears.
     useDiffStore.getState().toggleChangeHidden("ch_0"); // component on F.Cu

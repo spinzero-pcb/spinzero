@@ -26,7 +26,7 @@ const shortId = (id: string) => id.slice(0, 10);
  *  distinctly (hollow dot + "local" badge + italic) so a reader sees only the published
  *  line as the "normal" history. Compare/diff is a first-class feature again (visual-diff
  *  §3): "Compare with…" enters pick mode, "Compare with previous" uses the parent pointer,
- *  and "Compare tips" appears when the DAG has two heads. */
+ *  and "Compare branches" appears when the DAG has two or more heads. */
 export function HistoryGraph() {
   const open = useHistoryStore((s) => s.open);
   const showHidden = useHistoryStore((s) => s.showHidden);
@@ -35,6 +35,7 @@ export function HistoryGraph() {
 
   const extractions = useProjectStore((s) => s.extractions);
   const activeExtraction = useProjectStore((s) => s.activeExtraction);
+  const designHead = useProjectStore((s) => s.designHead);
   const setActiveExtraction = useProjectStore((s) => s.setActiveExtraction);
   const updateDesignFiles = useProjectStore((s) => s.updateDesignFiles);
   const designPathMissing = useProjectStore((s) => s.designPathMissing);
@@ -78,7 +79,7 @@ export function HistoryGraph() {
   const layout = useMemo(() => layoutDag(extractions, showHidden), [extractions, showHidden]);
 
   // DAG tips = revisions that are nobody's parent (the branch heads). Two+ tips is the
-  // fork case the "Compare tips" shortcut targets. Computed before the early return
+  // fork case the "Compare branches" shortcut targets. Computed before the early return
   // below so hook order stays stable across open/closed renders.
   const tips = useMemo(() => {
     const isParent = new Set(extractions.flatMap((e) => e.parents));
@@ -207,15 +208,19 @@ export function HistoryGraph() {
           <label className="history-toggle">
             <input type="checkbox" checked={showHidden} onChange={toggleHidden} /> Show deleted
           </label>
-          {/* Fork awareness: when the DAG has two heads, one click compares them
-              (visual-diff §3). Compares the two newest tips. */}
+          {/* Fork awareness: when history has diverged into two (or more) branch heads,
+              one click compares the two newest (visual-diff §3). */}
           {tips.length >= 2 && (
             <button
               className="btn-ghost history-compare-tips"
-              title={`Compare the two branch heads (${tips[0].id.slice(0, 8)} vs ${tips[1].id.slice(0, 8)})`}
+              title={
+                tips.length > 2
+                  ? `Compare the two newest branch heads (${tips[0].id.slice(0, 8)} vs ${tips[1].id.slice(0, 8)})`
+                  : `Compare the two branch heads (${tips[0].id.slice(0, 8)} vs ${tips[1].id.slice(0, 8)})`
+              }
               onClick={() => startCompare(tips[1].id, tips[0].id)}
             >
-              <IconCompare size={13} /> Compare tips
+              <IconCompare size={13} /> Compare branches
             </button>
           )}
           <span style={{ flex: 1 }} />
@@ -340,6 +345,17 @@ export function HistoryGraph() {
                         <>
                           <span className="dag-name">{rowText(r)}</span>
                           {r.id === activeId && <span className="rev-latest-tag">viewing</span>}
+                          {/* Where the on-disk KiCad files actually are — may differ from
+                              "viewing" (view-only switches never touch the disk), and new
+                              edits made in KiCad will branch from HERE. */}
+                          {r.id === designHead && (
+                            <span
+                              className="rev-latest-tag rev-kicad-tag"
+                              title="The KiCad files on disk match this revision — edits made in KiCad will continue from here"
+                            >
+                              KiCad files
+                            </span>
+                          )}
                           {localOnly && <span className="rev-badge rev-local">local</span>}
                           {r.hidden && <span className="rev-badge rev-hidden-badge">deleted</span>}
                           {r.tags.map((t) => (

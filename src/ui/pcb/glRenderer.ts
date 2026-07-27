@@ -20,7 +20,7 @@ import earcut from "earcut";
 import type { PcbFrame, PcbGeometry, PcbLayerDef, PcbTextDef } from "../../lib/pcbGeometry";
 import { PAD_SHAPE } from "../../lib/pcbGeometry";
 import { layerColorVar } from "../../stores/pcbViewStore";
-import { resolveCssColor } from "./glColor";
+import { hexToRgb, resolveCssColor, PCB_DIFF_BASE_FALLBACK } from "./glColor";
 
 const MAX_LAYERS = 64;
 /** Max segments used to flatten an arc track / circle outline. */
@@ -29,6 +29,12 @@ const ARC_SEG = 48;
  *  barrel as a ~0.03 mm ring; we draw it just OUTSIDE the drill so the dark hole keeps the
  *  full extracted drill diameter (feedback: pin5 J1's 1.3 mm hole must not be eaten into). */
 const PLATE_RING_MM = 0.03;
+/** Crosshatch period (css px) for the removed-copper diff texture — shared with the
+ *  Canvas2D removed-TEXT overlay pass (PcbGlView) so both hatch at the same density. */
+export const DIFF_HATCH_PERIOD_CSS = 7;
+/** Default recolour for the "changed-only" diff pass, restored each render when the
+ *  caller omits `diffColor` (so the field never sticks across calls). */
+const DEFAULT_DIFF_COLOR: RGB = [1, 0, 0];
 
 export interface Camera {
   /** World point (mm) at the viewport centre. */
@@ -764,7 +770,7 @@ export class PcbGlRenderer {
   private drillColor: [number, number, number] = [0.08, 0.09, 0.11];
   private npthColor: [number, number, number] = [0.102, 0.769, 0.824]; // --pcb-npth fallback (#1ac4d2)
   /** Flat grey for the unchanged base in diff mode (--pcb-diff-base). */
-  private diffBase: [number, number, number] = [0.545, 0.561, 0.596]; // #8b8f98 fallback
+  private diffBase: [number, number, number] = hexToRgb(PCB_DIFF_BASE_FALLBACK);
   private dpr = 1;
   private selActive = false;
   /** Count of highlighted nets + components in the current mask (the "marked" probe
@@ -1431,7 +1437,7 @@ export class PcbGlRenderer {
 
   /** Live diff-pass state for the current render call (set by render(opts)). */
   private diffPass: 0 | 1 | 2 = 0;
-  private diffColor: RGB = [1, 0, 0];
+  private diffColor: RGB = DEFAULT_DIFF_COLOR;
   private diffMix = 0;
   /** Crosshatch period in device px for the current pass (0 = solid). */
   private diffHatchPx = 0;
@@ -1538,9 +1544,11 @@ export class PcbGlRenderer {
     this.diffMix = opts?.diffMix ?? 0;
     // ~7 css px crosshatch period: coarse enough that a thin track reads as dashed,
     // fine enough that pads/zones read as a weave rather than banding.
-    this.diffHatchPx = opts?.diffHatch ? 7 * this.dpr : 0;
+    this.diffHatchPx = opts?.diffHatch ? DIFF_HATCH_PERIOD_CSS * this.dpr : 0;
     this.diffAlpha = opts?.diffAlpha ?? 1;
-    if (opts?.diffColor) this.diffColor = opts.diffColor;
+    // Reset each call like the other per-call diff fields — never let a prior frame's
+    // diffColor stick when this frame omits it.
+    this.diffColor = opts?.diffColor ?? DEFAULT_DIFF_COLOR;
     gl.viewport(0, 0, w, h);
     if (opts?.clear !== false) {
       gl.clearColor(0, 0, 0, 0);

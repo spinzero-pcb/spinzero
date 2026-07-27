@@ -260,23 +260,13 @@ export default function App() {
             const hasPcb = !!change?.anchors.pcb;
             if (change && hasSch && hasPcb) {
               const { view: v } = useViewStore.getState();
-              // Re-focus targeting the other canvas: focusChange prefers schematic, so
-              // flip the view first, then let the anchor land it.
+              // Re-focus targeting the other canvas. focusChange prefers schematic, so
+              // each direction uses the diff-owned landing for the side we want:
+              // revealChangeOnPcb isolates the changed layer and frames the change's own
+              // extent (pcbNav.reveal's net path would un-hide layers and frame the whole
+              // net, undoing the isolation); focusChange re-runs the schematic landing.
               if (v === "schematic") {
-                setView("pcb");
-                const anchor = (() => {
-                  const p = change.anchors.pcb!;
-                  if (p.net) return { type: "net" as const, ref: p.net };
-                  if (p.comp) return { type: "component" as const, ref: p.comp };
-                  if (p.bbox)
-                    return {
-                      type: "region" as const,
-                      ref: change.id,
-                      rect: { x: p.bbox[0], y: p.bbox[1], w: p.bbox[2], h: p.bbox[3] },
-                    };
-                  return null;
-                })();
-                if (anchor) pcbNav.reveal(anchor);
+                diff.revealChangeOnPcb(change);
               } else {
                 setView("schematic");
                 diff.focusChange(change.id); // re-runs schematic landing + tint
@@ -380,8 +370,15 @@ export default function App() {
                 // to the canvas so it lands on the net's first schematic home.
                 if (v.id === "schematic" && view !== "schematic") {
                   const st = useSelectionStore.getState();
-                  if (st.source === "pcb" && st.highlights.length)
-                    nav.applySelection(st.highlights);
+                  if (st.source === "pcb") {
+                    // A pad selection carries its pin: land on the pin itself (item 5),
+                    // like the X key does. Going through applySelection would drop the
+                    // pin and land on the designator's default unit — the wrong symbol
+                    // for a multi-unit part (U12.C for a pin that lives on U12.A).
+                    if (st.selection?.kind === "pin")
+                      nav.goPin(st.selection.ref.designator, st.selection.ref.pin);
+                    else if (st.highlights.length) nav.applySelection(st.highlights);
+                  }
                 }
                 // Schematic → PCB cross-probe (item 12): land the PCB camera on the
                 // selected net/part (showing its copper first), mirroring the X key —

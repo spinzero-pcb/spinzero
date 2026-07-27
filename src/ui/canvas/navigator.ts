@@ -147,6 +147,60 @@ export function emphasizeDiffText(overlay: SVGElement, emph: string | undefined,
   }
 }
 
+const SVG_NS = "http://www.w3.org/2000/svg";
+
+/** Build the shared visual-diff overlay onto `svg`: a `.hl-diff-scrim` rect over the
+ *  viewBox (dims the unchanged sheet) plus a cloned `.hl-diff hl-diff-{role} hl-diff-pulse`
+ *  group of the given uuids, with the emphasis text tagged via `emphClass`. Both the B
+ *  Canvas (paintDiff) and the A island (paintFocused) build the identical DOM this way —
+ *  the class names + scrim geometry are load-bearing for the app.css selectors, so they
+ *  must not drift between the two panes. Returns the cloned objects' world-mm bbox (with
+ *  Infinity extents when none matched), which the A island uses to land an A-only change. */
+export function buildDiffOverlay(
+  svg: SVGSVGElement,
+  vb: readonly number[],
+  uuids: string[],
+  role: "err" | "ok" | "warn",
+  emph: string | undefined,
+  emphClass: string,
+): { minX: number; minY: number; maxX: number; maxY: number } {
+  const esc = (s: string) =>
+    window.CSS && CSS.escape ? CSS.escape(s) : s.replace(/["\\]/g, "\\$&");
+  const scrim = document.createElementNS(SVG_NS, "rect");
+  scrim.setAttribute("class", "hl-diff-scrim");
+  scrim.setAttribute("x", String(vb[0]));
+  scrim.setAttribute("y", String(vb[1]));
+  scrim.setAttribute("width", String(vb[2]));
+  scrim.setAttribute("height", String(vb[3]));
+  svg.appendChild(scrim);
+  let minX = Infinity,
+    minY = Infinity,
+    maxX = -Infinity,
+    maxY = -Infinity;
+  if (uuids.length === 0) return { minX, minY, maxX, maxY };
+  const ov = document.createElementNS(SVG_NS, "g");
+  ov.setAttribute("class", `hl-diff hl-diff-${role} hl-diff-pulse`);
+  for (const u of uuids) {
+    const src = svg.querySelector(`g[data-uuid="${esc(u)}"]`) as SVGGraphicsElement | null;
+    if (!src) continue;
+    ov.appendChild(src.cloneNode(true));
+    try {
+      const b = src.getBBox();
+      if (b.width || b.height) {
+        minX = Math.min(minX, b.x);
+        minY = Math.min(minY, b.y);
+        maxX = Math.max(maxX, b.x + b.width);
+        maxY = Math.max(maxY, b.y + b.height);
+      }
+    } catch {
+      /* detached/hidden */
+    }
+  }
+  emphasizeDiffText(ov, emph, emphClass);
+  svg.appendChild(ov);
+  return { minX, minY, maxX, maxY };
+}
+
 export const diffPaint: DiffPaint = {
   focused: null,
   listeners: new Set(),
