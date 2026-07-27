@@ -13,6 +13,7 @@ import { useViewStore } from "../../stores/viewStore";
 import { buildDiffOverlay, camBridge, canvasRestore, nav, type ChipComment } from "./navigator";
 import { useDiffStore } from "../../stores/diffStore";
 import { relabelInstances } from "./relabel";
+import { pinUnitUuid as resolvePinUnit } from "./pinUnit";
 import { useReviewStore } from "../../stores/reviewStore";
 import { Overview } from "./Overview";
 import { ContextMenu, type MenuItem } from "../ContextMenu";
@@ -424,6 +425,10 @@ export function Canvas() {
       return out;
     }
 
+    /** The symbol group that owns `dsg`'s pin `pin` on the current sheet — the unit a pin
+     *  selection must highlight, since `idx.components[dsg].svg_id` is only whichever
+     *  placement of a multi-unit part the index kept. See {@link resolvePinUnit}. */
+    const pinUnitUuid = (dsg: string, pin: string) => resolvePinUnit(curSvg.current, dsg, pin);
 
     /** Object-anchored comment chips (Phase 2): one numbered chip per comment whose
      *  anchored object is on the current sheet. Lives in its own layer so the
@@ -529,7 +534,9 @@ export function Canvas() {
       ];
       const plans = combined.map((h) => {
         if (h.kind === "net") return { h, members: netMembersInDom(h.ref) };
-        const u = idx.components[h.ref]?.svg_id;
+        // `h.uuid` wins when the highlight is about one unit of a multi-unit part
+        // (pad → pin cross-probe); the index's svg_id is only the default placement.
+        const u = h.uuid ?? idx.components[h.ref]?.svg_id;
         const present = u && svg?.querySelector(`g[data-uuid="${esc(u)}"]`) ? [u] : [];
         return { h, members: present };
       });
@@ -553,7 +560,7 @@ export function Canvas() {
     const selColor = (h: { kind: "net" | "comp"; ref: string }) =>
       useSelectionStore.getState().pinnedColor(h.kind, h.ref) ??
       (h.kind === "net" ? NET_COLOR : COMP_COLOR);
-    function setSingle(h: { kind: "net" | "comp"; ref: string }) {
+    function setSingle(h: { kind: "net" | "comp"; ref: string; uuid?: string }) {
       highlights.current = [{ ...h, color: selColor(h) }];
       renderHighlights();
     }
@@ -771,7 +778,14 @@ export function Canvas() {
       if (hit.kind === "pin") {
         const c = idx.components[hit.ref.designator];
         if (c?.svg_id) {
-          highlights.current = [{ kind: "comp", ref: hit.ref.designator, color: COMP_COLOR }];
+          highlights.current = [
+            {
+              kind: "comp",
+              ref: hit.ref.designator,
+              color: COMP_COLOR,
+              uuid: pinUnitUuid(hit.ref.designator, hit.ref.pin),
+            },
+          ];
           renderHighlights();
         }
         setSelectionStore(hit, "sch"); // pin specifics in the card
@@ -1099,11 +1113,11 @@ export function Canvas() {
       const c = idx.components[dsg];
       if (!c) return;
       const land = () => {
-        setSingle({ kind: "comp", ref: dsg });
-        setSelectionStore({ kind: "pin", ref: { designator: dsg, pin } }, "sch");
         const el = curSvg.current?.querySelector(
           `[data-designator="${esc(dsg)}"][data-pin="${esc(pin)}"]`,
         ) as SVGGraphicsElement | null;
+        setSingle({ kind: "comp", ref: dsg, uuid: pinUnitUuid(dsg, pin) });
+        setSelectionStore({ kind: "pin", ref: { designator: dsg, pin } }, "sch");
         if (el) {
           const b = el.getBBox();
           centerOn(b.x + b.width / 2, b.y + b.height / 2, 70);
@@ -1326,7 +1340,14 @@ export function Canvas() {
         cam: { ...cam.current },
         tgt: { ...tgt.current },
         elements: svg?.querySelectorAll("g[data-uuid]").length ?? 0,
-        highlights: highlights.current.map((h) => ({ kind: h.kind, ref: h.ref, color: h.color })),
+        // `uuid` is the resolved unit of a multi-unit part (pin selections) — the E2E
+        // check that a pad → pin probe landed on U12.A rather than the index's default.
+        highlights: highlights.current.map((h) => ({
+          kind: h.kind,
+          ref: h.ref,
+          color: h.color,
+          uuid: h.uuid ?? null,
+        })),
         overlays: svg?.querySelectorAll(".hl-overlay").length ?? 0,
         hiddenSources: hiddenSources.current.length,
         dimmed: !!svg?.querySelector(".hl-scrim"),

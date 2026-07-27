@@ -345,8 +345,15 @@ export default function App() {
                 // to the canvas so it lands on the net's first schematic home.
                 if (v.id === "schematic" && view !== "schematic") {
                   const st = useSelectionStore.getState();
-                  if (st.source === "pcb" && st.highlights.length)
-                    nav.applySelection(st.highlights);
+                  if (st.source === "pcb") {
+                    // A pad selection carries its pin: land on the pin itself (item 5),
+                    // like the X key does. Going through applySelection would drop the
+                    // pin and land on the designator's default unit — the wrong symbol
+                    // for a multi-unit part (U12.C for a pin that lives on U12.A).
+                    if (st.selection?.kind === "pin")
+                      nav.goPin(st.selection.ref.designator, st.selection.ref.pin);
+                    else if (st.highlights.length) nav.applySelection(st.highlights);
+                  }
                 }
                 // Schematic → PCB cross-probe (item 12): land the PCB camera on the
                 // selected net/part (showing its copper first), mirroring the X key —
