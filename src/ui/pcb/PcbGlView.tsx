@@ -819,7 +819,7 @@ export function PcbGlView({ visible }: { visible: boolean }) {
 
     // --- drawing sheet: frame + title block (page context, drawn behind everything and
     //     independent of the active layer, so it reads even with no layer selected) ---
-    const worksheetColor = rootStyle.getPropertyValue("--pcb-worksheet").trim() || "#c86464";
+    const worksheetColor = rootStyle.getPropertyValue("--pcb-worksheet").trim() || "#cf6fa4";
     drawWorksheet(r, ctx, c, cssW, cssH, strokeFont, worksheetColor);
 
     // --- board / footprint / dimension text ---
