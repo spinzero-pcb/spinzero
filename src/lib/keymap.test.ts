@@ -30,7 +30,7 @@ describe("resolveKey", () => {
   it("maps the single-key commands", () => {
     expect(R("Home")).toBe("fit");
     expect(R("x")).toBe("crossProbe");
-    expect(R("o")).toBe("overview");
+    expect(R("o")).toBe(null);
     expect(R("F11")).toBe("fullscreen");
     expect(R("?")).toBe("shortcuts");
   });

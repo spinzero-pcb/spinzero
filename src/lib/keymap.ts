@@ -53,7 +53,6 @@ export function resolveKey(e: KeyboardEvent, preset: KeymapPreset): KeyAction | 
 
   // Shared single keys.
   if (k === "x") return "crossProbe";
-  if (k === "o") return "overview";
   return null;
 }
 

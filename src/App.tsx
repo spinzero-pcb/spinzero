@@ -167,14 +167,8 @@ export default function App() {
         if (!measureNav.escape()) useMeasureStore.getState().setActive(false);
         return;
       }
-      // While measuring: Space anchors a fresh measurement at the cursor ("measure from
-      // here"); Ctrl/Cmd+C copies a completed measurement's readout to the clipboard.
+      // While measuring: Ctrl/Cmd+C copies a completed measurement's readout to the clipboard.
       if (useMeasureStore.getState().active) {
-        if (e.key === " ") {
-          e.preventDefault();
-          measureNav.from();
-          return;
-        }
         if ((e.key === "c" || e.key === "C") && (e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey) {
           if (measureNav.copy()) e.preventDefault();
           return;

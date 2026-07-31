@@ -1287,7 +1287,6 @@ button {
   min-width: 16px;
   text-align: center;
 }
-.shortcuts-note { margin-top: var(--sp-1); }
 
 /* Appearance dialog — accent-colour picker (reuses the .ctx-swatch swatches). */
 .accent-picker { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-2); padding: var(--sp-1) 0; }
