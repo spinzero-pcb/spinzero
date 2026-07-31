@@ -7,8 +7,7 @@ import {
   type Highlight,
 } from "../../stores/selectionStore";
 import { usePcbViewStore } from "../../stores/pcbViewStore";
-import { useNetClassStore } from "../../stores/netClassStore";
-import { listNetClasses, netClassColor } from "../../lib/netClasses";
+import { useNetClassStore, activeNets } from "../../stores/netClassStore";
 import { useReviewStore } from "../../stores/reviewStore";
 import { useMeasureStore } from "../../stores/measureStore";
 import { useViewStore } from "../../stores/viewStore";
@@ -357,6 +356,9 @@ export function PcbGlView({ visible }: { visible: boolean }) {
   const highlights = useSelectionStore((s) => s.highlights);
   const pinned = useSelectionStore((s) => s.pinned);
   const netClassSel = useNetClassStore((s) => s.selected);
+  const netClassColors = useNetClassStore((s) => s.classColors);
+  const netClassNetOverride = useNetClassStore((s) => s.netOverride);
+  const netClassNetColors = useNetClassStore((s) => s.netColors);
   // Comment mode (C): a crosshair signals you can click an object to anchor a comment.
   const armed = useReviewStore((s) => s.armed);
   // Measure mode (Ctrl+Shift+M): crosshair + click-A/click-B ruler on the overlay.
@@ -473,21 +475,14 @@ export function PcbGlView({ visible }: { visible: boolean }) {
     const nets: { id: number; color: [number, number, number]; emphasize: boolean }[] = [];
     const comps: { id: number; color: [number, number, number] }[] = [];
     // Net-class highlights first, so an explicit click/pin (below) wins on overlap
-    // (the mask is last-write-per-net). Each class recolours its nets in its own
-    // colour (emphasize:false — a flat class tint, not the native-layer emphasis).
-    const classSel = useNetClassStore.getState().selected;
-    if (classSel.length) {
-      const idx = useDesignStore.getState().indexes;
-      const ordered = listNetClasses(idx).map((c) => c.name);
-      const colorByClass = new Map(
-        classSel.map((name) => [name, resolveCssColor(netClassColor(name, ordered))]),
-      );
-      for (const [name, net] of Object.entries(idx?.nets ?? {})) {
-        const color = colorByClass.get(net.class || "Default");
-        if (!color) continue;
-        const i = r.netIndexByName.get(name);
-        if (i != null) nets.push({ id: i, color, emphasize: false });
-      }
+    // (the mask is last-write-per-net). A net with no picked colour is emphasised in
+    // its own PCB layer colours; a picked colour recolours it flat instead.
+    const classNets = activeNets(useNetClassStore.getState(), useDesignStore.getState().indexes);
+    for (const [name, color] of classNets) {
+      const i = r.netIndexByName.get(name);
+      if (i == null) continue;
+      if (color) nets.push({ id: i, color: resolveCssColor(color), emphasize: false });
+      else nets.push({ id: i, color: [1, 1, 1], emphasize: true });
     }
     for (const h of combined) {
       // resolveCssColor handles hex, rgb() and var(--x) so any future colour source is
@@ -949,7 +944,18 @@ export function PcbGlView({ visible }: { visible: boolean }) {
     const claimed: { x0: number; y0: number; x1: number; y1: number }[] = [];
     const placedNames: string[] = []; // net names actually drawn this frame (probe: netLabels)
     let drawn = 0;
-    for (const lab of r.netLabels()) {
+    // Net names follow the active copper layer the same way the GL scene does (active layer
+    // painted on top): labels on the active layer are laid out FIRST, so they claim their
+    // screen boxes and an off-layer name can never land over them — a B.Cu name still shows,
+    // just not on top of an F.Cu one. Off-layer names keep their existing order behind them.
+    // A non-copper active layer (mask/silk/edge) scopes no net, so the order is left alone.
+    const activeIdx = pv.active ? r.layerNames.indexOf(pv.active) : -1;
+    const activeCopper = r.copperLayers.includes(activeIdx);
+    const all = r.netLabels();
+    const ordered = activeCopper
+      ? [...all.filter((l) => l.layers.includes(activeIdx)), ...all.filter((l) => !l.layers.includes(activeIdx))]
+      : all;
+    for (const lab of ordered) {
       if (drawn >= 500) break; // safety cap so a dense view never stalls on text
       if (pv.objects[lab.key] === false) continue;
       // Hide only when every layer the object occupies is hidden — so a pad's net/number
@@ -1001,6 +1007,9 @@ export function PcbGlView({ visible }: { visible: boolean }) {
       ctx.fillStyle = onVia ? viaFill : fill;
       ctx.shadowColor = onVia ? "rgba(255,255,255,0.6)" : "rgba(0,0,0,0.85)";
       ctx.save();
+      // Off-active-layer names fade back so the active layer's names read as the foreground —
+      // a B.Cu name over F.Cu copper is still there, just clearly not part of F.Cu.
+      if (activeCopper && !lab.layers.includes(activeIdx)) ctx.globalAlpha = 0.35;
       ctx.translate(sx, sy);
       // World and the overlay are both Y-down, so the board-space angle maps directly.
       if (lab.angle) ctx.rotate(rad);
@@ -1382,7 +1391,7 @@ export function PcbGlView({ visible }: { visible: boolean }) {
     syncSelection(r);
     dirty.current = true;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [netClassSel]);
+  }, [netClassSel, netClassColors, netClassNetOverride, netClassNetColors]);
 
   // First reveal fits; later reveals keep the camera.
   useEffect(() => {

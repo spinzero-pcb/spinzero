@@ -194,6 +194,11 @@ export interface ProjectUi {
   session_id?: string | null;
   /** Last-active status tab (All/Open/⟳/Done/Dismissed). */
   status_tab?: string;
+  /** PCB Net Classes panel: colour picked per net class (#rrggbb). Absent classes
+   *  highlight in the nets' own PCB layer colours. */
+  net_class_colors?: Record<string, string>;
+  /** PCB Net Classes panel: colour picked per individual net (#rrggbb). */
+  net_colors?: Record<string, string>;
 }
 
 export interface CrunchStatus {

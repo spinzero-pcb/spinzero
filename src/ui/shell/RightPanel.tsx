@@ -4,10 +4,9 @@ import { useViewStore } from "../../stores/viewStore";
 import { SheetsPanel } from "./SheetsPanel";
 import { AppearancePanel } from "../pcb/AppearancePanel";
 import { NetClassPanel } from "../pcb/NetClassPanel";
-import { isWorksheetLayer } from "../../stores/pcbViewStore";
 import { useDesignStore } from "../../stores/designStore";
 import { listNetClasses } from "../../lib/netClasses";
-import { IconChevron, IconLayers, IconSheet, IconTag } from "../icons";
+import { IconChevron, IconSheet } from "../icons";
 
 // The RIGHT panel is the per-view navigator/tools (docs/phase2-ui-plan.md §1):
 // `Sheets` on the schematic (moved off the old left Explorer), `Appearance` on the
@@ -47,7 +46,6 @@ export function RightPanel() {
   const project = useProjectStore((s) => s.project);
   const summary = useProjectStore((s) => s.summary);
   const sheets = useProjectStore((s) => s.sheets);
-  const layers = useProjectStore((s) => s.layers);
   const view = useViewStore((s) => s.view);
   const indexes = useDesignStore((s) => s.indexes);
   const netClasses = view === "pcb" ? listNetClasses(indexes) : [];
@@ -67,27 +65,8 @@ export function RightPanel() {
             <SheetsPanel />
           </Section>
         )}
-        {view === "pcb" && (
-          <Section
-            title="Appearance"
-            icon={<IconLayers size={13} />}
-            // The drawing sheet is page context, not a toggleable board layer — keep it
-            // out of the count so it matches the rows the Appearance panel actually shows.
-            count={layers.filter((l) => !isWorksheetLayer(l)).length}
-          >
-            <AppearancePanel />
-          </Section>
-        )}
-        {view === "pcb" && netClasses.length > 0 && (
-          <Section
-            title="Net Classes"
-            icon={<IconTag size={13} />}
-            count={netClasses.length}
-            defaultOpen={false}
-          >
-            <NetClassPanel />
-          </Section>
-        )}
+        {view === "pcb" && <AppearancePanel />}
+        {view === "pcb" && netClasses.length > 0 && <NetClassPanel />}
         {/* BOM has no right panel — the whole <aside> is hidden on BOM (see App.tsx). */}
       </div>
     </>

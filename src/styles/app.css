@@ -1998,6 +1998,75 @@ button {
   background: var(--accent-dim);
   color: var(--fg-0);
 }
+/* Disclosure caret for a class's net list (collapsed by default). */
+.pcb-nc-caret {
+  flex: none;
+  width: 14px;
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--fg-2);
+  cursor: pointer;
+  font-size: var(--fs-0);
+  line-height: 1;
+  transition: transform var(--dur-1) var(--ease-out), color var(--dur-1) var(--ease-out);
+}
+.pcb-nc-caret.open { transform: rotate(90deg); }
+.pcb-nc-caret:hover { color: var(--fg-0); }
+/* A class row is the heading of its group: slightly heavier than the net rows so
+   the two levels never read as one flat list. */
+.pcb-ncrow > .tree-name { font-weight: 550; }
+/* Nets nested under their class: indented behind a guide rule, one step smaller and
+   dimmer, and in the mono face that net names use elsewhere. */
+.pcb-ncnet {
+  margin-left: var(--sp-3);
+  padding-left: var(--sp-2);
+  border-left: 1px solid var(--border-0);
+}
+.pcb-ncnet > .tree-name {
+  font-weight: 400;
+  font-family: var(--font-mono);
+  font-size: var(--fs-0);
+  color: var(--fg-1);
+}
+.pcb-ncnet.on > .tree-name { color: var(--fg-0); }
+/* Per-class / per-net colour override: empty until the user picks one, at which
+   point a × appears to drop back to the PCB layer colours. */
+.pcb-nc-color {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+.pcb-nc-swatch {
+  position: relative;
+  display: block;
+  width: 12px;
+  height: 12px;
+  border-radius: 2px;
+  border: 1px solid rgba(0, 0, 0, 0.4);
+  overflow: hidden;
+  cursor: pointer;
+}
+.pcb-nc-swatch.empty {
+  background: transparent;
+  border: 1px dashed var(--border-1);
+}
+.pcb-nc-swatch input[type="color"] {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+.pcb-nc-colorclear {
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--fg-2);
+  cursor: pointer;
+  line-height: 1;
+}
+.pcb-nc-colorclear:hover { color: var(--fg-0); }
 
 /* The Appearance panel now lives in the global RIGHT shell column (outside the
    canvas area), so the floating card no longer needs to clear it. */
@@ -2251,54 +2320,21 @@ button {
   line-height: 1.5;
 }
 
-.pcb-appearance h2 {
+/* Layers and Net Classes are peers in the right panel — same section heading. */
+.pcb-appearance h2,
+.pcb-netclasses h2 {
   font-size: var(--fs-0);
   color: var(--fg-2);
   letter-spacing: 0.12em;
   text-transform: uppercase;
   margin: var(--sp-2) 0 var(--sp-1);
 }
-/* Layers section header with Select all / Deselect all actions. */
-.pcb-layers-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--sp-2);
+/* Long row lists scroll in place past ~9 rows so every section below (Objects,
+   Net Classes) stays reachable without collapsing anything. */
+.pcb-scrolllist {
+  max-height: 15rem;
+  overflow-y: auto;
 }
-.pcb-layers-head h2 { margin-bottom: var(--sp-1); }
-/* Segmented all/none pair: two compact chips that share an edge, so they read as
-   one control rather than two stray text links. */
-.pcb-layers-actions { display: inline-flex; }
-.pcb-layers-actions button {
-  background: var(--bg-2);
-  border: 1px solid var(--border-0);
-  padding: 2px 9px;
-  cursor: pointer;
-  color: var(--fg-1);
-  font-size: var(--fs-0);
-  line-height: 1.6;
-  transition: background var(--dur-1) var(--ease-out),
-    border-color var(--dur-1) var(--ease-out), color var(--dur-1) var(--ease-out);
-}
-.pcb-layers-actions button:first-child {
-  border-radius: var(--radius-1) 0 0 var(--radius-1);
-}
-.pcb-layers-actions button:last-child {
-  border-radius: 0 var(--radius-1) var(--radius-1) 0;
-  border-left: none;
-}
-.pcb-layers-actions button:hover:not(:disabled) {
-  background: var(--bg-3);
-  border-color: var(--border-1);
-  color: var(--fg-0);
-}
-.pcb-layers-actions button:hover:not(:disabled) + button { border-left: none; }
-.pcb-layers-actions button:disabled {
-  color: var(--fg-2);
-  background: var(--bg-1);
-  cursor: default;
-}
-
 /* ---------- left rail: Review / AI tabs ---------- */
 
 .left-tabs {

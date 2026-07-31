@@ -1,13 +1,15 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { useNetClassStore } from "./netClassStore";
+import { useNetClassStore, activeNets } from "./netClassStore";
 import { usePcbViewStore } from "./pcbViewStore";
 import { useDesignStore } from "./designStore";
-import { listNetClasses, netClassColor } from "../lib/netClasses";
+import { useSettingsStore } from "./settingsStore";
+import { listNetClasses } from "../lib/netClasses";
 import type { DesignIndexes } from "../lib/design";
 import type { PcbIndex } from "./designStore";
 
 // Layer-1 coverage (docs/testing.md) for the PCB Net Classes feature: the pure
-// grouping/colour helpers and the store's layer-isolation + restore behaviour.
+// grouping helper and the store's selection, colour-resolution and layer-isolation
+// (+ restore) behaviour.
 
 /** A tiny two-class design: HV nets on F.Cu, USB on both coppers, plus the Default
  *  catch-all. Only the fields the code under test reads are populated. */
@@ -39,7 +41,15 @@ const PCB_INDEX: PcbIndex = {
 };
 
 beforeEach(() => {
-  useNetClassStore.setState({ selected: [], savedHidden: null, savedActive: null });
+  useNetClassStore.setState({
+    selected: [],
+    classColors: {},
+    netOverride: {},
+    netColors: {},
+    projectDir: null, // no project → colour picks aren't persisted from these tests
+    savedHidden: null,
+    savedActive: null,
+  });
   usePcbViewStore.setState({ hidden: new Set(), active: null });
   useDesignStore.setState({ indexes: makeIndexes(), pcbIndex: PCB_INDEX });
 });
@@ -54,21 +64,6 @@ describe("listNetClasses", () => {
 
   it("returns [] for a null design", () => {
     expect(listNetClasses(null)).toEqual([]);
-  });
-});
-
-describe("netClassColor", () => {
-  it("assigns each class a distinct colour and greys the Default catch-all", () => {
-    // `ordered` is the full class list (stable across a session); selection never
-    // changes it, so a class keeps its colour no matter what's highlighted.
-    const ordered = ["HV", "USB", "Default"];
-    const hv = netClassColor("HV", ordered);
-    const usb = netClassColor("USB", ordered);
-    expect(hv).not.toBe(usb);
-    expect(netClassColor("HV", ordered)).toBe(hv); // deterministic
-    // Default is a fixed neutral grey, never a vivid palette slot.
-    expect(netClassColor("Default", ordered)).toBe(netClassColor("Default", ["A", "Default"]));
-    expect(netClassColor("Default", ordered)).not.toBe(hv);
   });
 });
 
@@ -118,5 +113,76 @@ describe("useNetClassStore isolation", () => {
     expect(useNetClassStore.getState().selected).toEqual([]);
     // Layers untouched — resetForLayers owns them on a design change.
     expect(usePcbViewStore.getState().hidden).toEqual(isolated);
+  });
+});
+
+describe("per-net selection and colours", () => {
+  const nets = () => activeNets(useNetClassStore.getState(), makeIndexes());
+
+  it("a selected class highlights its nets with no colour (PCB layer colours)", () => {
+    useNetClassStore.getState().toggle("HV");
+    expect([...nets()]).toEqual([
+      ["HV1", null],
+      ["HV2", null],
+    ]);
+  });
+
+  it("a class colour applies to its nets; a net colour overrides it", () => {
+    useNetClassStore.getState().toggle("HV");
+    useNetClassStore.getState().setClassColor("HV", "#ff0000");
+    useNetClassStore.getState().setNetColor("HV2", "#00ff00");
+    expect(nets().get("HV1")).toBe("#ff0000");
+    expect(nets().get("HV2")).toBe("#00ff00");
+    useNetClassStore.getState().setClassColor("HV", null);
+    expect(nets().get("HV1")).toBeNull();
+  });
+
+  it("a net can be deselected inside a selected class", () => {
+    useNetClassStore.getState().toggle("HV");
+    useNetClassStore.getState().toggleNet("HV1");
+    expect([...nets().keys()]).toEqual(["HV2"]);
+    // Only F.Cu carries HV2, so isolation still holds.
+    expect([...usePcbViewStore.getState().hidden].sort()).toEqual(["B.Cu", "F.SilkS"]);
+  });
+
+  it("a lone net can be selected without its class, and isolates its layers", () => {
+    usePcbViewStore.setState({ hidden: new Set(["F.SilkS"]), active: null });
+    useNetClassStore.getState().toggleNet("USB_D+");
+    expect([...nets().keys()]).toEqual(["USB_D+"]);
+    expect([...usePcbViewStore.getState().hidden]).toEqual(["F.SilkS"]);
+    // Deselecting the last net restores the pre-isolation view.
+    useNetClassStore.getState().toggleNet("USB_D+");
+    expect(nets().size).toBe(0);
+    expect([...usePcbViewStore.getState().hidden]).toEqual(["F.SilkS"]);
+  });
+
+  it("hydrate() loads this project's saved colours and drops malformed ones", async () => {
+    useSettingsStore.setState({
+      loaded: true,
+      projectUi: {
+        "/p/a": { net_class_colors: { HV: "#FF0000", USB: "red" }, net_colors: { GND: "#00ff00" } },
+      },
+    });
+    await useNetClassStore.getState().hydrate("/p/a");
+    expect(useNetClassStore.getState().classColors).toEqual({ HV: "#ff0000" }); // "red" dropped
+    expect(useNetClassStore.getState().netColors).toEqual({ GND: "#00ff00" });
+    // Switching to a project with nothing saved starts clean.
+    await useNetClassStore.getState().hydrate("/p/b");
+    expect(useNetClassStore.getState().classColors).toEqual({});
+  });
+
+  it("reset() keeps colour picks (design reload, same project)", () => {
+    useNetClassStore.getState().toggle("HV");
+    useNetClassStore.getState().setClassColor("HV", "#ff0000");
+    useNetClassStore.getState().reset();
+    expect(useNetClassStore.getState().classColors).toEqual({ HV: "#ff0000" });
+  });
+
+  it("toggling a class drops per-net tweaks inside it", () => {
+    useNetClassStore.getState().toggle("HV");
+    useNetClassStore.getState().toggleNet("HV1");
+    useNetClassStore.getState().toggle("HV"); // off
+    useNetClassStore.getState().toggle("HV"); // on again
+    expect([...nets().keys()]).toEqual(["HV1", "HV2"]);
   });
 });

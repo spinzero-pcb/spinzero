@@ -69,9 +69,9 @@ export function AppearancePanel() {
 
   return (
     <div className="pcb-appearance">
-      <div className="pcb-layers-head">
-        <h2>Layers</h2>
-      </div>
+      <h2>Layers</h2>
+      {/* Capped list so a many-layer board can't push Objects/Net Classes off-screen. */}
+      <div className="pcb-scrolllist">
       {boardLayers.map((l) => (
         <div
           key={l.name}
@@ -100,6 +100,7 @@ export function AppearancePanel() {
           </span>
         </div>
       ))}
+      </div>
       <h2>Objects</h2>
       {PCB_OBJECT_KEYS.map((key: PcbObjectKey) => (
         <div key={key} className="pcb-layerrow pcb-objrow">

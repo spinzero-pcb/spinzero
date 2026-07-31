@@ -22,6 +22,10 @@
 //!
 //! # Privacy contract (the load-bearing part)
 //!
+//! - **Dev builds send nothing.** A debug build (`npm run tauri dev`) resolves no
+//!   DSN at all, so the client is disabled — our own development crashes, errors
+//!   and usage never reach the collector. Set `PCBREVIEW_SENTRY_DEV=1` to opt a
+//!   dev run back in when testing telemetry itself.
 //! - **DSN-gated.** With no DSN set (`PCBREVIEW_SENTRY_DSN`, the default) the
 //!   Sentry client is disabled and nothing is transmitted — the capability is
 //!   inert until an operator deliberately points it at a collector.
@@ -59,6 +63,26 @@ use crate::util::LockExt;
 /// disabled and nothing is ever sent.
 const DSN_ENV: &str = "PCBREVIEW_SENTRY_DSN";
 const DSN_BAKED: Option<&str> = option_env!("PCBREVIEW_SENTRY_DSN");
+
+/// Escape hatch to exercise the telemetry path from a dev build (`tauri dev`),
+/// which otherwise never resolves a DSN — see [`is_dev`].
+const DEV_OPT_IN_ENV: &str = "PCBREVIEW_SENTRY_DEV";
+
+/// True in a development build. `npm run tauri dev` compiles the app in debug,
+/// releases in release, so `debug_assertions` is the dev/prod line. Dev runs
+/// produce crashes, errors and usage counts that are ours, not a user's, so
+/// they must never reach the collector and pollute release health — hence
+/// [`init`] resolves NO DSN here (the client stays disabled and nothing is
+/// transmitted), unless [`DEV_OPT_IN_ENV`] is set to deliberately test it.
+fn is_dev() -> bool {
+    if !cfg!(debug_assertions) {
+        return false;
+    }
+    !matches!(
+        std::env::var(DEV_OPT_IN_ENV).as_deref(),
+        Ok("1") | Ok("true")
+    )
+}
 
 /// Prefix marking an `error!` whose free text must NEVER reach Sentry — extractor
 /// stderr and extractor error strings routinely embed design / sheet / net /
@@ -142,10 +166,17 @@ pub fn init() -> ClientInitGuard {
     // the current version so the next launch can detect an update).
     save(&config_path, &persist.install_id, enabled, &counters);
 
-    let dsn = std::env::var(DSN_ENV)
-        .ok()
-        .filter(|s| !s.trim().is_empty())
-        .or_else(|| DSN_BAKED.map(str::to_string).filter(|s| !s.trim().is_empty()));
+    let dev = is_dev();
+    // In a dev build we resolve no DSN at all, so the client is disabled and every
+    // capture below (lifecycle, errors, panics, usage) is a no-op transport-wise.
+    let dsn = (!dev)
+        .then(|| {
+            std::env::var(DSN_ENV)
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+                .or_else(|| DSN_BAKED.map(str::to_string).filter(|s| !s.trim().is_empty()))
+        })
+        .flatten();
     let dsn_configured = dsn.is_some();
 
     let guard = sentry::init(ClientOptions {
@@ -228,7 +259,13 @@ pub fn init() -> ClientInitGuard {
 
     log::info!(
         "telemetry: enabled={enabled} dsn={}",
-        if dsn_configured { "configured" } else { "none" }
+        if dsn_configured {
+            "configured"
+        } else if dev {
+            "none (dev build — nothing is sent)"
+        } else {
+            "none"
+        }
     );
     guard
 }

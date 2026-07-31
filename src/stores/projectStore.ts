@@ -3,6 +3,7 @@ import { ipc } from "../lib/ipc";
 import { useDesignStore } from "./designStore";
 import { useReviewStore } from "./reviewStore";
 import { useSelectionStore } from "./selectionStore";
+import { useNetClassStore } from "./netClassStore";
 import { useToastStore, type ToastInput } from "./toastStore";
 import {
   normalizeExtraction,
@@ -64,6 +65,10 @@ interface ProjectState {
  *  bug where the first crunch event for the new project is swallowed). */
 function resetForNewProject() {
   useDesignStore.getState().clear();
+  // Drop the outgoing project's net-class selection AND its colour picks (the incoming
+  // project hydrates its own; reset() alone keeps colours, which is right for a redesign).
+  useNetClassStore.getState().reset();
+  useNetClassStore.setState({ projectDir: null, classColors: {}, netColors: {} });
   // Drop the previous project's review comments/sessions too — otherwise project A's
   // review panel bleeds into project B until the next crunch event happens to reload it.
   useReviewStore.getState().clear();
@@ -159,6 +164,8 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       void get().refreshIndex();
       void useDesignStore.getState().load();
       void useReviewStore.getState().load();
+      // Net-class/net colour picks are remembered per project (machine-local settings).
+      void useNetClassStore.getState().hydrate(project.project_dir);
     } catch (e) {
       set({ errorMsg: String(e) });
       // Surface it everywhere (the Home error card is invisible once a project is
@@ -192,6 +199,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       // "succeeded" event. refreshIndex retries until rows appear.
       void get().refreshIndex();
       void useReviewStore.getState().load();
+      void useNetClassStore.getState().hydrate(project.project_dir);
     } catch (e) {
       set({ errorMsg: String(e) });
       throw e;
