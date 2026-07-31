@@ -75,9 +75,6 @@ export function KeyboardShortcuts() {
             </div>
           );
         })}
-        <p className="about-blurb dim shortcuts-note">
-          Shortcuts follow the KiCad-style preset and aren’t customisable yet.
-        </p>
         <div className="about-actions">
           <button className="btn-primary" onClick={() => setOpen(false)}>
             Close

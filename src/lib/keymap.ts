@@ -83,13 +83,11 @@ export const SHORTCUTS: ShortcutDef[] = [
   { combos: [["Esc"]], action: "Clear selection / exit the current mode", scope: "Global" },
   { combos: [["?"]], action: "Show this shortcuts list", scope: "Global" },
 
-  { combos: [["O"]], action: "Toggle the all-sheets overview", scope: "Schematic" },
   { combos: [["Alt", "←"]], action: "Navigate back", scope: "Schematic" },
   { combos: [["Alt", "→"]], action: "Navigate forward", scope: "Schematic" },
 
   { combos: [["Mod", "Shift", "M"]], action: "Measure tool", scope: "PCB" },
   { combos: [["C"]], action: "Comment mode", scope: "PCB" },
-  { combos: [["Space"]], action: "Measuring: start a new measurement at the cursor", scope: "PCB" },
   { combos: [["Mod", "C"]], action: "Measuring: copy the readout", scope: "PCB" },
 ];
 
