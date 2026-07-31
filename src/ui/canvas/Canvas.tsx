@@ -196,13 +196,19 @@ export function Canvas() {
     // left-anchored with dead space (feedback 2.PNG). Any pan/zoom/landing clears it,
     // so a resize never fights a camera the user (or a jump) has placed.
     let atFit = false;
+    /** Whole-sheet fit, centred in the *full* stage. Unlike the landing helpers below
+     *  this deliberately ignores `gutter()`: a plain fit happens with nothing selected
+     *  (boot, sheet switch, explicit Fit), so no properties card is on screen and
+     *  reserving its width just pinned the sheet to the left with 300px of dead space
+     *  on the right. */
     function fitSheet() {
       const r = stage.getBoundingClientRect();
-      const usableW = r.width - gutter();
-      const s = Math.min(usableW / vb.current[2], (r.height - 2 * PAD) / vb.current[3]);
+      const boxW = r.width - 2 * PAD;
+      const boxH = r.height - 2 * PAD;
+      const s = Math.min(boxW / vb.current[2], boxH / vb.current[3]);
       tgt.current.s = s;
-      tgt.current.x = PAD;
-      tgt.current.y = PAD + ((r.height - 2 * PAD) - vb.current[3] * s) / 2;
+      tgt.current.x = PAD + (boxW - vb.current[2] * s) / 2;
+      tgt.current.y = PAD + (boxH - vb.current[3] * s) / 2;
       atFit = true;
     }
     function centerOn(ux: number, uy: number, viewW: number) {
@@ -841,8 +847,9 @@ export function Canvas() {
       // Zoom-out past the sheet edge → overview contact-sheet (spec WS6). The camera
       // stays put so closing the overview returns exactly where you were.
       if (e.deltaY > 0 && !overviewRef.current) {
+        // Same scale fitSheet would pick, so the threshold stays at "half of fit".
         const fitS = Math.min(
-          (r.width - gutter()) / vb.current[2],
+          (r.width - 2 * PAD) / vb.current[2],
           (r.height - 2 * PAD) / vb.current[3],
         );
         if (ns < fitS * 0.5) {
