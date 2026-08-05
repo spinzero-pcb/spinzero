@@ -267,6 +267,11 @@ export const bomNav = {
     if (this.handler) this.handler(key);
     else this.pending = key;
   },
+  /** Review panel → BOM: land on the row carrying this designator's comment. The BomTab
+   *  registers rows under their first designator too, so the same scroll+flash path works. */
+  revealComment(designator: string) {
+    this.flashRow(designator);
+  },
   /** BomTab registers on mount; a queued flash fires immediately. Returns unregister. */
   register(fn: (key: string) => void): () => void {
     this.handler = fn;

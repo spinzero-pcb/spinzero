@@ -5,7 +5,14 @@ import { useSelectionStore } from "../stores/selectionStore";
 import { useViewStore } from "../stores/viewStore";
 import { useDiffStore } from "../stores/diffStore";
 import { useToastStore } from "../stores/toastStore";
+import {
+  displayInfo,
+  numberMap,
+  useReviewStore,
+  type DisplayStatus,
+} from "../stores/reviewStore";
 import { bomNav, nav } from "./canvas/navigator";
+import { IconComment } from "./icons";
 import {
   bomChanges,
   bomDeltaCsv,
@@ -48,6 +55,12 @@ export function BomTab() {
   const diffActive = useDiffStore((s) => s.active);
   const diffDoc = useDiffStore((s) => s.doc);
   const focusChange = useDiffStore((s) => s.focusChange);
+  // Review comments live in the BOM tab too (view: "bom"): the composer/thread popover
+  // float over this tab already, so we only wire up per-row create + the existing-comment
+  // markers here. `armed` is the app-wide comment mode (C key / the toolbar toggle).
+  const armed = useReviewStore((s) => s.armed);
+  const comments = useReviewStore((s) => s.comments);
+  const activeSessionId = useReviewStore((s) => s.activeSessionId);
   const [lines, setLines] = useState<BomLine[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState("");
@@ -110,6 +123,50 @@ export function BomTab() {
       return String(va).localeCompare(String(vb), undefined, { numeric: true }) * dir;
     });
   }, [lines, changes, diffActive, filter, sort]);
+
+  // Open/unaddressed BOM comments keyed by their anchored designator, scoped to the
+  // active review session (mirrors the canvas chip filter in CommentBridge: resolved and
+  // dismissed comments carry no marker). A row shows the marker for the first of its
+  // designators that carries one.
+  const commentByRef = useMemo(() => {
+    const numbers = numberMap(comments);
+    const m = new Map<string, { id: string; number: number; status: DisplayStatus }>();
+    for (const c of comments) {
+      if (c.view !== "bom" || c.anchor.type !== "component") continue;
+      if (activeSessionId !== null && c.session_id !== activeSessionId) continue;
+      const status = displayInfo(c, indexes ?? null).status;
+      if (status === "resolved" || status === "dismissed") continue;
+      const number = numbers.get(c.id) ?? 0;
+      const prev = m.get(c.anchor.ref);
+      if (!prev || number < prev.number) m.set(c.anchor.ref, { id: c.id, number, status });
+    }
+    return m;
+  }, [comments, activeSessionId, indexes]);
+
+  const rowComment = (l: BomLine) => {
+    for (const d of l.designators) {
+      const hit = commentByRef.get(d);
+      if (hit) return hit;
+    }
+    return undefined;
+  };
+
+  /** Anchor a new BOM comment to the line's first designator (a "component" anchor,
+   *  stamped with the current "bom" view by the composer). The popover floats where the
+   *  click landed. Removed (synthetic) lines have no live object to comment on. */
+  function addComment(l: BomLine, synthetic: boolean, e: React.MouseEvent) {
+    e.stopPropagation();
+    const ref = l.designators[0];
+    if (synthetic || !ref) return;
+    useReviewStore
+      .getState()
+      .beginCompose({ anchor: { type: "component", ref }, pos: { x: e.clientX + 12, y: e.clientY } });
+  }
+
+  function openRowThread(id: string, e: React.MouseEvent) {
+    e.stopPropagation();
+    useReviewStore.getState().openThread(id, { x: e.clientX + 12, y: e.clientY });
+  }
 
   // Stepper landing (bomNav): scroll the row into view and flash it. Registered
   // while mounted; a flash requested during the view switch is queued by the bridge.
@@ -194,15 +251,24 @@ export function BomTab() {
             Copy delta CSV
           </button>
         )}
+        <button
+          className={`btn-ghost bom-comment-btn ${armed ? "on" : ""}`}
+          aria-pressed={armed}
+          title="Comment mode (C) — then click a row to add a review comment"
+          onClick={() => useReviewStore.getState().arm(!armed)}
+        >
+          <IconComment size={14} />
+        </button>
       </div>
       {error && <div className="bom-empty">BOM unavailable: {error}</div>}
       {!error && lines && lines.length === 0 && (
         <div className="bom-empty">The crunched bundle has no BOM.</div>
       )}
       <div className="bom-scroll">
-        <table className="bom-table">
+        <table className={`bom-table ${armed ? "arming" : ""}`}>
           <thead>
             <tr>
+              <th className="bom-cmt-th" aria-hidden />
               {cols.map((c) => (
                 <th key={c.key} onClick={() => clickHeader(c.key)}>
                   {c.label}
@@ -222,17 +288,27 @@ export function BomTab() {
                 typeof selection.ref === "string" &&
                 l.designators.includes(selection.ref);
               const statusCls = r.status ? ` bom-${r.status}` : "";
-              const flash = flashKey !== null && flashKey === r.key ? " bom-flash" : "";
+              const flash =
+                flashKey !== null && flashKey !== "" && (flashKey === r.key || flashKey === first)
+                  ? " bom-flash"
+                  : "";
+              const cmt = rowComment(l);
               return (
                 <tr
                   key={r.synthetic ? `removed-${r.key}` : l.item}
                   ref={(el) => {
-                    if (!r.key) return;
-                    if (el) rowRefs.current.set(r.key, el);
-                    else rowRefs.current.delete(r.key);
+                    // Register under the diff row key (stepper landing) and the first
+                    // designator (review-comment landing); keys never collide — the diff
+                    // key is a value/footprint/mpn hash, not a designator.
+                    for (const k of [r.key, first]) {
+                      if (!k) continue;
+                      if (el) rowRefs.current.set(k, el);
+                      else rowRefs.current.delete(k);
+                    }
                   }}
                   className={`${active ? "active" : ""}${l.dnp ? " dnp" : ""}${statusCls}${flash}`}
-                  onClick={() => {
+                  onClick={(e) => {
+                    if (useReviewStore.getState().armed) return addComment(l, r.synthetic, e);
                     if (r.changeIds.length > 0) focusChange(r.changeIds[0]);
                     else if (first && !r.synthetic) setSelection({ kind: "comp", ref: first });
                   }}
@@ -242,13 +318,39 @@ export function BomTab() {
                     nav.goComp(first);
                   }}
                   title={
-                    r.synthetic
-                      ? "Removed line (from the older revision)"
-                      : r.status
-                        ? "click: focus this change · designators jump to the part"
-                        : "click: select · double-click: jump to symbol"
+                    armed
+                      ? r.synthetic
+                        ? "Removed line — nothing live to comment on"
+                        : "click: add a review comment on this line"
+                      : r.synthetic
+                        ? "Removed line (from the older revision)"
+                        : r.status
+                          ? "click: focus this change · designators jump to the part"
+                          : "click: select · double-click: jump to symbol"
                   }
                 >
+                  <td className="bom-comment-cell">
+                    {cmt ? (
+                      <button
+                        className={`bom-cmt-badge st-${cmt.status}`}
+                        title="Open the review comment on this line"
+                        onClick={(e) => openRowThread(cmt.id, e)}
+                      >
+                        {cmt.number}
+                      </button>
+                    ) : (
+                      !r.synthetic &&
+                      first && (
+                        <button
+                          className="bom-cmt-add"
+                          title="Add a review comment on this line"
+                          onClick={(e) => addComment(l, r.synthetic, e)}
+                        >
+                          <IconComment size={12} />
+                        </button>
+                      )
+                    )}
+                  </td>
                   {diffActive && (
                     <td className="bom-status-cell">
                       {r.status && (

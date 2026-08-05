@@ -9,7 +9,7 @@ import {
   useReviewStore,
   type DisplayStatus,
 } from "../../stores/reviewStore";
-import { nav, pcbNav } from "../canvas/navigator";
+import { bomNav, nav, pcbNav } from "../canvas/navigator";
 import { formatRelative } from "../../lib/time";
 import type { Comment, CommentSeverity, CommentView } from "../../lib/types";
 import { ContextMenu, type MenuItem } from "../ContextMenu";
@@ -102,6 +102,7 @@ export function ReviewPanel() {
     useViewStore.getState().setView(c.view);
     if (c.view === "schematic") nav.reveal(c.anchor);
     else if (c.view === "pcb") pcbNav.reveal(c.anchor);
+    else if (c.view === "bom" && c.anchor.type === "component") bomNav.revealComment(c.anchor.ref);
     openThread(c.id, null);
   }
 

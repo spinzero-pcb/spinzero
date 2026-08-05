@@ -1674,6 +1674,10 @@ button {
   width: 100%;
   border-collapse: collapse;
   font-size: var(--fs-1);
+  /* The BOM tab renders inside .canvas-area, which sets a dull --fg-2 base for the
+     schematic/PCB wells. The table opts back out to the bright --fg-0 so populated
+     rows read healthy; DNP rows are pulled back down to --fg-2 below. */
+  color: var(--fg-0);
 }
 
 .bom-table th {
@@ -1703,11 +1707,12 @@ button {
 
 .bom-dsg { max-width: 320px; word-break: break-word; }
 /* Populated vs DNP separates by brightness alone (feedback: lift the populated cells
-   rather than degrade DNP with strikethrough/italic). Primary cells already inherit the
-   brightest --fg-0; the normally-dim Item/Footprint columns are nudged up to --fg-1 on
-   populated rows so the whole row reads healthy. DNP (do-not-populate) rows keep every
-   cell at the dullest --fg-2, so they recede uniformly. The "DNP" marker is plain text. */
-.bom-table tbody tr:not(.dnp) td.dim { color: var(--fg-1); }
+   rather than degrade DNP with strikethrough/italic). Populated rows read at the bright
+   --fg-0 uniformly — the Item/Footprint columns carry a global .dim (--fg-2) that must be
+   overridden back up here, otherwise they'd be the only dull cells in a healthy row.
+   DNP (do-not-populate) rows keep every cell at the dullest --fg-2, so they recede
+   uniformly. The "DNP" marker is plain text. */
+.bom-table tbody tr:not(.dnp) td.dim { color: var(--fg-0); }
 .bom-table tbody tr.dnp td { color: var(--fg-2); }
 .bom-empty { padding: var(--sp-3); color: var(--fg-2); }
 
@@ -1724,6 +1729,49 @@ button {
 /* Removed lines are shown from revision A, struck-through (not in this build). */
 .bom-table tbody tr.bom-removed td { text-decoration: line-through; color: var(--fg-2); }
 .bom-table tbody tr.bom-removed td.bom-status-cell { text-decoration: none; }
+.bom-table tbody tr.bom-removed td.bom-comment-cell { text-decoration: none; }
+
+/* ---------- BOM review comments ---------- */
+/* Comment mode (C / the bar toggle): a crosshair signals that a row click files a
+   comment rather than selecting the line. */
+.bom-comment-btn { flex: none; display: inline-flex; align-items: center; padding: var(--sp-1); }
+.bom-comment-btn.on { color: var(--accent); background: var(--accent-dim); }
+.bom-table.arming tbody tr { cursor: crosshair; }
+
+/* Leading gutter: an existing comment's number badge, or a hover-revealed add button. */
+.bom-cmt-th { width: 24px; padding: 0; }
+.bom-comment-cell { width: 24px; padding-left: var(--sp-1); padding-right: 0; text-align: center; }
+.bom-cmt-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 17px;
+  height: 17px;
+  padding: 0 4px;
+  border-radius: 999px;
+  border: none;
+  font-size: 10px;
+  font-weight: 700;
+  cursor: pointer;
+  background: var(--accent);
+  color: var(--accent-fg);
+}
+.bom-cmt-badge.st-recheck { background: var(--warn); color: #000; }
+.bom-cmt-badge.st-addressed { background: var(--ok); color: #000; }
+.bom-cmt-badge:hover { filter: brightness(1.12); }
+.bom-cmt-add {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: transparent;
+  color: var(--fg-2);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.1s;
+}
+.bom-table tbody tr:hover .bom-cmt-add { opacity: 1; }
+.bom-cmt-add:hover { color: var(--accent); }
 
 .bom-status-cell { white-space: nowrap; }
 .bom-status {
