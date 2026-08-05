@@ -12,7 +12,8 @@ import {
   type DisplayStatus,
 } from "../stores/reviewStore";
 import { bomNav, nav } from "./canvas/navigator";
-import { IconComment } from "./icons";
+import { IconComment, IconCopy } from "./icons";
+import { ContextMenu, type MenuItem } from "./ContextMenu";
 import {
   bomChanges,
   bomDeltaCsv,
@@ -85,6 +86,7 @@ export function BomTab() {
   const [filter, setFilter] = useState("");
   const [sort, setSort] = useState<{ key: SortKey; dir: 1 | -1 }>({ key: "item", dir: 1 });
   const [flashKey, setFlashKey] = useState<string | null>(null);
+  const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null);
 
   // Re-fetch per revision: `indexes` is replaced on every design reload, and diff
   // mode pins the active revision to B — so the table always shows the B-side BOM.
@@ -255,6 +257,71 @@ export function BomTab() {
         message: String(e),
       });
     }
+  }
+
+  /** Plain-text value of one cell, taken from the row data (not the DOM) so diff
+   *  decoration / chips / badges don't leak into the clipboard. */
+  function cellText(r: DiffBomRow, key: SortKey): string {
+    const l = r.line;
+    switch (key) {
+      case "item":
+        return r.synthetic ? "—" : String(l.item);
+      case "qty":
+        return String(l.qty);
+      case "designators":
+        return l.designators.join(", ");
+      case "mpn":
+        return l.mpn || indexes?.components[l.designators[0] ?? ""]?.mpn || "";
+      case "dnp":
+        return l.dnp ? "DNP" : "";
+      case "value":
+        return l.value;
+      case "footprint":
+        return l.footprint;
+      default:
+        return "";
+    }
+  }
+
+  async function copyText(text: string) {
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch (e) {
+      useToastStore.getState().push({
+        kind: "error",
+        title: "Couldn’t copy",
+        message: String(e),
+      });
+    }
+  }
+
+  /** Right-click on a data cell: copy this cell, the row (visible columns,
+   *  tab-separated) or the column across all currently visible rows. */
+  function openCellMenu(e: React.MouseEvent, r: DiffBomRow, key: SortKey) {
+    e.preventDefault();
+    e.stopPropagation();
+    const copyKeys = cols.filter((c) => c.key !== "status").map((c) => c.key);
+    setCtxMenu({
+      x: e.clientX,
+      y: e.clientY,
+      items: [
+        {
+          label: "Copy cell",
+          icon: <IconCopy size={14} />,
+          onClick: () => void copyText(cellText(r, key)),
+        },
+        {
+          label: "Copy row",
+          icon: <IconCopy size={14} />,
+          onClick: () => void copyText(copyKeys.map((k) => cellText(r, k)).join("\t")),
+        },
+        {
+          label: "Copy column",
+          icon: <IconCopy size={14} />,
+          onClick: () => void copyText(rows.map((row) => cellText(row, key)).join("\n")),
+        },
+      ],
+    });
   }
 
   /** A designator chip in a tinted row links to the underlying component change
@@ -439,9 +506,13 @@ export function BomTab() {
                       )}
                     </td>
                   )}
-                  <td className="mono dim">{r.synthetic ? "—" : l.item}</td>
-                  <td className="mono">{wasCell(old.qty, l.qty)}</td>
-                  <td className="bom-dsg">
+                  <td className="mono dim" onContextMenu={(e) => openCellMenu(e, r, "item")}>
+                    {r.synthetic ? "—" : l.item}
+                  </td>
+                  <td className="mono" onContextMenu={(e) => openCellMenu(e, r, "qty")}>
+                    {wasCell(old.qty, l.qty)}
+                  </td>
+                  <td className="bom-dsg" onContextMenu={(e) => openCellMenu(e, r, "designators")}>
                     {diffActive && r.status
                       ? l.designators.map((d) => (
                           <button
@@ -458,18 +529,23 @@ export function BomTab() {
                         ))
                       : l.designators.join(", ")}
                   </td>
-                  <td>{wasCell(old.value, l.value)}</td>
-                  <td className="dim">{wasCell(old.footprint, l.footprint)}</td>
-                  <td className="mono">
+                  <td onContextMenu={(e) => openCellMenu(e, r, "value")}>
+                    {wasCell(old.value, l.value)}
+                  </td>
+                  <td className="dim" onContextMenu={(e) => openCellMenu(e, r, "footprint")}>
+                    {wasCell(old.footprint, l.footprint)}
+                  </td>
+                  <td className="mono" onContextMenu={(e) => openCellMenu(e, r, "mpn")}>
                     {wasCell(old.mpn, l.mpn || indexes?.components[first ?? ""]?.mpn || "")}
                   </td>
-                  <td>{l.dnp ? "DNP" : ""}</td>
+                  <td onContextMenu={(e) => openCellMenu(e, r, "dnp")}>{l.dnp ? "DNP" : ""}</td>
                 </tr>
               );
             })}
           </tbody>
         </table>
       </div>
+      {ctxMenu && <ContextMenu {...ctxMenu} onClose={() => setCtxMenu(null)} />}
     </div>
   );
 }
