@@ -100,6 +100,12 @@ function cellText(
   }
 }
 
+/** Stable React/expansion key for a BOM row (matches the old inline key expression). */
+const rowKeyOf = (r: DiffBomRow) => (r.synthetic ? `removed-${r.key}` : String(r.line.item));
+
+/** One row of the rendered table: a BOM line, or a per-designator child of one. */
+type DisplayRow = { row: DiffBomRow; key: string; child: boolean };
+
 export function BomTab() {
   const indexes = useDesignStore((s) => s.indexes);
   const selection = useSelectionStore((s) => s.selection);
@@ -128,6 +134,10 @@ export function BomTab() {
     () => bomLayout.sort ?? { key: "item", dir: 1 },
   );
   const [flashKey, setFlashKey] = useState<string | null>(null);
+  // Expanded grouped lines (KiCad's Symbol Fields Table behaviour): a row key here means
+  // "show one child row per designator". Local + transient — collapses on filter/preset
+  // change, never persisted.
+  const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null);
   const [colMenu, setColMenu] = useState<{ x: number; y: number } | null>(null);
 
@@ -254,6 +264,47 @@ export function BomTab() {
     });
   }, [lines, changes, diffActive, filter, sort.dir, sortCol, bomChips, indexes, cols]);
 
+  // Collapse everything when the row set is rebuilt by a filter/preset switch: the keys
+  // would still match, but the groups on screen have changed under the user.
+  useEffect(() => {
+    setExpanded((s) => (s.size === 0 ? s : new Set()));
+  }, [filter, presetName, diffActive]);
+
+  /** The flattened list actually rendered: every parent row, each followed by its
+   *  designator children while expanded. All windowing arithmetic runs on this list, so
+   *  spacer heights, rowIndex and scrollToKey stay in step with what is on screen. */
+  const display = useMemo<DisplayRow[]>(() => {
+    const out: DisplayRow[] = [];
+    for (const r of rows) {
+      const key = rowKeyOf(r);
+      out.push({ row: r, key, child: false });
+      if (r.line.designators.length < 2 || !expanded.has(key)) continue;
+      for (const d of r.line.designators) {
+        out.push({
+          // A child is the same line narrowed to one designator, so cellText/renderCell
+          // (and therefore copy, sorting-free display and the MPN fallback) just work.
+          row: {
+            ...r,
+            status: null,
+            changeIds: [],
+            line: { ...r.line, designators: [d], mpn: indexes?.components[d]?.mpn || r.line.mpn },
+          },
+          key: `${key}:${d}`,
+          child: true,
+        });
+      }
+    }
+    return out;
+  }, [rows, expanded, indexes]);
+
+  function toggleExpand(key: string) {
+    setExpanded((s) => {
+      const next = new Set(s);
+      if (!next.delete(key)) next.add(key);
+      return next;
+    });
+  }
+
   // Open/unaddressed BOM comments keyed by their anchored designator, scoped to the
   // active review session (mirrors the canvas chip filter in CommentBridge: resolved and
   // dismissed comments carry no marker). A row shows the marker for the first of its
@@ -305,7 +356,7 @@ export function BomTab() {
   const headRef = useRef<HTMLTableSectionElement>(null);
   const [scrollTop, setScrollTop] = useState(0);
   const [viewportH, setViewportH] = useState(600);
-  const virt = rows.length > VIRT_MIN;
+  const virt = display.length > VIRT_MIN;
 
   useLayoutEffect(() => {
     const el = scrollRef.current;
@@ -320,19 +371,23 @@ export function BomTab() {
   const firstVisible = virt ? Math.floor(Math.max(0, scrollTop - headH) / ROW_H) : 0;
   const start = virt ? Math.max(0, firstVisible - OVERSCAN) : 0;
   const end = virt
-    ? Math.min(rows.length, firstVisible + Math.ceil(viewportH / ROW_H) + OVERSCAN)
-    : rows.length;
-  const windowRows = virt ? rows.slice(start, end) : rows;
+    ? Math.min(display.length, firstVisible + Math.ceil(viewportH / ROW_H) + OVERSCAN)
+    : display.length;
+  const windowRows = virt ? display.slice(start, end) : display;
 
   /** Row index by lookup key (diff row key + first designator), so a scroll target that
-   *  is currently outside the window can still be reached — by scrollTop, not by DOM. */
+   *  is currently outside the window can still be reached — by scrollTop, not by DOM.
+   *  Built over the flattened list; parents come first, so a designator inside a group
+   *  resolves to the parent row whether or not the group is expanded. */
   const rowIndex = useMemo(() => {
     const m = new Map<string, number>();
-    rows.forEach((r, i) => {
+    display.forEach((e, i) => {
+      if (e.child) return;
+      const r = e.row;
       for (const k of [r.key, ...r.line.designators]) if (k && !m.has(k)) m.set(k, i);
     });
     return m;
-  }, [rows]);
+  }, [display]);
 
   /** Designator → the key its row is registered under in rowRefs (diff key or first
    *  designator), so any designator of a grouped line can reach the mounted row. */
@@ -494,7 +549,13 @@ export function BomTab() {
 
   /** One data cell. Diff decoration (old → new, designator chips) stays attached to the
    *  built-in columns wherever the active preset happens to place them. */
-  function renderCell(r: DiffBomRow, col: BomCol, old: ReturnType<typeof bomOldValues>) {
+  function renderCell(
+    r: DiffBomRow,
+    col: BomCol,
+    old: ReturnType<typeof bomOldValues>,
+    displayKey: string,
+    child: boolean,
+  ) {
     const l = r.line;
     switch (col.builtin) {
       case "status":
@@ -519,9 +580,30 @@ export function BomTab() {
             {wasCell(old.qty, l.qty)}
           </td>
         );
-      case "designators":
+      case "designators": {
+        const groupKey = child ? "" : displayKey;
+        const expandable = !child && l.designators.length > 1;
+        const open = expandable && expanded.has(groupKey);
         return (
-          <td key={col.id} className="bom-dsg" onContextMenu={(e) => openCellMenu(e, r, col)}>
+          <td
+            key={col.id}
+            className={`bom-dsg${child ? " bom-dsg-child" : ""}`}
+            onContextMenu={(e) => openCellMenu(e, r, col)}
+          >
+            {expandable && (
+              <button
+                className="bom-dsg-toggle"
+                aria-expanded={open}
+                title={open ? "Collapse the grouped designators" : "Expand the grouped designators"}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  toggleExpand(groupKey);
+                }}
+                onDoubleClick={(e) => e.stopPropagation()}
+              >
+                {open ? "▾" : "▸"}
+              </button>
+            )}
             {diffActive && r.status
               ? l.designators.map((d) => (
                   <button
@@ -539,6 +621,7 @@ export function BomTab() {
               : l.designators.join(", ")}
           </td>
         );
+      }
       case "value":
         return (
           <td key={col.id} onContextMenu={(e) => openCellMenu(e, r, col)}>
@@ -684,7 +767,7 @@ export function BomTab() {
                 <td colSpan={cols.length + 1} />
               </tr>
             )}
-            {windowRows.map((r) => {
+            {windowRows.map(({ row: r, key: displayKey, child }) => {
               const l = r.line;
               const first = l.designators[0];
               const active =
@@ -693,7 +776,10 @@ export function BomTab() {
                 l.designators.includes(selection.ref);
               const statusCls = r.status ? ` bom-${r.status}` : "";
               const flash =
-                flashKey !== null && flashKey !== "" && (flashKey === r.key || flashKey === first)
+                !child &&
+                flashKey !== null &&
+                flashKey !== "" &&
+                (flashKey === r.key || flashKey === first)
                   ? " bom-flash"
                   : "";
               const cmt = rowComment(l);
@@ -704,18 +790,20 @@ export function BomTab() {
                   : {};
               return (
                 <tr
-                  key={r.synthetic ? `removed-${r.key}` : l.item}
+                  key={displayKey}
                   ref={(el) => {
                     // Register under the diff row key (stepper landing) and the first
                     // designator (review-comment landing); keys never collide — the diff
-                    // key is a value/footprint/mpn hash, not a designator.
+                    // key is a value/footprint/mpn hash, not a designator. Child rows
+                    // register nothing, so cross-probe always lands on the parent.
+                    if (child) return;
                     for (const k of [r.key, first]) {
                       if (!k) continue;
                       if (el) rowRefs.current.set(k, el);
                       else rowRefs.current.delete(k);
                     }
                   }}
-                  className={`${active ? "active" : ""}${l.dnp ? " dnp" : ""}${statusCls}${flash}`}
+                  className={`${active ? "active" : ""}${l.dnp ? " dnp" : ""}${statusCls}${flash}${child ? " bom-child" : ""}`}
                   onClick={(e) => {
                     if (useReviewStore.getState().armed) return addComment(l, r.synthetic, e);
                     if (r.changeIds.length > 0) focusChange(r.changeIds[0]);
@@ -739,7 +827,7 @@ export function BomTab() {
                   }
                 >
                   <td className="bom-comment-cell">
-                    {cmt ? (
+                    {child ? null : cmt ? (
                       <button
                         className={`bom-cmt-badge st-${cmt.status}`}
                         title="Open the review comment on this line"
@@ -760,12 +848,12 @@ export function BomTab() {
                       )
                     )}
                   </td>
-                  {cols.map((c) => renderCell(r, c, old))}
+                  {cols.map((c) => renderCell(r, c, old, displayKey, child))}
                 </tr>
               );
             })}
-            {end < rows.length && (
-              <tr className="bom-spacer" style={{ height: (rows.length - end) * ROW_H }} aria-hidden>
+            {end < display.length && (
+              <tr className="bom-spacer" style={{ height: (display.length - end) * ROW_H }} aria-hidden>
                 <td colSpan={cols.length + 1} />
               </tr>
             )}

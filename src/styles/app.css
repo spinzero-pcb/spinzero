@@ -1771,6 +1771,25 @@ button {
 .bom-table tbody tr.bom-spacer td { padding: 0; border: 0; }
 
 .bom-dsg { max-width: 320px; word-break: break-word; }
+
+/* Expandable grouped designators (KiCad's Symbol Fields Table): a chevron in the
+   designators cell unfolds one child row per designator underneath the line. */
+.bom-dsg-toggle {
+  background: none;
+  border: 0;
+  padding: 0;
+  margin-right: var(--sp-1);
+  color: var(--fg-2);
+  cursor: pointer;
+  font-size: 10px;
+  line-height: 1;
+}
+.bom-dsg-toggle:hover { color: var(--accent); }
+.bom-table tbody tr.bom-child td.bom-dsg-child { padding-left: var(--sp-4); }
+/* Children recede uniformly — including the cells the populated-row rule above lifts
+   back to --fg-0, hence the matching :not(.dnp) td.dim specificity. */
+.bom-table tbody tr.bom-child td,
+.bom-table tbody tr.bom-child:not(.dnp) td.dim { color: var(--fg-2); }
 /* Populated vs DNP separates by brightness alone (feedback: lift the populated cells
    rather than degrade DNP with strikethrough/italic). Populated rows read at the bright
    --fg-0 uniformly — the Item/Footprint columns carry a global .dim (--fg-2) that must be
