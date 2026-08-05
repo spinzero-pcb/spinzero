@@ -479,21 +479,37 @@ pub struct GroupedBom {
 
 /// Build the grouped BOM for the app (groups by value/footprint/lib_ref/desc).
 pub fn build_grouped(components: &[Component], mapping: &Mapping, project_path: &str, stem: &str) -> GroupedBom {
-    type Key = (String, String, String, String, bool);
+    type Key = (String, String, String, String, String, bool);
     let mut groups: BTreeMap<Key, GroupedLine> = BTreeMap::new();
     let mut component_count = 0u32;
     for c in components.iter().filter(|c| in_bom(c)) {
         component_count += 1;
         let dnp = is_dnp(c);
+        // MPN participates in the key: two parts that differ only by MPN are
+        // distinct BOM lines (matches KiCad's field-based grouping).
+        let mpn = mapping.value(Field::Mpn, c);
         let key = (
             c.value.to_lowercase(),
             c.footprint.to_lowercase(),
             c.library_ref.to_lowercase(),
             c.description.to_lowercase(),
+            mpn.to_lowercase(),
             dnp,
         );
         let line = groups.entry(key).or_insert_with(|| {
             let mut fields = BTreeMap::new();
+            // Carry the symbol's own parameters so custom preset columns (MSL,
+            // Automotive Grade, …) have values; skip internal KiCad bookkeeping.
+            // Resolved fields below intentionally take precedence.
+            for (k, v) in &c.parameters {
+                if k.starts_with("kicad_") {
+                    continue;
+                }
+                let v = clean(v);
+                if !v.is_empty() {
+                    fields.insert(k.clone(), v.to_string());
+                }
+            }
             fields.insert("value".into(), c.value.clone());
             fields.insert("footprint".into(), c.footprint.clone());
             fields.insert("description".into(), c.description.clone());
@@ -633,6 +649,33 @@ mod tests {
         let grouped = build_grouped(&comps, &mapping, "p", "p");
         assert_eq!(grouped.component_count, 3); // MH1 excluded
         assert_eq!(grouped.line_count, 2);
+    }
+
+    #[test]
+    fn grouped_carries_custom_params_and_splits_on_mpn() {
+        let comps = vec![
+            comp("R37", "9.1k", "0402", "passive_2pin", &[("MPN", "ERA-2AEB912X"), ("MSL", "1")]),
+            comp(
+                "R38",
+                "9.1k",
+                "0402",
+                "passive_2pin",
+                &[("MPN", "ERA-2AEB912X try"), ("MSL", "1")],
+            ),
+        ];
+        let mapping = resolve_mapping(&comps);
+        let grouped = build_grouped(&comps, &mapping, "p", "p");
+        // Differing MPN splits the group.
+        assert_eq!(grouped.line_count, 2);
+        let r38 = grouped.lines.iter().find(|l| l.designators == ["R38"]).unwrap();
+        assert_eq!(
+            r38.fields.get("manufacturer_part_number").map(String::as_str),
+            Some("ERA-2AEB912X try")
+        );
+        // Custom parameter carried through for preset columns.
+        assert_eq!(r38.fields.get("MSL").map(String::as_str), Some("1"));
+        // Internal KiCad bookkeeping params are not leaked.
+        assert!(!r38.fields.keys().any(|k| k.starts_with("kicad_")));
     }
 
     #[test]
