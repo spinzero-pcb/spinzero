@@ -1,6 +1,7 @@
 import {
   bomChanges,
   bomDeltaCsv,
+  bomOldValues,
   changesFirstCompare,
   decorateBomRows,
   fpShort,
@@ -113,6 +114,48 @@ describe("bomDiff helpers", () => {
       ]);
       expect(rows.every((r) => r.status === null)).toBe(true);
       expect(rows).toHaveLength(2);
+    });
+  });
+
+  describe("bomOldValues", () => {
+    it("parses the detail bits and the anchor qty into old values", () => {
+      expect(
+        bomOldValues([
+          bomCh(
+            "ch_1",
+            "modified",
+            { key: "k", designators: ["R1"], value: "4.7k", qtyA: 3, qtyB: 2 },
+            {
+              title: "BOM line 10k R_0402 → 4.7k R_0402",
+              detail: "value 10k → 4.7k; MPN OLD-1 → NEW-1; qty 3 → 2",
+            },
+          ),
+        ]),
+      ).toEqual({ value: "10k", mpn: "OLD-1", qty: 3 });
+    });
+
+    it("maps the ∅ placeholder to an empty old value", () => {
+      expect(
+        bomOldValues([
+          bomCh("ch_1", "modified", { key: "k", designators: ["R1"] }, {
+            detail: "footprint ∅ → R_0402",
+          }),
+        ]),
+      ).toEqual({ footprint: "" });
+    });
+
+    it("ignores added/removed changes and details with no old → new bits", () => {
+      expect(
+        bomOldValues([
+          bomCh("ch_1", "added", { key: "k", designators: ["R1"], qtyA: 0, qtyB: 2 }, {
+            detail: "×2: R1, R2",
+          }),
+          bomCh("ch_2", "removed", { key: "k2", designators: ["D3"], qtyA: 1 }, {
+            detail: "×1: D3",
+          }),
+          bomCh("ch_3", "modified", { key: "k3", designators: ["C1"] }, { detail: "+1: C9" }),
+        ]),
+      ).toEqual({});
     });
   });
 

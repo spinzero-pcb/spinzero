@@ -18,9 +18,26 @@ import {
   bomDeltaCsv,
   changesFirstCompare,
   decorateBomRows,
+  bomOldValues,
   type DiffBomRow,
 } from "../lib/bomDiff";
 import type { BomLine } from "../lib/types";
+import type { Change } from "../lib/diff";
+
+/** Cell content in diff mode: "old → new" with the old value dimmed, or just the
+ *  new value when there is no extractable old one. */
+const isChange = (c: Change | undefined): c is Change => !!c;
+
+function wasCell(old: string | number | undefined, now: string | number) {
+  if (old === undefined || String(old) === String(now)) return now;
+  return (
+    <>
+      <span className="bom-was">{String(old) || "∅"}</span>
+      <span className="bom-was-arrow">→</span>
+      {now}
+    </>
+  );
+}
 
 // WS7: BOM keeps a tab; it is not canvas content. Row click = select the line's
 // first designator (card/status mirror it); double-click = jump to the symbol.
@@ -92,6 +109,8 @@ export function BomTab() {
     () => (diffActive && diffDoc ? bomChanges(diffDoc.changes) : []),
     [diffActive, diffDoc],
   );
+
+  const changeById = useMemo(() => new Map(changes.map((c) => [c.id, c])), [changes]);
 
   const rows = useMemo<DiffBomRow[]>(() => {
     if (!lines) return [];
@@ -348,6 +367,11 @@ export function BomTab() {
                   ? " bom-flash"
                   : "";
               const cmt = rowComment(l);
+              // Inline old → new, so a "changed" row reads without opening the panel.
+              const old =
+                r.status === "changed"
+                  ? bomOldValues(r.changeIds.map((id) => changeById.get(id)).filter(isChange))
+                  : {};
               return (
                 <tr
                   key={r.synthetic ? `removed-${r.key}` : l.item}
@@ -416,7 +440,7 @@ export function BomTab() {
                     </td>
                   )}
                   <td className="mono dim">{r.synthetic ? "—" : l.item}</td>
-                  <td className="mono">{l.qty}</td>
+                  <td className="mono">{wasCell(old.qty, l.qty)}</td>
                   <td className="bom-dsg">
                     {diffActive && r.status
                       ? l.designators.map((d) => (
@@ -434,9 +458,11 @@ export function BomTab() {
                         ))
                       : l.designators.join(", ")}
                   </td>
-                  <td>{l.value}</td>
-                  <td className="dim">{l.footprint}</td>
-                  <td className="mono">{l.mpn || indexes?.components[first ?? ""]?.mpn || ""}</td>
+                  <td>{wasCell(old.value, l.value)}</td>
+                  <td className="dim">{wasCell(old.footprint, l.footprint)}</td>
+                  <td className="mono">
+                    {wasCell(old.mpn, l.mpn || indexes?.components[first ?? ""]?.mpn || "")}
+                  </td>
                   <td>{l.dnp ? "DNP" : ""}</td>
                 </tr>
               );

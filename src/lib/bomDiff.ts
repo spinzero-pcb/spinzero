@@ -103,6 +103,43 @@ export function decorateBomRows(lines: BomLine[], changes: Change[]): DiffBomRow
   return [...rows, ...removed];
 }
 
+/** The OLD (revision A) field values behind a "changed" row, for the inline
+ *  "old → new" cell rendering. Fields absent when nothing extractable changed. */
+export interface BomOldValues {
+  value?: string;
+  footprint?: string;
+  mpn?: string;
+  qty?: number;
+}
+
+/** "∅" is the Rust side's empty-field placeholder (see `disp` in diff.rs). */
+const EMPTY_MARK = "∅";
+
+/** Extract the old field values a row's changes describe: the "value A → B" /
+ *  "footprint A → B" / "MPN A → B" bits of `detail` (emitted by diff_bom for a
+ *  folded BOM line), plus qty from the anchor's qtyA/qtyB. Only "modified"
+ *  changes contribute — added/removed rows have no old-vs-new within one line. */
+export function bomOldValues(changes: Change[]): BomOldValues {
+  const out: BomOldValues = {};
+  const FIELD: Record<string, "value" | "footprint" | "mpn"> = {
+    value: "value",
+    footprint: "footprint",
+    MPN: "mpn",
+  };
+  for (const c of changes) {
+    if (c.group !== "bom" || c.kind === "added" || c.kind === "removed") continue;
+    const anchor = c.anchors.bom;
+    if (anchor && anchor.qtyA !== anchor.qtyB && out.qty === undefined) out.qty = anchor.qtyA;
+    for (const bit of (c.detail ?? "").split(";")) {
+      const m = /^(value|footprint|MPN)\s+(.*?)\s+→\s+(.*)$/.exec(bit.trim());
+      if (!m) continue;
+      const field = FIELD[m[1]];
+      if (out[field] === undefined) out[field] = m[2] === EMPTY_MARK ? "" : m[2];
+    }
+  }
+  return out;
+}
+
 /** Changes-first comparator (the diff-mode default sort): tinted rows before
  *  untouched ones — removed/changed/added in review-priority order — then item. */
 export function changesFirstCompare(a: DiffBomRow, b: DiffBomRow): number {

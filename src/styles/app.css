@@ -1744,6 +1744,10 @@ button {
 .bom-table tbody tr.bom-removed td { text-decoration: line-through; color: var(--fg-2); }
 .bom-table tbody tr.bom-removed td.bom-status-cell { text-decoration: none; }
 .bom-table tbody tr.bom-removed td.bom-comment-cell { text-decoration: none; }
+/* Inline "old → new" inside a changed row's affected cells — the old value dimmed
+   and struck, so the delta reads without opening the Changes panel. */
+.bom-was { color: var(--fg-2); text-decoration: line-through; }
+.bom-was-arrow { color: var(--fg-2); margin: 0 4px; }
 
 /* ---------- BOM review comments ---------- */
 /* Comment mode (C / the bar toggle): a crosshair signals that a row click files a
