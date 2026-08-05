@@ -85,6 +85,7 @@ export function decorateBomRows(lines: BomLine[], changes: Change[]): DiffBomRow
           footprint: anchor.footprint,
           mpn: anchor.mpn,
           dnp: false,
+          fields: {},
         },
         status: "removed",
         changeIds: [c.id],

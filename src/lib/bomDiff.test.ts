@@ -21,6 +21,7 @@ function line(partial: Partial<BomLine> & Pick<BomLine, "item">): BomLine {
     footprint: "",
     mpn: "",
     dnp: false,
+    fields: {},
     ...partial,
   };
 }

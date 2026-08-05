@@ -1040,6 +1040,21 @@ fn get_bom_lines(state: State<AppState>) -> Result<Vec<design::BomLine>, String>
     design::bom_lines(opt_active_extraction(&state))
 }
 
+/// KiCad BOM column sets, read from the live `.kicad_pro` (the crunch cache holds only
+/// extractor output, not the raw project file). Read-only mode / a missing or legacy
+/// project file yields an empty list — presets are a viewing aid, never fatal.
+#[tauri::command]
+fn get_bom_presets(state: State<AppState>) -> Result<Vec<design::BomPreset>, String> {
+    let pro = state
+        .project
+        .lock_safe()
+        .as_ref()
+        .and_then(|p| p.design_path_clone())
+        .and_then(|dir| project::detect_design(&dir))
+        .map(|d| PathBuf::from(d.file));
+    Ok(design::bom_presets(pro))
+}
+
 // ------------------------------------------------------------ reviews (Phase 2)
 // Object-anchored review comments synced as per-user append-only logs under the
 // project folder's reviews/ dir. ⟳ re-check is derived on the frontend from
@@ -1338,6 +1353,7 @@ pub fn run() {
             get_design_indexes,
             read_artifact,
             get_bom_lines,
+            get_bom_presets,
             get_review_author,
             list_comments,
             apply_review_action,

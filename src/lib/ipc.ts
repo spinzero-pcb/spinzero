@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   BomLine,
+  BomPreset,
   Comment,
   ComponentInfo,
   CheckoutResult,
@@ -108,6 +109,7 @@ export const ipc = {
   getDesignIndexes: () => invoke<DesignIndexes>("get_design_indexes"),
   readArtifact: (relPath: string) => invoke<string>("read_artifact", { relPath }),
   getBomLines: () => invoke<BomLine[]>("get_bom_lines"),
+  getBomPresets: () => invoke<BomPreset[]>("get_bom_presets"),
 
   getReviewAuthor: () => invoke<string>("get_review_author"),
   listComments: () => invoke<Comment[]>("list_comments"),

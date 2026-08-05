@@ -167,6 +167,27 @@ export interface BomLine {
   footprint: string;
   mpn: string;
   dnp: boolean;
+  /** Every string field the crunched BOM carries for this line, verbatim — the source
+   *  for user/custom columns named by a BOM preset. */
+  fields: Record<string, string>;
+}
+
+/** One column of a KiCad BOM preset (mirrors design.rs BomPresetField). `name` may be a
+ *  KiCad virtual field (`${QUANTITY}`, `${DNP}`, `${ITEM_NUMBER}`), passed through as-is. */
+export interface BomPresetField {
+  name: string;
+  label: string;
+  show: boolean;
+}
+
+/** A KiCad BOM column set from the project's .kicad_pro (mirrors design.rs BomPreset). */
+export interface BomPreset {
+  name: string;
+  fields: BomPresetField[];
+  sort_field: string;
+  sort_asc: boolean;
+  exclude_dnp: boolean;
+  group_symbols: boolean;
 }
 
 /** Keyboard-shortcut preset. KiCad is the only preset today; kept as a

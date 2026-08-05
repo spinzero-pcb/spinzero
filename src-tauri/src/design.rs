@@ -593,6 +593,10 @@ pub struct BomLine {
     pub footprint: String,
     pub mpn: String,
     pub dnp: bool,
+    /// Every string field the crunched BOM carries for this line, verbatim (Description,
+    /// Manufacturer, MSL, "Automotive Grade", …). Lets the frontend render arbitrary
+    /// user/custom columns named by a `.kicad_pro` BOM preset.
+    pub fields: HashMap<String, String>,
 }
 
 /// BOM table payload (WS7), read straight from the crunched grouped-json bundle so
@@ -644,8 +648,127 @@ pub fn bom_lines(vault_cache: Option<PathBuf>) -> Result<Vec<BomLine>, String> {
                 .to_string(),
             mpn: field(l, &["manufacturer_part_number", "mpn", "MPN"]),
             dnp: l.get("dnp").and_then(|v| v.as_bool()).unwrap_or(false),
+            fields: l
+                .get("fields")
+                .and_then(|f| f.as_object())
+                .map(|f| {
+                    f.iter()
+                        .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                        .collect()
+                })
+                .unwrap_or_default(),
         })
         .collect())
+}
+
+// ---------------------------------------------------------------- BOM presets
+
+/// One column in a KiCad BOM preset (`fields_ordered` entry). `name` is the field key
+/// to look up on a `BomLine` — either a real symbol field or a KiCad virtual field
+/// (`${QUANTITY}`, `${DNP}`, `${ITEM_NUMBER}`), passed through as-is for the frontend
+/// to map. `label` is the column header the user chose.
+#[derive(Serialize, PartialEq, Debug)]
+pub struct BomPresetField {
+    pub name: String,
+    pub label: String,
+    pub show: bool,
+}
+
+/// A KiCad BOM column set, from the project's `.kicad_pro`.
+#[derive(Serialize, PartialEq, Debug)]
+pub struct BomPreset {
+    pub name: String,
+    pub fields: Vec<BomPresetField>,
+    pub sort_field: String,
+    pub sort_asc: bool,
+    pub exclude_dnp: bool,
+    pub group_symbols: bool,
+}
+
+/// Parse one `bom_settings`/preset object. `None` when it carries no `fields_ordered`
+/// (an empty/absent settings block is not a usable preset).
+fn parse_bom_preset(v: &Value, fallback_name: &str) -> Option<BomPreset> {
+    let ordered = v.get("fields_ordered")?.as_array()?;
+    if ordered.is_empty() {
+        return None;
+    }
+    let name = v.get("name").and_then(|n| n.as_str()).unwrap_or("");
+    let fields = ordered
+        .iter()
+        .filter_map(|f| {
+            let name = f.get("name")?.as_str()?.to_string();
+            let label = f
+                .get("label")
+                .and_then(|l| l.as_str())
+                .filter(|s| !s.is_empty())
+                .unwrap_or(&name)
+                .to_string();
+            Some(BomPresetField {
+                name,
+                label,
+                show: f.get("show").and_then(|s| s.as_bool()).unwrap_or(true),
+            })
+        })
+        .collect();
+    Some(BomPreset {
+        name: if name.is_empty() { fallback_name.to_string() } else { name.to_string() },
+        fields,
+        sort_field: v
+            .get("sort_field")
+            .and_then(|s| s.as_str())
+            .unwrap_or("")
+            .to_string(),
+        sort_asc: v.get("sort_asc").and_then(|s| s.as_bool()).unwrap_or(true),
+        exclude_dnp: v.get("exclude_dnp").and_then(|s| s.as_bool()).unwrap_or(false),
+        group_symbols: v.get("group_symbols").and_then(|s| s.as_bool()).unwrap_or(true),
+    })
+}
+
+/// Extract the BOM presets from a parsed `.kicad_pro`: the live `schematic.bom_settings`
+/// first (named "Project" when KiCad left its name empty), then any named entries in
+/// `schematic.bom_presets` (KiCad 8/9 writes them there; older/hand-edited files may
+/// nest them under `bom_settings.presets`, so both are read).
+fn bom_presets_from_pro(pro: &Value) -> Vec<BomPreset> {
+    let Some(sch) = pro.get("schematic") else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let settings = sch.get("bom_settings");
+    if let Some(p) = settings.and_then(|s| parse_bom_preset(s, "Project")) {
+        out.push(p);
+    }
+    let named = sch
+        .get("bom_presets")
+        .or_else(|| settings.and_then(|s| s.get("presets")))
+        .and_then(|p| p.as_array());
+    for entry in named.into_iter().flatten() {
+        if let Some(p) = parse_bom_preset(entry, "Preset") {
+            if !out.iter().any(|e| e.name == p.name) {
+                out.push(p);
+            }
+        }
+    }
+    out
+}
+
+/// BOM presets for the open project's `.kicad_pro`. A viewing aid only: a missing path,
+/// unreadable file or absent settings yields an empty list, never an error.
+pub fn bom_presets(pro_path: Option<PathBuf>) -> Vec<BomPreset> {
+    let Some(path) = pro_path else {
+        log::debug!("bom_presets: no EDA project file for the open project");
+        return Vec::new();
+    };
+    let Ok(text) = fs::read_to_string(&path) else {
+        log::debug!("bom_presets: cannot read {}", path.display());
+        return Vec::new();
+    };
+    let Ok(v) = serde_json::from_str::<Value>(&text) else {
+        log::debug!("bom_presets: {} is not JSON (legacy project?)", path.display());
+        return Vec::new();
+    };
+    let presets = bom_presets_from_pro(&v);
+    log::debug!("bom_presets: {} preset(s) in {}", presets.len(), path.display());
+    presets
 }
 
 // ---------------------------------------------------------------- artifact serving
@@ -712,6 +835,82 @@ mod tests {
         assert!(ix.nets.values().any(|n| n.sheets.len() > 1), "cross-sheet nets exist");
         let bom = bom_lines(Some(root)).expect("bom lines");
         assert!(!bom.is_empty(), "BOM lines parsed");
+        assert!(
+            bom.iter().any(|l| !l.fields.is_empty()),
+            "raw per-line fields passed through for custom columns"
+        );
+    }
+
+    #[test]
+    fn kicad_pro_bom_presets_parse() {
+        let pro: Value = serde_json::from_str(
+            r#"{
+              "schematic": {
+                "bom_settings": {
+                  "name": "",
+                  "sort_field": "Description",
+                  "sort_asc": true,
+                  "filter_string": "",
+                  "exclude_dnp": false,
+                  "group_symbols": true,
+                  "fields_ordered": [
+                    { "name": "Reference", "label": "Reference", "show": true, "group_by": false },
+                    { "name": "${QUANTITY}", "label": "Qty", "show": true, "group_by": false },
+                    { "name": "${DNP}", "label": "DNP", "show": true, "group_by": true },
+                    { "name": "Automotive Grade", "label": "", "show": false, "group_by": false }
+                  ]
+                },
+                "bom_presets": [
+                  {
+                    "name": "manufacturing_bom",
+                    "sort_field": "MPN",
+                    "sort_asc": false,
+                    "exclude_dnp": true,
+                    "group_symbols": false,
+                    "fields_ordered": [
+                      { "name": "MPN", "label": "MPN", "show": true }
+                    ]
+                  }
+                ]
+              }
+            }"#,
+        )
+        .unwrap();
+        let presets = bom_presets_from_pro(&pro);
+        assert_eq!(presets.len(), 2);
+
+        let project = &presets[0];
+        assert_eq!(project.name, "Project", "empty settings name falls back");
+        assert_eq!(project.sort_field, "Description");
+        assert!(project.sort_asc && !project.exclude_dnp && project.group_symbols);
+        // Virtual fields pass through verbatim; a blank label falls back to the name.
+        assert_eq!(
+            project.fields.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(),
+            ["Reference", "${QUANTITY}", "${DNP}", "Automotive Grade"]
+        );
+        assert_eq!(project.fields[1].label, "Qty");
+        assert_eq!(project.fields[3].label, "Automotive Grade");
+        assert!(!project.fields[3].show);
+
+        let named = &presets[1];
+        assert_eq!(named.name, "manufacturing_bom");
+        assert!(!named.sort_asc && named.exclude_dnp && !named.group_symbols);
+
+        // Legacy shape: presets nested under bom_settings.
+        let nested: Value = serde_json::from_str(
+            r#"{"schematic":{"bom_settings":{"name":"","presets":[
+                 {"name":"Alt","fields_ordered":[{"name":"Value","label":"Value","show":true}]}]}}}"#,
+        )
+        .unwrap();
+        let nested = bom_presets_from_pro(&nested);
+        assert_eq!(nested.len(), 1, "settings without fields_ordered is not a preset");
+        assert_eq!(nested[0].name, "Alt");
+
+        // Nothing usable → empty, never an error.
+        assert!(bom_presets_from_pro(&serde_json::json!({})).is_empty());
+        assert!(bom_presets_from_pro(&serde_json::json!({"schematic": {}})).is_empty());
+        assert!(bom_presets(None).is_empty());
+        assert!(bom_presets(Some(PathBuf::from("no-such-file.kicad_pro"))).is_empty());
     }
 
     #[test]
