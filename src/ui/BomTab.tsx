@@ -219,14 +219,10 @@ export function BomTab() {
     // Chips AND-combine with each other and with the text filter. "Changed only" is
     // inert outside diff mode even when its remembered state is on.
     const changedOnly = diffActive && bomChips.changedOnly;
+    const mpnFallback = (d: string) => indexes?.components[d]?.mpn ?? "";
     const filtered = decorated.filter((r) => {
-      if (
-        q &&
-        ![r.line.designators.join(","), r.line.value, r.line.footprint, r.line.mpn]
-          .join(" ")
-          .toLowerCase()
-          .includes(q)
-      )
+      // Match against every visible column, so search follows the active preset.
+      if (q && !cols.some((c) => cellText(r, c, mpnFallback).toLowerCase().includes(q)))
         return false;
       if (bomChips.dnpOnly && !r.line.dnp) return false;
       // The MPN cell falls back to the component index, so a row is only "missing"
@@ -237,7 +233,6 @@ export function BomTab() {
       return true;
     });
     const dir = sort.dir;
-    const mpnFallback = (d: string) => indexes?.components[d]?.mpn ?? "";
     return [...filtered].sort((a, b) => {
       if (sortCol?.builtin === "status") return changesFirstCompare(a, b) * dir;
       if (sortCol?.builtin === "designators")
@@ -250,7 +245,7 @@ export function BomTab() {
       const vb = cellText(b, sortCol, mpnFallback);
       return va.localeCompare(vb, undefined, { numeric: true }) * dir;
     });
-  }, [lines, changes, diffActive, filter, sort.dir, sortCol, bomChips, indexes]);
+  }, [lines, changes, diffActive, filter, sort.dir, sortCol, bomChips, indexes, cols]);
 
   // Open/unaddressed BOM comments keyed by their anchored designator, scoped to the
   // active review session (mirrors the canvas chip filter in CommentBridge: resolved and
@@ -327,8 +322,20 @@ export function BomTab() {
   const rowIndex = useMemo(() => {
     const m = new Map<string, number>();
     rows.forEach((r, i) => {
-      for (const k of [r.key, r.line.designators[0]]) if (k && !m.has(k)) m.set(k, i);
+      for (const k of [r.key, ...r.line.designators]) if (k && !m.has(k)) m.set(k, i);
     });
+    return m;
+  }, [rows]);
+
+  /** Designator → the key its row is registered under in rowRefs (diff key or first
+   *  designator), so any designator of a grouped line can reach the mounted row. */
+  const refKeyByDesignator = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const r of rows) {
+      const k = r.key || r.line.designators[0];
+      if (!k) continue;
+      for (const d of r.line.designators) if (!m.has(d)) m.set(d, k);
+    }
     return m;
   }, [rows]);
 
@@ -375,7 +382,8 @@ export function BomTab() {
   // when the row is off-screen (clicking a row sets selection; don't jerk the table).
   useEffect(() => {
     if (selection?.kind !== "comp" || typeof selection.ref !== "string") return;
-    const row = rowRefs.current.get(selection.ref);
+    const refKey = refKeyByDesignator.get(selection.ref) ?? selection.ref;
+    const row = rowRefs.current.get(refKey);
     if (row) {
       const scroller = row.closest(".bom-scroll");
       if (scroller) {
@@ -494,13 +502,13 @@ export function BomTab() {
         );
       case "item":
         return (
-          <td key={col.id} className="mono dim" onContextMenu={(e) => openCellMenu(e, r, col)}>
+          <td key={col.id} className="dim" onContextMenu={(e) => openCellMenu(e, r, col)}>
             {r.synthetic ? "—" : l.item}
           </td>
         );
       case "qty":
         return (
-          <td key={col.id} className="mono" onContextMenu={(e) => openCellMenu(e, r, col)}>
+          <td key={col.id} onContextMenu={(e) => openCellMenu(e, r, col)}>
             {wasCell(old.qty, l.qty)}
           </td>
         );
@@ -538,7 +546,7 @@ export function BomTab() {
         );
       case "mpn":
         return (
-          <td key={col.id} className="mono" onContextMenu={(e) => openCellMenu(e, r, col)}>
+          <td key={col.id} onContextMenu={(e) => openCellMenu(e, r, col)}>
             {wasCell(old.mpn, l.mpn || indexes?.components[l.designators[0] ?? ""]?.mpn || "")}
           </td>
         );
@@ -562,7 +570,7 @@ export function BomTab() {
       <div className="bom-bar">
         <input
           className="bom-filter"
-          placeholder="Filter — designator, value, footprint, MPN"
+          placeholder="Filter rows"
           value={filter}
           onChange={(e) => setFilter(e.target.value)}
           spellCheck={false}
