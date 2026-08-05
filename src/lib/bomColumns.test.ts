@@ -41,6 +41,7 @@ describe("presetColumns", () => {
     fields,
     sort_field: "",
     sort_asc: true,
+    is_project_default: false,
     exclude_dnp: false,
     group_symbols: true,
   });

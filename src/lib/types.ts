@@ -188,6 +188,9 @@ export interface BomPreset {
   sort_asc: boolean;
   exclude_dnp: boolean;
   group_symbols: boolean;
+  /** True for the entry built from the project's live `bom_settings` — the column set
+   *  KiCad currently has selected, used as the default until the user picks one. */
+  is_project_default: boolean;
 }
 
 /** Keyboard-shortcut preset. KiCad is the only preset today; kept as a

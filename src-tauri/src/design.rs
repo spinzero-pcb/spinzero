@@ -683,6 +683,9 @@ pub struct BomPreset {
     pub sort_asc: bool,
     pub exclude_dnp: bool,
     pub group_symbols: bool,
+    /// True for the entry built from the live `schematic.bom_settings` block — the column
+    /// set KiCad itself currently has selected for this project.
+    pub is_project_default: bool,
 }
 
 /// Parse one `bom_settings`/preset object. `None` when it carries no `fields_ordered`
@@ -721,6 +724,7 @@ fn parse_bom_preset(v: &Value, fallback_name: &str) -> Option<BomPreset> {
         sort_asc: v.get("sort_asc").and_then(|s| s.as_bool()).unwrap_or(true),
         exclude_dnp: v.get("exclude_dnp").and_then(|s| s.as_bool()).unwrap_or(false),
         group_symbols: v.get("group_symbols").and_then(|s| s.as_bool()).unwrap_or(true),
+        is_project_default: false,
     })
 }
 
@@ -734,7 +738,11 @@ fn bom_presets_from_pro(pro: &Value) -> Vec<BomPreset> {
     };
     let mut out = Vec::new();
     let settings = sch.get("bom_settings");
-    if let Some(p) = settings.and_then(|s| parse_bom_preset(s, "Project")) {
+    if let Some(mut p) = settings.and_then(|s| parse_bom_preset(s, "Project")) {
+        // KiCad records "which preset is selected" only as this live block (its `name` is
+        // the preset it was applied from, empty when the user customised it), so this is
+        // the project's default column set.
+        p.is_project_default = true;
         out.push(p);
     }
     let named = sch
@@ -891,10 +899,12 @@ mod tests {
         assert_eq!(project.fields[1].label, "Qty");
         assert_eq!(project.fields[3].label, "Automotive Grade");
         assert!(!project.fields[3].show);
+        assert!(project.is_project_default, "live bom_settings is the project default");
 
         let named = &presets[1];
         assert_eq!(named.name, "manufacturing_bom");
         assert!(!named.sort_asc && named.exclude_dnp && !named.group_symbols);
+        assert!(!named.is_project_default, "named presets are not the default");
 
         // Legacy shape: presets nested under bom_settings.
         let nested: Value = serde_json::from_str(

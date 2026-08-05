@@ -27,10 +27,11 @@ function loadBomChips(): BomChips {
 }
 
 /** BOM table layout the user picked: the active KiCad BOM preset ("" = the built-in
- *  Default column set), which columns they hid per preset, and the sort. Persisted in the
- *  same localStorage tier as bomChips. */
+ *  Default column set, null = never chose one, so the project's own default wins), which
+ *  columns they hid per preset, and the sort. Persisted in the same localStorage tier as
+ *  bomChips. */
 export interface BomLayout {
-  preset: string;
+  preset: string | null;
   /** preset name ("" for Default) → hidden column ids. */
   hidden: Record<string, string[]>;
   sort: { key: string; dir: 1 | -1 } | null;
@@ -39,7 +40,7 @@ export interface BomLayout {
 const BOM_LAYOUT_KEY = "bom.layout";
 
 function loadBomLayout(): BomLayout {
-  const empty: BomLayout = { preset: "", hidden: {}, sort: null };
+  const empty: BomLayout = { preset: null, hidden: {}, sort: null };
   try {
     const raw = localStorage.getItem(BOM_LAYOUT_KEY);
     if (!raw) return empty;
@@ -54,7 +55,9 @@ function loadBomLayout(): BomLayout {
       p?.sort && typeof p.sort.key === "string" && (p.sort.dir === 1 || p.sort.dir === -1)
         ? { key: p.sort.key, dir: p.sort.dir }
         : null;
-    return { preset: typeof p?.preset === "string" ? p.preset : "", hidden, sort };
+    // A layout written before presets existed (or by a hide/sort save) has no preset
+    // string: treat that as "never chose" so the project's default can apply.
+    return { preset: typeof p?.preset === "string" ? p.preset : null, hidden, sort };
   } catch {
     return empty;
   }

@@ -162,8 +162,15 @@ export function BomTab() {
   }, [indexes]);
 
   // "" = the built-in Default set. A remembered preset that this project doesn't have
-  // (the user switched projects) falls back to Default without complaining.
-  const presetName = presets.some((p) => p.name === bomLayout.preset) ? bomLayout.preset : "";
+  // (the user switched projects) falls back to Default without complaining. Until the user
+  // picks one (preset === null), the project's own KiCad selection wins.
+  const projectDefault = presets.find((p) => p.is_project_default)?.name ?? "";
+  const presetName =
+    bomLayout.preset === null
+      ? projectDefault
+      : presets.some((p) => p.name === bomLayout.preset)
+        ? bomLayout.preset
+        : "";
   const activePreset = presets.find((p) => p.name === presetName);
 
   /** Every column of the active set (before the user's hide list), Δ first in diff mode. */
