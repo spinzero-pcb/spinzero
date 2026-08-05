@@ -188,6 +188,21 @@ export function BomTab() {
     };
   }, []);
 
+  // Reverse cross-probe: canvas selection scrolls its BOM row into view, but only
+  // when the row is off-screen (clicking a row sets selection; don't jerk the table).
+  useEffect(() => {
+    if (selection?.kind !== "comp" || typeof selection.ref !== "string") return;
+    const row = rowRefs.current.get(selection.ref);
+    if (!row) return;
+    const scroller = row.closest(".bom-scroll");
+    if (scroller) {
+      const r = row.getBoundingClientRect();
+      const s = scroller.getBoundingClientRect();
+      if (r.top >= s.top && r.bottom <= s.bottom) return;
+    }
+    row.scrollIntoView({ block: "center", behavior: "smooth" });
+  }, [selection]);
+
   function clickHeader(key: SortKey) {
     setSort((s) => (s.key === key ? { key, dir: s.dir === 1 ? -1 : 1 } : { key, dir: 1 }));
   }
@@ -362,7 +377,7 @@ export function BomTab() {
                   )}
                   <td className="mono dim">{r.synthetic ? "—" : l.item}</td>
                   <td className="mono">{l.qty}</td>
-                  <td className="mono bom-dsg">
+                  <td className="bom-dsg">
                     {diffActive && r.status
                       ? l.designators.map((d) => (
                           <button
