@@ -1682,6 +1682,44 @@ button {
   border-color: var(--accent);
 }
 
+/* Preset (column-set) picker — same shape as the review panel's selects. */
+.bom-select {
+  flex: none;
+  max-width: 180px;
+  background: var(--bg-2);
+  color: var(--fg-1);
+  border: 1px solid var(--border-1);
+  border-radius: var(--radius-1);
+  padding: 2px var(--sp-1);
+  font: inherit;
+  font-size: var(--fs-0);
+}
+
+/* Column chooser: a small checklist popover anchored under the "Columns" button. */
+.bom-colmenu-backdrop { position: fixed; inset: 0; z-index: 60; }
+.bom-colmenu {
+  position: fixed;
+  min-width: 160px;
+  max-height: 60vh;
+  overflow: auto;
+  padding: var(--sp-1);
+  background: var(--bg-1);
+  border: 1px solid var(--border-1);
+  border-radius: var(--radius-1);
+  box-shadow: 0 6px 20px rgb(0 0 0 / 35%);
+}
+.bom-colmenu-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+  padding: 3px var(--sp-1);
+  font-size: var(--fs-0);
+  color: var(--fg-1);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.bom-colmenu-row:hover { background: var(--bg-2); }
+
 .bom-scroll { flex: 1; overflow: auto; }
 
 .bom-table {
@@ -1718,6 +1756,19 @@ button {
 .bom-table tbody tr { cursor: pointer; }
 .bom-table tbody tr:hover { background: var(--bg-2); }
 .bom-table tbody tr.active { background: var(--accent-dim); }
+
+/* Windowed mode (long BOMs): rows must be exactly ROW_H tall in BomTab.tsx, so the
+   spacer arithmetic lands on the right offsets — cells stay on one line. */
+.bom-table.virt tbody tr { height: 26px; }
+.bom-table.virt tbody td {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 320px;
+}
+.bom-table tbody tr.bom-spacer { height: auto; cursor: default; background: none; }
+.bom-table tbody tr.bom-spacer:hover { background: none; }
+.bom-table tbody tr.bom-spacer td { padding: 0; border: 0; }
 
 .bom-dsg { max-width: 320px; word-break: break-word; }
 /* Populated vs DNP separates by brightness alone (feedback: lift the populated cells

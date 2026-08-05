@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { ipc } from "../lib/ipc";
 import { useDesignStore } from "../stores/designStore";
 import { useSelectionStore } from "../stores/selectionStore";
@@ -22,7 +22,14 @@ import {
   bomOldValues,
   type DiffBomRow,
 } from "../lib/bomDiff";
-import type { BomLine } from "../lib/types";
+import {
+  DEFAULT_COLS,
+  STATUS_COL,
+  customFieldValue,
+  presetColumns,
+  type BomCol,
+} from "../lib/bomColumns";
+import type { BomLine, BomPreset } from "../lib/types";
 import type { Change } from "../lib/diff";
 
 /** Cell content in diff mode: "old → new" with the old value dimmed, or just the
@@ -49,21 +56,49 @@ function wasCell(old: string | number | undefined, now: string | number) {
 // per-row designator chips that link to the underlying component changes. The
 // Changes panel steps into the table via bomNav (row scroll + flash).
 
-type SortKey = "status" | "item" | "qty" | "designators" | "value" | "footprint" | "mpn" | "dnp";
-
-const COLS: { key: SortKey; label: string; diffOnly?: boolean }[] = [
-  { key: "status", label: "Δ", diffOnly: true },
-  { key: "item", label: "Item" },
-  { key: "qty", label: "Qty" },
-  { key: "designators", label: "Designators" },
-  { key: "value", label: "Value" },
-  { key: "footprint", label: "Footprint" },
-  { key: "mpn", label: "MPN" },
-  { key: "dnp", label: "DNP" },
-];
+// Column sets come from src/lib/bomColumns: the built-in "Default" set, or the visible
+// fields of a KiCad BOM preset read out of the project (custom columns land in line.fields).
+//
+// Long BOMs are windowed by hand (no dependency): fixed row height, spacer rows top and
+// bottom, only the visible slice ± overscan mounted. Short ones render whole.
+const ROW_H = 26;
+const OVERSCAN = 10;
+const VIRT_MIN = 100;
 
 const STATUS_LABEL = { added: "Added", removed: "Removed", changed: "Changed" } as const;
 const STATUS_ROLE = { added: "ok", removed: "err", changed: "warn" } as const;
+
+/** Plain-text value of one cell, taken from the row data (not the DOM) so diff
+ *  decoration / chips / badges don't leak into the clipboard or the sort. Custom preset
+ *  columns read line.fields; `mpnFallback` supplies the component-index MPN. */
+function cellText(
+  r: DiffBomRow,
+  col: BomCol | undefined,
+  mpnFallback: (designator: string) => string,
+): string {
+  if (!col) return "";
+  const l = r.line;
+  switch (col.builtin) {
+    case "status":
+      return r.status ? STATUS_LABEL[r.status] : "";
+    case "item":
+      return r.synthetic ? "—" : String(l.item);
+    case "qty":
+      return String(l.qty);
+    case "designators":
+      return l.designators.join(", ");
+    case "mpn":
+      return l.mpn || mpnFallback(l.designators[0] ?? "") || "";
+    case "dnp":
+      return l.dnp ? "DNP" : "";
+    case "value":
+      return l.value;
+    case "footprint":
+      return l.footprint;
+    default:
+      return col.field ? customFieldValue(l, col.field, col.label) : "";
+  }
+}
 
 export function BomTab() {
   const indexes = useDesignStore((s) => s.indexes);
@@ -72,6 +107,10 @@ export function BomTab() {
   const setView = useViewStore((s) => s.setView);
   const bomChips = useViewStore((s) => s.bomChips);
   const toggleBomChip = useViewStore((s) => s.toggleBomChip);
+  const bomLayout = useViewStore((s) => s.bomLayout);
+  const setBomPreset = useViewStore((s) => s.setBomPreset);
+  const toggleBomColumn = useViewStore((s) => s.toggleBomColumn);
+  const setBomSort = useViewStore((s) => s.setBomSort);
   const diffActive = useDiffStore((s) => s.active);
   const diffDoc = useDiffStore((s) => s.doc);
   const focusChange = useDiffStore((s) => s.focusChange);
@@ -82,11 +121,15 @@ export function BomTab() {
   const comments = useReviewStore((s) => s.comments);
   const activeSessionId = useReviewStore((s) => s.activeSessionId);
   const [lines, setLines] = useState<BomLine[] | null>(null);
+  const [presets, setPresets] = useState<BomPreset[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState("");
-  const [sort, setSort] = useState<{ key: SortKey; dir: 1 | -1 }>({ key: "item", dir: 1 });
+  const [sort, setSort] = useState<{ key: string; dir: 1 | -1 }>(
+    () => bomLayout.sort ?? { key: "item", dir: 1 },
+  );
   const [flashKey, setFlashKey] = useState<string | null>(null);
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null);
+  const [colMenu, setColMenu] = useState<{ x: number; y: number } | null>(null);
 
   // Re-fetch per revision: `indexes` is replaced on every design reload, and diff
   // mode pins the active revision to B — so the table always shows the B-side BOM.
@@ -101,11 +144,57 @@ export function BomTab() {
     };
   }, [indexes]);
 
+  // The project's KiCad BOM presets (column sets). Purely additive: a project without
+  // them — or a backend that errors — just leaves the "Default" set selected.
+  useEffect(() => {
+    let cancelled = false;
+    ipc
+      .getBomPresets()
+      .then((p) => !cancelled && setPresets(Array.isArray(p) ? p : []))
+      .catch((e) => {
+        if (cancelled) return;
+        console.warn("BOM presets unavailable; using the default columns", e);
+        setPresets([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [indexes]);
+
+  // "" = the built-in Default set. A remembered preset that this project doesn't have
+  // (the user switched projects) falls back to Default without complaining.
+  const presetName = presets.some((p) => p.name === bomLayout.preset) ? bomLayout.preset : "";
+  const activePreset = presets.find((p) => p.name === presetName);
+
+  /** Every column of the active set (before the user's hide list), Δ first in diff mode. */
+  const allCols = useMemo<BomCol[]>(() => {
+    const base = activePreset ? presetColumns(activePreset) : DEFAULT_COLS;
+    const cols = base.length > 0 ? base : DEFAULT_COLS;
+    return diffActive ? [STATUS_COL, ...cols] : cols;
+  }, [activePreset, diffActive]);
+
+  const hidden = bomLayout.hidden[presetName] ?? [];
+  const cols = useMemo(
+    () => allCols.filter((c) => c.id === "status" || !hidden.includes(c.id)),
+    [allCols, hidden],
+  );
+
   // Entering diff mode defaults to changes-first ("status"); leaving restores Item.
   // The user's own header clicks still win afterwards (this only fires on the flip).
+  // The first run is skipped so the persisted sort survives a remount.
+  const firstDiffFlip = useRef(true);
   useEffect(() => {
+    if (firstDiffFlip.current) {
+      firstDiffFlip.current = false;
+      return;
+    }
     setSort(diffActive ? { key: "status", dir: 1 } : { key: "item", dir: 1 });
   }, [diffActive]);
+
+  // A persisted sort column can vanish (preset switch, column hidden) — fall back to the
+  // first live column rather than silently sorting on nothing.
+  const sortKey = cols.some((c) => c.id === sort.key) ? sort.key : (cols[0]?.id ?? "item");
+  const sortCol = cols.find((c) => c.id === sortKey);
 
   const changes = useMemo(
     () => (diffActive && diffDoc ? bomChanges(diffDoc.changes) : []),
@@ -147,17 +236,21 @@ export function BomTab() {
       if (changedOnly && !r.status) return false;
       return true;
     });
-    const { key, dir } = sort;
+    const dir = sort.dir;
+    const mpnFallback = (d: string) => indexes?.components[d]?.mpn ?? "";
     return [...filtered].sort((a, b) => {
-      if (key === "status") return changesFirstCompare(a, b) * dir;
-      const va = key === "designators" ? a.line.designators[0] ?? "" : a.line[key];
-      const vb = key === "designators" ? b.line.designators[0] ?? "" : b.line[key];
-      if (typeof va === "number" && typeof vb === "number") return (va - vb) * dir;
-      if (typeof va === "boolean" && typeof vb === "boolean")
-        return (Number(va) - Number(vb)) * dir;
-      return String(va).localeCompare(String(vb), undefined, { numeric: true }) * dir;
+      if (sortCol?.builtin === "status") return changesFirstCompare(a, b) * dir;
+      if (sortCol?.builtin === "designators")
+        return (
+          (a.line.designators[0] ?? "").localeCompare(b.line.designators[0] ?? "", undefined, {
+            numeric: true,
+          }) * dir
+        );
+      const va = cellText(a, sortCol, mpnFallback);
+      const vb = cellText(b, sortCol, mpnFallback);
+      return va.localeCompare(vb, undefined, { numeric: true }) * dir;
     });
-  }, [lines, changes, diffActive, filter, sort, bomChips, indexes]);
+  }, [lines, changes, diffActive, filter, sort.dir, sortCol, bomChips, indexes]);
 
   // Open/unaddressed BOM comments keyed by their anchored designator, scoped to the
   // active review session (mirrors the canvas chip filter in CommentBridge: resolved and
@@ -203,6 +296,61 @@ export function BomTab() {
     useReviewStore.getState().openThread(id, { x: e.clientX + 12, y: e.clientY });
   }
 
+  // ---- windowing ---------------------------------------------------------------
+  // Only long BOMs are virtualized; under VIRT_MIN rows everything renders (a short
+  // table shouldn't pay for spacer arithmetic, and row heights can stay natural).
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const headRef = useRef<HTMLTableSectionElement>(null);
+  const [scrollTop, setScrollTop] = useState(0);
+  const [viewportH, setViewportH] = useState(600);
+  const virt = rows.length > VIRT_MIN;
+
+  useLayoutEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    setViewportH(el.clientHeight);
+    const ro = new ResizeObserver(() => setViewportH(el.clientHeight));
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  const headH = headRef.current?.offsetHeight ?? ROW_H;
+  const firstVisible = virt ? Math.floor(Math.max(0, scrollTop - headH) / ROW_H) : 0;
+  const start = virt ? Math.max(0, firstVisible - OVERSCAN) : 0;
+  const end = virt
+    ? Math.min(rows.length, firstVisible + Math.ceil(viewportH / ROW_H) + OVERSCAN)
+    : rows.length;
+  const windowRows = virt ? rows.slice(start, end) : rows;
+
+  /** Row index by lookup key (diff row key + first designator), so a scroll target that
+   *  is currently outside the window can still be reached — by scrollTop, not by DOM. */
+  const rowIndex = useMemo(() => {
+    const m = new Map<string, number>();
+    rows.forEach((r, i) => {
+      for (const k of [r.key, r.line.designators[0]]) if (k && !m.has(k)) m.set(k, i);
+    });
+    return m;
+  }, [rows]);
+
+  // Latest values for the imperative scroll helper, which lives in a mount-only effect.
+  const scrollState = useRef({ rowIndex, virt, headH });
+  scrollState.current = { rowIndex, virt, headH };
+
+  /** Centre the row for `key`: scrollIntoView when it is mounted, otherwise compute its
+   *  offset from the fixed row height (windowed rows may not exist in the DOM yet). */
+  function scrollToKey(key: string, smooth = false) {
+    const el = rowRefs.current.get(key);
+    if (el) {
+      el.scrollIntoView({ block: "center", behavior: smooth ? "smooth" : "auto" });
+      return;
+    }
+    const { rowIndex: idx, virt: on, headH: h } = scrollState.current;
+    const i = idx.get(key);
+    const sc = scrollRef.current;
+    if (!on || i === undefined || !sc) return;
+    sc.scrollTop = Math.max(0, h + i * ROW_H - sc.clientHeight / 2);
+  }
+
   // Stepper landing (bomNav): scroll the row into view and flash it. Registered
   // while mounted; a flash requested during the view switch is queued by the bridge.
   const rowRefs = useRef<Map<string, HTMLTableRowElement>>(new Map());
@@ -212,7 +360,7 @@ export function BomTab() {
       setFlashKey(null); // restart the CSS animation even for the same row
       requestAnimationFrame(() => {
         setFlashKey(key);
-        rowRefs.current.get(key)?.scrollIntoView({ block: "center" });
+        scrollToKey(key);
       });
       if (flashTimer.current) window.clearTimeout(flashTimer.current);
       flashTimer.current = window.setTimeout(() => setFlashKey(null), 1600);
@@ -228,18 +376,26 @@ export function BomTab() {
   useEffect(() => {
     if (selection?.kind !== "comp" || typeof selection.ref !== "string") return;
     const row = rowRefs.current.get(selection.ref);
-    if (!row) return;
-    const scroller = row.closest(".bom-scroll");
-    if (scroller) {
-      const r = row.getBoundingClientRect();
-      const s = scroller.getBoundingClientRect();
-      if (r.top >= s.top && r.bottom <= s.bottom) return;
+    if (row) {
+      const scroller = row.closest(".bom-scroll");
+      if (scroller) {
+        const r = row.getBoundingClientRect();
+        const s = scroller.getBoundingClientRect();
+        if (r.top >= s.top && r.bottom <= s.bottom) return;
+      }
+      row.scrollIntoView({ block: "center", behavior: "smooth" });
+      return;
     }
-    row.scrollIntoView({ block: "center", behavior: "smooth" });
+    // Off-window (virtualized): jump by index instead. No-op if the ref has no row.
+    scrollToKey(selection.ref, true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selection]);
 
-  function clickHeader(key: SortKey) {
-    setSort((s) => (s.key === key ? { key, dir: s.dir === 1 ? -1 : 1 } : { key, dir: 1 }));
+  function clickHeader(key: string) {
+    const next: { key: string; dir: 1 | -1 } =
+      sort.key === key ? { key, dir: sort.dir === 1 ? -1 : 1 } : { key, dir: 1 };
+    setSort(next);
+    setBomSort(next);
   }
 
   async function copyDeltaCsv() {
@@ -259,29 +415,8 @@ export function BomTab() {
     }
   }
 
-  /** Plain-text value of one cell, taken from the row data (not the DOM) so diff
-   *  decoration / chips / badges don't leak into the clipboard. */
-  function cellText(r: DiffBomRow, key: SortKey): string {
-    const l = r.line;
-    switch (key) {
-      case "item":
-        return r.synthetic ? "—" : String(l.item);
-      case "qty":
-        return String(l.qty);
-      case "designators":
-        return l.designators.join(", ");
-      case "mpn":
-        return l.mpn || indexes?.components[l.designators[0] ?? ""]?.mpn || "";
-      case "dnp":
-        return l.dnp ? "DNP" : "";
-      case "value":
-        return l.value;
-      case "footprint":
-        return l.footprint;
-      default:
-        return "";
-    }
-  }
+  const text = (r: DiffBomRow, col: BomCol | undefined) =>
+    cellText(r, col, (d) => indexes?.components[d]?.mpn ?? "");
 
   async function copyText(text: string) {
     try {
@@ -297,10 +432,10 @@ export function BomTab() {
 
   /** Right-click on a data cell: copy this cell, the row (visible columns,
    *  tab-separated) or the column across all currently visible rows. */
-  function openCellMenu(e: React.MouseEvent, r: DiffBomRow, key: SortKey) {
+  function openCellMenu(e: React.MouseEvent, r: DiffBomRow, col: BomCol) {
     e.preventDefault();
     e.stopPropagation();
-    const copyKeys = cols.filter((c) => c.key !== "status").map((c) => c.key);
+    const copyCols = cols.filter((c) => c.builtin !== "status");
     setCtxMenu({
       x: e.clientX,
       y: e.clientY,
@@ -308,17 +443,17 @@ export function BomTab() {
         {
           label: "Copy cell",
           icon: <IconCopy size={14} />,
-          onClick: () => void copyText(cellText(r, key)),
+          onClick: () => void copyText(text(r, col)),
         },
         {
           label: "Copy row",
           icon: <IconCopy size={14} />,
-          onClick: () => void copyText(copyKeys.map((k) => cellText(r, k)).join("\t")),
+          onClick: () => void copyText(copyCols.map((c) => text(r, c)).join("\t")),
         },
         {
           label: "Copy column",
           icon: <IconCopy size={14} />,
-          onClick: () => void copyText(rows.map((row) => cellText(row, key)).join("\n")),
+          onClick: () => void copyText(rows.map((row) => text(row, col)).join("\n")),
         },
       ],
     });
@@ -340,8 +475,87 @@ export function BomTab() {
     nav.goComp(d);
   }
 
-  const cols = COLS.filter((c) => !c.diffOnly || diffActive);
   const changedCount = rows.filter((r) => r.status).length;
+
+  /** One data cell. Diff decoration (old → new, designator chips) stays attached to the
+   *  built-in columns wherever the active preset happens to place them. */
+  function renderCell(r: DiffBomRow, col: BomCol, old: ReturnType<typeof bomOldValues>) {
+    const l = r.line;
+    switch (col.builtin) {
+      case "status":
+        return (
+          <td key={col.id} className="bom-status-cell">
+            {r.status && (
+              <span className={`bom-status bom-status-${STATUS_ROLE[r.status]}`}>
+                {STATUS_LABEL[r.status]}
+              </span>
+            )}
+          </td>
+        );
+      case "item":
+        return (
+          <td key={col.id} className="mono dim" onContextMenu={(e) => openCellMenu(e, r, col)}>
+            {r.synthetic ? "—" : l.item}
+          </td>
+        );
+      case "qty":
+        return (
+          <td key={col.id} className="mono" onContextMenu={(e) => openCellMenu(e, r, col)}>
+            {wasCell(old.qty, l.qty)}
+          </td>
+        );
+      case "designators":
+        return (
+          <td key={col.id} className="bom-dsg" onContextMenu={(e) => openCellMenu(e, r, col)}>
+            {diffActive && r.status
+              ? l.designators.map((d) => (
+                  <button
+                    key={d}
+                    className="bom-dsg-chip"
+                    title={`Jump to ${d} (the underlying schematic/PCB change)`}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      goDesignator(d);
+                    }}
+                  >
+                    {d}
+                  </button>
+                ))
+              : l.designators.join(", ")}
+          </td>
+        );
+      case "value":
+        return (
+          <td key={col.id} onContextMenu={(e) => openCellMenu(e, r, col)}>
+            {wasCell(old.value, l.value)}
+          </td>
+        );
+      case "footprint":
+        return (
+          <td key={col.id} className="dim" onContextMenu={(e) => openCellMenu(e, r, col)}>
+            {wasCell(old.footprint, l.footprint)}
+          </td>
+        );
+      case "mpn":
+        return (
+          <td key={col.id} className="mono" onContextMenu={(e) => openCellMenu(e, r, col)}>
+            {wasCell(old.mpn, l.mpn || indexes?.components[l.designators[0] ?? ""]?.mpn || "")}
+          </td>
+        );
+      case "dnp":
+        return (
+          <td key={col.id} onContextMenu={(e) => openCellMenu(e, r, col)}>
+            {l.dnp ? "DNP" : ""}
+          </td>
+        );
+      default:
+        return (
+          <td key={col.id} onContextMenu={(e) => openCellMenu(e, r, col)}>
+            {text(r, col)}
+          </td>
+        );
+    }
+  }
 
   return (
     <div className="bom-tab">
@@ -353,6 +567,31 @@ export function BomTab() {
           onChange={(e) => setFilter(e.target.value)}
           spellCheck={false}
         />
+        {presets.length > 0 && (
+          <select
+            className="bom-select"
+            value={presetName}
+            title="BOM column set — the project's KiCad BOM presets"
+            onChange={(e) => setBomPreset(e.target.value)}
+          >
+            <option value="">Default</option>
+            {presets.map((p) => (
+              <option key={p.name} value={p.name}>
+                {p.name}
+              </option>
+            ))}
+          </select>
+        )}
+        <button
+          className="btn-ghost bom-chip"
+          title="Show or hide individual columns"
+          onClick={(e) => {
+            const r = e.currentTarget.getBoundingClientRect();
+            setColMenu(colMenu ? null : { x: r.left, y: r.bottom + 4 });
+          }}
+        >
+          Columns ▾
+        </button>
         <button
           className={`btn-ghost bom-chip ${bomChips.dnpOnly ? "on" : ""}`}
           aria-pressed={bomChips.dnpOnly}
@@ -405,15 +644,19 @@ export function BomTab() {
       {!error && lines && lines.length === 0 && (
         <div className="bom-empty">The crunched bundle has no BOM.</div>
       )}
-      <div className="bom-scroll">
-        <table className={`bom-table ${armed ? "arming" : ""}`}>
-          <thead>
+      <div
+        className="bom-scroll"
+        ref={scrollRef}
+        onScroll={(e) => setScrollTop(e.currentTarget.scrollTop)}
+      >
+        <table className={`bom-table ${armed ? "arming" : ""} ${virt ? "virt" : ""}`}>
+          <thead ref={headRef}>
             <tr>
               <th className="bom-cmt-th" aria-hidden />
               {cols.map((c) => (
-                <th key={c.key} onClick={() => clickHeader(c.key)}>
+                <th key={c.id} onClick={() => clickHeader(c.id)}>
                   {c.label}
-                  {sort.key === c.key && (
+                  {sortKey === c.id && (
                     <span className="bom-sort-arrow">{sort.dir === 1 ? " ▲" : " ▼"}</span>
                   )}
                 </th>
@@ -421,7 +664,12 @@ export function BomTab() {
             </tr>
           </thead>
           <tbody>
-            {rows.map((r) => {
+            {start > 0 && (
+              <tr className="bom-spacer" style={{ height: start * ROW_H }} aria-hidden>
+                <td colSpan={cols.length + 1} />
+              </tr>
+            )}
+            {windowRows.map((r) => {
               const l = r.line;
               const first = l.designators[0];
               const active =
@@ -497,54 +745,40 @@ export function BomTab() {
                       )
                     )}
                   </td>
-                  {diffActive && (
-                    <td className="bom-status-cell">
-                      {r.status && (
-                        <span className={`bom-status bom-status-${STATUS_ROLE[r.status]}`}>
-                          {STATUS_LABEL[r.status]}
-                        </span>
-                      )}
-                    </td>
-                  )}
-                  <td className="mono dim" onContextMenu={(e) => openCellMenu(e, r, "item")}>
-                    {r.synthetic ? "—" : l.item}
-                  </td>
-                  <td className="mono" onContextMenu={(e) => openCellMenu(e, r, "qty")}>
-                    {wasCell(old.qty, l.qty)}
-                  </td>
-                  <td className="bom-dsg" onContextMenu={(e) => openCellMenu(e, r, "designators")}>
-                    {diffActive && r.status
-                      ? l.designators.map((d) => (
-                          <button
-                            key={d}
-                            className="bom-dsg-chip"
-                            title={`Jump to ${d} (the underlying schematic/PCB change)`}
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              goDesignator(d);
-                            }}
-                          >
-                            {d}
-                          </button>
-                        ))
-                      : l.designators.join(", ")}
-                  </td>
-                  <td onContextMenu={(e) => openCellMenu(e, r, "value")}>
-                    {wasCell(old.value, l.value)}
-                  </td>
-                  <td className="dim" onContextMenu={(e) => openCellMenu(e, r, "footprint")}>
-                    {wasCell(old.footprint, l.footprint)}
-                  </td>
-                  <td className="mono" onContextMenu={(e) => openCellMenu(e, r, "mpn")}>
-                    {wasCell(old.mpn, l.mpn || indexes?.components[first ?? ""]?.mpn || "")}
-                  </td>
-                  <td onContextMenu={(e) => openCellMenu(e, r, "dnp")}>{l.dnp ? "DNP" : ""}</td>
+                  {cols.map((c) => renderCell(r, c, old))}
                 </tr>
               );
             })}
+            {end < rows.length && (
+              <tr className="bom-spacer" style={{ height: (rows.length - end) * ROW_H }} aria-hidden>
+                <td colSpan={cols.length + 1} />
+              </tr>
+            )}
           </tbody>
         </table>
       </div>
+      {colMenu && (
+        <div className="bom-colmenu-backdrop" onPointerDown={() => setColMenu(null)}>
+          <div
+            className="bom-colmenu"
+            style={{ left: colMenu.x, top: colMenu.y }}
+            onPointerDown={(e) => e.stopPropagation()}
+          >
+            {allCols
+              .filter((c) => c.builtin !== "status")
+              .map((c) => (
+                <label key={c.id} className="bom-colmenu-row">
+                  <input
+                    type="checkbox"
+                    checked={!hidden.includes(c.id)}
+                    onChange={() => toggleBomColumn(presetName, c.id)}
+                  />
+                  {c.label}
+                </label>
+              ))}
+          </div>
+        </div>
+      )}
       {ctxMenu && <ContextMenu {...ctxMenu} onClose={() => setCtxMenu(null)} />}
     </div>
   );

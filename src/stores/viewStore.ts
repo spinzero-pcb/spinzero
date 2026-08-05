@@ -26,6 +26,48 @@ function loadBomChips(): BomChips {
   }
 }
 
+/** BOM table layout the user picked: the active KiCad BOM preset ("" = the built-in
+ *  Default column set), which columns they hid per preset, and the sort. Persisted in the
+ *  same localStorage tier as bomChips. */
+export interface BomLayout {
+  preset: string;
+  /** preset name ("" for Default) → hidden column ids. */
+  hidden: Record<string, string[]>;
+  sort: { key: string; dir: 1 | -1 } | null;
+}
+
+const BOM_LAYOUT_KEY = "bom.layout";
+
+function loadBomLayout(): BomLayout {
+  const empty: BomLayout = { preset: "", hidden: {}, sort: null };
+  try {
+    const raw = localStorage.getItem(BOM_LAYOUT_KEY);
+    if (!raw) return empty;
+    const p = JSON.parse(raw) as Partial<BomLayout>;
+    const hidden: Record<string, string[]> = {};
+    if (p?.hidden && typeof p.hidden === "object") {
+      for (const [k, v] of Object.entries(p.hidden)) {
+        if (Array.isArray(v)) hidden[k] = v.filter((x): x is string => typeof x === "string");
+      }
+    }
+    const sort =
+      p?.sort && typeof p.sort.key === "string" && (p.sort.dir === 1 || p.sort.dir === -1)
+        ? { key: p.sort.key, dir: p.sort.dir }
+        : null;
+    return { preset: typeof p?.preset === "string" ? p.preset : "", hidden, sort };
+  } catch {
+    return empty;
+  }
+}
+
+function saveBomLayout(layout: BomLayout) {
+  try {
+    localStorage.setItem(BOM_LAYOUT_KEY, JSON.stringify(layout));
+  } catch {
+    /* a full/blocked localStorage must never break the table */
+  }
+}
+
 // Which content fills the main area. The schematic canvas stays mounted across
 // view switches (display:none, not unmount) so its camera and highlight state
 // survive a round-trip through PCB/BOM.
@@ -40,6 +82,11 @@ interface ViewState {
   /** BOM tab quick-filter chips (persisted). */
   bomChips: BomChips;
   toggleBomChip: (chip: BomChip) => void;
+  /** BOM table preset / hidden columns / sort (persisted). */
+  bomLayout: BomLayout;
+  setBomPreset: (preset: string) => void;
+  toggleBomColumn: (preset: string, colId: string) => void;
+  setBomSort: (sort: { key: string; dir: 1 | -1 }) => void;
 }
 
 export const useViewStore = create<ViewState>((set) => ({
@@ -58,5 +105,29 @@ export const useViewStore = create<ViewState>((set) => ({
         /* a full/blocked localStorage must never break the toggle */
       }
       return { bomChips };
+    }),
+  bomLayout: loadBomLayout(),
+  setBomPreset: (preset) =>
+    set((s) => {
+      const bomLayout = { ...s.bomLayout, preset };
+      saveBomLayout(bomLayout);
+      return { bomLayout };
+    }),
+  toggleBomColumn: (preset, colId) =>
+    set((s) => {
+      const cur = s.bomLayout.hidden[preset] ?? [];
+      const next = cur.includes(colId) ? cur.filter((c) => c !== colId) : [...cur, colId];
+      const bomLayout = {
+        ...s.bomLayout,
+        hidden: { ...s.bomLayout.hidden, [preset]: next },
+      };
+      saveBomLayout(bomLayout);
+      return { bomLayout };
+    }),
+  setBomSort: (sort) =>
+    set((s) => {
+      const bomLayout = { ...s.bomLayout, sort };
+      saveBomLayout(bomLayout);
+      return { bomLayout };
     }),
 }));
