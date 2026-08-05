@@ -1530,44 +1530,6 @@ fn diff_bom(a: &Bundle, b: &Bundle, comps: &CompDelta, out: &mut Vec<Change>) {
     let la = bom_lines_of(&a.indexes.components, &rename);
     let lb = bom_lines_of(&b.indexes.components, &no_rename);
 
-    // --- designator moves between lines: a common part (post-rename identity) whose
-    // grouping key changed. When BOTH endpoint lines survive on both sides, the move
-    // is a reassignment between existing lines and gets its own row; otherwise a
-    // line-level row (fold / add / remove) explains it.
-    let mut movers: HashSet<String> = HashSet::new(); // refs explained by a move row
-    let mut move_rows: Vec<(String, String, String, String)> = Vec::new(); // (ref, from, to, toKey)
-    for (ra, ca) in &a.indexes.components {
-        let d = rename.get(ra.as_str()).copied().unwrap_or(ra.as_str());
-        let Some(cb) = b.indexes.components.get(d) else { continue };
-        let ka = bom_key(&ca.value, &ca.fp, &ca.mpn);
-        let kb = bom_key(&cb.value, &cb.fp, &cb.mpn);
-        if ka == kb {
-            continue;
-        }
-        if la.contains_key(&kb) && lb.contains_key(&ka) {
-            movers.insert(d.to_string());
-            move_rows.push((
-                d.to_string(),
-                bom_label(&ca.value, &ca.fp, &ca.mpn),
-                bom_label(&cb.value, &cb.fp, &cb.mpn),
-                kb,
-            ));
-        }
-    }
-    move_rows.sort();
-    for (d, from, to, to_key) in &move_rows {
-        let line = &lb[to_key];
-        let qty_a = la.get(to_key).map(|l| l.dsg.len() as i64).unwrap_or(0);
-        let anchors = bom_anchor(to_key, line, qty_a, line.dsg.len() as i64, vec![d.clone()], Vec::new());
-        out.push(bom_change(
-            Kind::Modified,
-            format!("BOM: {d} moved {from} → {to} line"),
-            String::new(),
-            Side::Both,
-            anchors,
-        ));
-    }
-
     // --- line-identity folds: an A-only key + a B-only key whose designator sets
     // overlap highly are ONE changed line (its value/fp/mpn migrated), not
     // remove+add. Best-Jaccard-first greedy pairing (same idiom as net renames).
@@ -1585,12 +1547,14 @@ fn diff_bom(a: &Bundle, b: &Bundle, comps: &CompDelta, out: &mut Vec<Change>) {
     candidates.sort();
     let mut consumed_a: HashSet<&String> = HashSet::new();
     let mut consumed_b: HashSet<&String> = HashSet::new();
+    let mut fold_pair: HashMap<String, String> = HashMap::new(); // A-key → its folded B-key
     for (_, ka, kb) in &candidates {
         if consumed_a.contains(ka) || consumed_b.contains(kb) {
             continue;
         }
         consumed_a.insert(ka);
         consumed_b.insert(kb);
+        fold_pair.insert((*ka).clone(), (*kb).clone());
         let ga = &la[*ka];
         let gb = &lb[*kb];
         let mut bits: Vec<String> = Vec::new();
@@ -1622,12 +1586,69 @@ fn diff_bom(a: &Bundle, b: &Bundle, comps: &CompDelta, out: &mut Vec<Change>) {
         ));
     }
 
-    // --- genuine line adds/removes (not folded).
+    // --- designator moves between lines: a common part (post-rename identity) whose
+    // grouping key changed. Unless the line-identity fold above already explains it
+    // (the WHOLE line migrated: its A-key folded onto exactly this B-key), the part
+    // hopped lines and gets its own row — including when an endpoint line doesn't
+    // survive (a move onto a brand-new line, or out of a line that empties). The
+    // line add/remove and qty passes below then suppress what these rows explain.
+    let mut movers: HashSet<String> = HashSet::new(); // refs explained by a move row
+    // (ref, from, to, toKey, bits) — `bits` is the same "value A → B; MPN A → B"
+    // string the fold pass builds, so the title's from/to labels are never ambiguous
+    // (a pure MPN swap renders identical labels) and the frontend's inline old→new
+    // parsing (bomOldValues) lights up for the moved part too.
+    let mut move_rows: Vec<(String, String, String, String, String)> = Vec::new();
+    for (ra, ca) in &a.indexes.components {
+        let d = rename.get(ra.as_str()).copied().unwrap_or(ra.as_str());
+        let Some(cb) = b.indexes.components.get(d) else { continue };
+        let ka = bom_key(&ca.value, &ca.fp, &ca.mpn);
+        let kb = bom_key(&cb.value, &cb.fp, &cb.mpn);
+        if ka == kb || fold_pair.get(&ka) == Some(&kb) {
+            continue;
+        }
+        movers.insert(d.to_string());
+        let mut bits: Vec<String> = Vec::new();
+        if ca.value != cb.value {
+            bits.push(format!("value {} → {}", disp(&ca.value), disp(&cb.value)));
+        }
+        if ca.fp != cb.fp {
+            bits.push(format!("footprint {} → {}", disp(&ca.fp), disp(&cb.fp)));
+        }
+        if ca.mpn != cb.mpn {
+            bits.push(format!("MPN {} → {}", disp(&ca.mpn), disp(&cb.mpn)));
+        }
+        move_rows.push((
+            d.to_string(),
+            bom_label(&ca.value, &ca.fp, &ca.mpn),
+            bom_label(&cb.value, &cb.fp, &cb.mpn),
+            kb,
+            bits.join("; "),
+        ));
+    }
+    move_rows.sort();
+    for (d, from, to, to_key, bits) in &move_rows {
+        let line = &lb[to_key];
+        let qty_a = la.get(to_key).map(|l| l.dsg.len() as i64).unwrap_or(0);
+        let anchors = bom_anchor(to_key, line, qty_a, line.dsg.len() as i64, vec![d.clone()], Vec::new());
+        out.push(bom_change(
+            Kind::Modified,
+            format!("BOM: {d} moved {from} → {to} line"),
+            bits.clone(),
+            Side::Both,
+            anchors,
+        ));
+    }
+
+    // --- genuine line adds/removes (not folded, and not fully explained by moves:
+    // a line whose every designator moved in/out is already told by the move rows).
     for kb in &only_b {
         if consumed_b.contains(kb) {
             continue;
         }
         let line = &lb[*kb];
+        if line.dsg.iter().all(|d| movers.contains(d)) {
+            continue;
+        }
         let names: Vec<String> = line.dsg.iter().cloned().collect();
         let anchors = bom_anchor(kb, line, 0, names.len() as i64, names.clone(), Vec::new());
         out.push(bom_change(
@@ -1643,6 +1664,9 @@ fn diff_bom(a: &Bundle, b: &Bundle, comps: &CompDelta, out: &mut Vec<Change>) {
             continue;
         }
         let line = &la[*ka];
+        if line.dsg.iter().all(|d| movers.contains(d)) {
+            continue;
+        }
         let names: Vec<String> = line.dsg.iter().cloned().collect();
         let anchors = bom_anchor(ka, line, names.len() as i64, 0, Vec::new(), names.clone());
         out.push(bom_change(

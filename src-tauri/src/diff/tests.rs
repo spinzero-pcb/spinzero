@@ -1475,6 +1475,78 @@ fn bom_designator_move_between_surviving_lines() {
 }
 
 #[test]
+fn bom_mpn_change_on_one_of_many_is_one_move_row() {
+    // D10 shares a BOM line with D11/D12 and gets a new MPN: one user edit must read
+    // as ONE bom row (the move onto the new singleton line) — no "line added" plus
+    // "qty 3 → 2" pair.
+    let mut a = empty_indexes();
+    for d in ["D10", "D11", "D12"] {
+        a.components.insert(d.into(), comp_full("LED", "LED_0603", "OLD-1", 1, ""));
+    }
+    let mut b = empty_indexes();
+    b.components.insert("D10".into(), comp_full("LED", "LED_0603", "NEW-2", 1, ""));
+    for d in ["D11", "D12"] {
+        b.components.insert(d.into(), comp_full("LED", "LED_0603", "OLD-1", 1, ""));
+    }
+
+    let doc = diff_bundles(&bundle(a), &bundle(b), &no_source_diff());
+    let rows = bom_rows(&doc);
+    assert_eq!(rows.len(), 1, "one bom row for one edit: {rows:?}");
+    let c = rows[0];
+    assert!(c.title.contains("D10") && c.title.contains("moved"), "{}", c.title);
+    // The labels are identical for a pure MPN swap, so the detail must carry the
+    // distinguishing field — in the "MPN A → B" form bomOldValues parses inline.
+    assert_eq!(c.detail, "MPN OLD-1 → NEW-2");
+    // Anchored to the DESTINATION line with the moved ref in `added` (decorateBomRows).
+    let anch = c.anchors.bom.as_ref().expect("bom anchor");
+    assert_eq!(anch.mpn, "NEW-2");
+    assert_eq!(anch.added, vec!["D10".to_string()]);
+    assert_eq!((anch.qty_a, anch.qty_b), (0, 1));
+    // Exactly one schematic component row for the same edit.
+    assert_eq!(doc.changes.iter().filter(|c| c.group == Group::Component).count(), 1);
+}
+
+#[test]
+fn bom_move_out_of_emptying_line_is_one_row() {
+    // R1 (sole member of the 10k line) becomes 4k7: the source line empties, the
+    // destination already exists. One move row, no "line removed", no qty row.
+    let mut a = empty_indexes();
+    a.components.insert("R1".into(), comp("10k", "R_0402", false));
+    a.components.insert("R2".into(), comp("4k7", "R_0402", false));
+    let mut b = empty_indexes();
+    b.components.insert("R1".into(), comp("4k7", "R_0402", false));
+    b.components.insert("R2".into(), comp("4k7", "R_0402", false));
+
+    let doc = diff_bundles(&bundle(a), &bundle(b), &no_source_diff());
+    let rows = bom_rows(&doc);
+    assert_eq!(rows.len(), 1, "just the move: {rows:?}");
+    assert!(rows[0].title.contains("R1") && rows[0].title.contains("moved"), "{}", rows[0].title);
+    assert!(!rows.iter().any(|c| c.kind == Kind::Removed), "{rows:?}");
+}
+
+#[test]
+fn bom_mixed_added_line_keeps_its_add_row() {
+    // R2 hops onto a 4k7 line that ALSO gains a genuinely new part R9: the move row
+    // tells R2's story, and the "line added" row still reports the new line.
+    let mut a = empty_indexes();
+    a.components.insert("R1".into(), comp("10k", "R_0402", false));
+    a.components.insert("R2".into(), comp("10k", "R_0402", false));
+    let mut b = empty_indexes();
+    b.components.insert("R1".into(), comp("10k", "R_0402", false));
+    b.components.insert("R2".into(), comp("4k7", "R_0402", false));
+    b.components.insert("R9".into(), comp("4k7", "R_0402", false));
+
+    let doc = diff_bundles(&bundle(a), &bundle(b), &no_source_diff());
+    let rows = bom_rows(&doc);
+    assert_eq!(rows.len(), 2, "move + line added: {rows:?}");
+    assert!(rows.iter().any(|c| c.title.contains("R2") && c.title.contains("moved")), "{rows:?}");
+    let added = rows.iter().find(|c| c.kind == Kind::Added).expect("added line");
+    assert!(added.detail.contains("R9"), "{}", added.detail);
+    // The emptying-out 10k line's qty delta is fully explained by the move.
+    assert!(!rows.iter().any(|c| c.title.contains("qty")), "{rows:?}");
+}
+
+#[test]
 fn bom_dnp_flip_called_out() {
     let mut a = empty_indexes();
     a.components.insert("C2".into(), comp("100n", "C_0402", false));
