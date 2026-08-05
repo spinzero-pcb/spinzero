@@ -52,6 +52,8 @@ export function BomTab() {
   const selection = useSelectionStore((s) => s.selection);
   const setSelection = useSelectionStore((s) => s.setSelection);
   const setView = useViewStore((s) => s.setView);
+  const bomChips = useViewStore((s) => s.bomChips);
+  const toggleBomChip = useViewStore((s) => s.toggleBomChip);
   const diffActive = useDiffStore((s) => s.active);
   const diffDoc = useDiffStore((s) => s.doc);
   const focusChange = useDiffStore((s) => s.focusChange);
@@ -104,14 +106,26 @@ export function BomTab() {
             synthetic: false,
           }));
     const q = filter.trim().toLowerCase();
-    const filtered = q
-      ? decorated.filter((r) =>
-          [r.line.designators.join(","), r.line.value, r.line.footprint, r.line.mpn]
-            .join(" ")
-            .toLowerCase()
-            .includes(q),
-        )
-      : decorated;
+    // Chips AND-combine with each other and with the text filter. "Changed only" is
+    // inert outside diff mode even when its remembered state is on.
+    const changedOnly = diffActive && bomChips.changedOnly;
+    const filtered = decorated.filter((r) => {
+      if (
+        q &&
+        ![r.line.designators.join(","), r.line.value, r.line.footprint, r.line.mpn]
+          .join(" ")
+          .toLowerCase()
+          .includes(q)
+      )
+        return false;
+      if (bomChips.dnpOnly && !r.line.dnp) return false;
+      // The MPN cell falls back to the component index, so a row is only "missing"
+      // when both the BOM line and the indexed part carry nothing.
+      if (bomChips.missingMpn && (r.line.mpn || indexes?.components[r.line.designators[0] ?? ""]?.mpn))
+        return false;
+      if (changedOnly && !r.status) return false;
+      return true;
+    });
     const { key, dir } = sort;
     return [...filtered].sort((a, b) => {
       if (key === "status") return changesFirstCompare(a, b) * dir;
@@ -122,7 +136,7 @@ export function BomTab() {
         return (Number(va) - Number(vb)) * dir;
       return String(va).localeCompare(String(vb), undefined, { numeric: true }) * dir;
     });
-  }, [lines, changes, diffActive, filter, sort]);
+  }, [lines, changes, diffActive, filter, sort, bomChips, indexes]);
 
   // Open/unaddressed BOM comments keyed by their anchored designator, scoped to the
   // active review session (mirrors the canvas chip filter in CommentBridge: resolved and
@@ -253,6 +267,32 @@ export function BomTab() {
           onChange={(e) => setFilter(e.target.value)}
           spellCheck={false}
         />
+        <button
+          className={`btn-ghost bom-chip ${bomChips.dnpOnly ? "on" : ""}`}
+          aria-pressed={bomChips.dnpOnly}
+          title="Show only Do-Not-Populate lines"
+          onClick={() => toggleBomChip("dnpOnly")}
+        >
+          DNP only
+        </button>
+        <button
+          className={`btn-ghost bom-chip ${bomChips.missingMpn ? "on" : ""}`}
+          aria-pressed={bomChips.missingMpn}
+          title="Show only lines with no manufacturer part number"
+          onClick={() => toggleBomChip("missingMpn")}
+        >
+          Missing MPN
+        </button>
+        {diffActive && (
+          <button
+            className={`btn-ghost bom-chip ${bomChips.changedOnly ? "on" : ""}`}
+            aria-pressed={bomChips.changedOnly}
+            title="Show only lines affected by this comparison"
+            onClick={() => toggleBomChip("changedOnly")}
+          >
+            Changed only
+          </button>
+        )}
         <span className="bom-count">
           {rows.length} line{rows.length === 1 ? "" : "s"}
           {diffActive && changedCount > 0 ? ` · ${changedCount} affected` : ""}

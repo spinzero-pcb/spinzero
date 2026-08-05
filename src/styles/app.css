@@ -1668,6 +1668,20 @@ button {
 
 .bom-count { color: var(--fg-2); font-size: var(--fs-0); }
 
+/* Quick-filter chips: ghost pills that AND-combine with the text filter. */
+.bom-chip {
+  flex: none;
+  border-radius: 999px;
+  font-size: var(--fs-0);
+  white-space: nowrap;
+  color: var(--fg-2);
+}
+.bom-chip.on {
+  color: var(--accent);
+  background: var(--accent-dim);
+  border-color: var(--accent);
+}
+
 .bom-scroll { flex: 1; overflow: auto; }
 
 .bom-table {
