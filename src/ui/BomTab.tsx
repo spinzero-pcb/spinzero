@@ -498,11 +498,24 @@ export function BomTab() {
 
   // Reverse cross-probe: canvas selection scrolls its BOM row into view, but only
   // when the row is off-screen (clicking a row sets selection; don't jerk the table).
+  //
+  // The tab mounts fresh on every switch into it and its lines arrive asynchronously, so
+  // a selection made on the canvas is already set when this first runs, with no rows to
+  // scroll to yet. Hence `display` in the deps — the scroll is honoured as soon as the
+  // rows exist — and `honoured`, so it happens once per selection instead of on every
+  // later filter/expand that rebuilds the list under the same selected part.
+  const honoured = useRef<string | null>(null);
   useEffect(() => {
-    if (selection?.kind !== "comp" || typeof selection.ref !== "string") return;
-    const refKey = refKeyByDesignator.get(selection.ref) ?? selection.ref;
+    if (selection?.kind !== "comp" || typeof selection.ref !== "string") {
+      honoured.current = null;
+      return;
+    }
+    const ref = selection.ref;
+    if (honoured.current === ref || display.length === 0) return;
+    const refKey = refKeyByDesignator.get(ref) ?? ref;
     const row = rowRefs.current.get(refKey);
     if (row) {
+      honoured.current = ref;
       const scroller = row.closest(".bom-scroll");
       if (scroller) {
         const r = row.getBoundingClientRect();
@@ -512,10 +525,13 @@ export function BomTab() {
       row.scrollIntoView({ block: "center", behavior: "smooth" });
       return;
     }
-    // Off-window (virtualized): jump by index instead. No-op if the ref has no row.
-    scrollToKey(selection.ref, true);
+    // Off-window (virtualized): jump by index instead. A ref the current rows don't
+    // carry (filtered out) stays unhonoured, so clearing the filter still lands it.
+    if (rowIndex.get(ref) === undefined) return;
+    honoured.current = ref;
+    scrollToKey(ref, true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selection]);
+  }, [selection, display]);
 
   function clickHeader(key: string) {
     const next: { key: string; dir: 1 | -1 } =
