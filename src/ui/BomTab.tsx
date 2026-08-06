@@ -64,6 +64,11 @@ function wasCell(old: string | number | undefined, now: string | number) {
 const ROW_H = 26;
 const OVERSCAN = 10;
 const VIRT_MIN = 100;
+/** Narrowest a column can be dragged, so a mis-drag can't make one unclickable. */
+const MIN_COL_W = 40;
+/** Width for a column that appears after the table was sized (the diff-mode Δ column, a
+ *  column un-hidden later) — fixed layout would otherwise leave it degenerate. */
+const DEFAULT_COL_W = 120;
 
 const STATUS_LABEL = { added: "Added", removed: "Removed", changed: "Changed" } as const;
 const STATUS_ROLE = { added: "ok", removed: "err", changed: "warn" } as const;
@@ -117,6 +122,7 @@ export function BomTab() {
   const setBomPreset = useViewStore((s) => s.setBomPreset);
   const toggleBomColumn = useViewStore((s) => s.toggleBomColumn);
   const setBomSort = useViewStore((s) => s.setBomSort);
+  const setBomColWidths = useViewStore((s) => s.setBomColWidths);
   const diffActive = useDiffStore((s) => s.active);
   const diffDoc = useDiffStore((s) => s.doc);
   const focusChange = useDiffStore((s) => s.focusChange);
@@ -195,6 +201,47 @@ export function BomTab() {
     () => allCols.filter((c) => c.id === "status" || !hidden.includes(c.id)),
     [allCols, hidden],
   );
+
+  // ---- column widths -----------------------------------------------------------
+  // Per-preset and persisted. The table stays in auto layout until the user drags a
+  // header edge: the first drag freezes every column at its measured width and flips the
+  // table to fixed layout, so pulling one edge doesn't reflow the neighbours.
+  const [dragWidths, setDragWidths] = useState<Record<string, number> | null>(null);
+  const widths = dragWidths ?? bomLayout.widths[presetName] ?? {};
+  const sized = Object.keys(widths).length > 0;
+  const thRefs = useRef<Map<string, HTMLTableCellElement>>(new Map());
+  const drag = useRef<{ id: string; x: number; base: Record<string, number> } | null>(null);
+  const dragLive = useRef<Record<string, number> | null>(null);
+
+  function startResize(e: React.PointerEvent<HTMLSpanElement>, id: string) {
+    e.preventDefault();
+    e.stopPropagation();
+    const base: Record<string, number> = { ...widths };
+    for (const c of cols) {
+      if (base[c.id] === undefined)
+        base[c.id] = thRefs.current.get(c.id)?.offsetWidth ?? MIN_COL_W * 2;
+    }
+    drag.current = { id, x: e.clientX, base };
+    dragLive.current = base;
+    setDragWidths(base);
+    e.currentTarget.setPointerCapture(e.pointerId);
+  }
+
+  function moveResize(e: React.PointerEvent<HTMLSpanElement>) {
+    const d = drag.current;
+    if (!d) return;
+    const next = { ...d.base, [d.id]: Math.max(MIN_COL_W, d.base[d.id] + (e.clientX - d.x)) };
+    dragLive.current = next;
+    setDragWidths(next);
+  }
+
+  function endResize() {
+    if (!drag.current) return;
+    drag.current = null;
+    if (dragLive.current) setBomColWidths(presetName, dragLive.current);
+    dragLive.current = null;
+    setDragWidths(null);
+  }
 
   // Entering diff mode defaults to changes-first ("status"); leaving restores Item.
   // The user's own header clicks still win afterwards (this only fires on the flip).
@@ -747,16 +794,46 @@ export function BomTab() {
         ref={scrollRef}
         onScroll={(e) => setScrollTop(e.currentTarget.scrollTop)}
       >
-        <table className={`bom-table ${armed ? "arming" : ""} ${virt ? "virt" : ""}`}>
+        <table
+          className={`bom-table ${armed ? "arming" : ""} ${virt ? "virt" : ""} ${sized ? "sized" : ""}`}
+        >
+          <colgroup>
+            <col className="bom-cmt-col" />
+            {cols.map((c) => (
+              <col
+                key={c.id}
+                style={sized ? { width: widths[c.id] ?? DEFAULT_COL_W } : undefined}
+              />
+            ))}
+          </colgroup>
           <thead ref={headRef}>
             <tr>
               <th className="bom-cmt-th" aria-hidden />
               {cols.map((c) => (
-                <th key={c.id} onClick={() => clickHeader(c.id)}>
+                <th
+                  key={c.id}
+                  ref={(el) => {
+                    if (el) thRefs.current.set(c.id, el);
+                    else thRefs.current.delete(c.id);
+                  }}
+                  onClick={() => clickHeader(c.id)}
+                >
                   {c.label}
                   {sortKey === c.id && (
                     <span className="bom-sort-arrow">{sort.dir === 1 ? " ▲" : " ▼"}</span>
                   )}
+                  <span
+                    className="bom-col-resize"
+                    role="separator"
+                    aria-orientation="vertical"
+                    title={`Drag to resize the ${c.label} column`}
+                    onClick={(e) => e.stopPropagation()}
+                    onPointerDown={(e) => startResize(e, c.id)}
+                    onPointerMove={moveResize}
+                    onPointerUp={endResize}
+                    onPointerCancel={endResize}
+                    onLostPointerCapture={endResize}
+                  />
                 </th>
               ))}
             </tr>

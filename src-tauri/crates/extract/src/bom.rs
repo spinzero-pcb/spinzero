@@ -477,6 +477,70 @@ pub struct GroupedBom {
     lines: Vec<GroupedLine>,
 }
 
+/// Shown for a field whose members disagree inside one grouped line (KiCad's Symbol
+/// Fields Table shows a similar marker rather than an arbitrary member's value).
+pub const MIXED_VALUES: &str = "-- mixed values --";
+
+/// The per-line field map contributed by one component: its own symbol parameters plus
+/// the resolved sourcing fields (which take precedence).
+fn line_fields(c: &Component, mapping: &Mapping) -> BTreeMap<String, String> {
+    let mut fields = BTreeMap::new();
+    // Carry the symbol's own parameters so custom preset columns (MSL,
+    // Automotive Grade, …) have values; skip internal KiCad bookkeeping.
+    for (k, v) in &c.parameters {
+        if k.starts_with("kicad_") {
+            continue;
+        }
+        let v = clean(v);
+        if !v.is_empty() {
+            fields.insert(k.clone(), v.to_string());
+        }
+    }
+    fields.insert("value".into(), c.value.clone());
+    fields.insert("footprint".into(), c.footprint.clone());
+    fields.insert("description".into(), c.description.clone());
+    let mpn = mapping.value(Field::Mpn, c);
+    if !mpn.is_empty() {
+        fields.insert("manufacturer_part_number".into(), mpn);
+    }
+    let mfr = mapping.value(Field::Manufacturer, c);
+    if !mfr.is_empty() {
+        fields.insert("manufacturer".into(), mfr);
+    }
+    // Mirror the app's expectation: LCSC part lands as jlcpcb_part_number.
+    let lcsc = mapping.distributor_value("LCSC", c);
+    if !lcsc.is_empty() {
+        fields.insert("jlcpcb_part_number".into(), lcsc);
+    }
+    fields
+}
+
+/// Fold another member's fields into the line's: a field the two disagree on (including
+/// one carrying it and the other not) collapses to `MIXED_VALUES`. Comparison ignores
+/// case, so the case-insensitive grouping key can't make its own fields look mixed.
+fn merge_fields(into: &mut BTreeMap<String, String>, add: &BTreeMap<String, String>) {
+    for (k, v) in add {
+        match into.get(k) {
+            Some(cur) if cur == MIXED_VALUES || cur.eq_ignore_ascii_case(v) => {}
+            Some(_) => {
+                into.insert(k.clone(), MIXED_VALUES.into());
+            }
+            None => {
+                into.insert(k.clone(), MIXED_VALUES.into());
+            }
+        }
+    }
+    // Fields this member is missing entirely are mixed too.
+    let missing: Vec<String> = into
+        .keys()
+        .filter(|k| !add.contains_key(*k))
+        .cloned()
+        .collect();
+    for k in missing {
+        into.insert(k, MIXED_VALUES.into());
+    }
+}
+
 /// Build the grouped BOM for the app (groups by value/footprint/lib_ref/desc).
 pub fn build_grouped(components: &[Component], mapping: &Mapping, project_path: &str, stem: &str) -> GroupedBom {
     type Key = (String, String, String, String, String, bool);
@@ -496,46 +560,24 @@ pub fn build_grouped(components: &[Component], mapping: &Mapping, project_path: 
             mpn.to_lowercase(),
             dnp,
         );
-        let line = groups.entry(key).or_insert_with(|| {
-            let mut fields = BTreeMap::new();
-            // Carry the symbol's own parameters so custom preset columns (MSL,
-            // Automotive Grade, …) have values; skip internal KiCad bookkeeping.
-            // Resolved fields below intentionally take precedence.
-            for (k, v) in &c.parameters {
-                if k.starts_with("kicad_") {
-                    continue;
-                }
-                let v = clean(v);
-                if !v.is_empty() {
-                    fields.insert(k.clone(), v.to_string());
-                }
+        let fields = line_fields(c, mapping);
+        match groups.entry(key) {
+            std::collections::btree_map::Entry::Vacant(e) => {
+                e.insert(GroupedLine {
+                    item: 0,
+                    quantity: 1,
+                    designators: vec![c.designator.clone()],
+                    dnp,
+                    fields,
+                });
             }
-            fields.insert("value".into(), c.value.clone());
-            fields.insert("footprint".into(), c.footprint.clone());
-            fields.insert("description".into(), c.description.clone());
-            let mpn = mapping.value(Field::Mpn, c);
-            if !mpn.is_empty() {
-                fields.insert("manufacturer_part_number".into(), mpn);
+            std::collections::btree_map::Entry::Occupied(mut e) => {
+                let line = e.get_mut();
+                merge_fields(&mut line.fields, &fields);
+                line.designators.push(c.designator.clone());
+                line.quantity += 1;
             }
-            let mfr = mapping.value(Field::Manufacturer, c);
-            if !mfr.is_empty() {
-                fields.insert("manufacturer".into(), mfr);
-            }
-            // Mirror the app's expectation: LCSC part lands as jlcpcb_part_number.
-            let lcsc = mapping.distributor_value("LCSC", c);
-            if !lcsc.is_empty() {
-                fields.insert("jlcpcb_part_number".into(), lcsc);
-            }
-            GroupedLine {
-                item: 0,
-                quantity: 0,
-                designators: Vec::new(),
-                dnp,
-                fields,
-            }
-        });
-        line.designators.push(c.designator.clone());
-        line.quantity += 1;
+        }
     }
 
     let mut lines: Vec<GroupedLine> = groups.into_values().collect();
@@ -676,6 +718,26 @@ mod tests {
         assert_eq!(r38.fields.get("MSL").map(String::as_str), Some("1"));
         // Internal KiCad bookkeeping params are not leaked.
         assert!(!r38.fields.keys().any(|k| k.starts_with("kicad_")));
+    }
+
+    #[test]
+    fn grouped_marks_fields_that_differ_within_a_group() {
+        let comps = vec![
+            comp("C1", "470n", "0603", "passive_2pin", &[("MSL", "1"), ("Tol", "10%")]),
+            comp("C2", "470n", "0603", "passive_2pin", &[("MSL", "3"), ("Tol", "10%")]),
+            // No MSL at all — still a disagreement with the members that carry one.
+            comp("C3", "470n", "0603", "passive_2pin", &[("Tol", "10%")]),
+        ];
+        let mapping = resolve_mapping(&comps);
+        let grouped = build_grouped(&comps, &mapping, "p", "p");
+        assert_eq!(grouped.line_count, 1);
+        let l = &grouped.lines[0];
+        assert_eq!(l.quantity, 3);
+        assert_eq!(l.designators, ["C1", "C2", "C3"]);
+        assert_eq!(l.fields.get("MSL").map(String::as_str), Some(MIXED_VALUES));
+        // Fields the members agree on keep their value.
+        assert_eq!(l.fields.get("Tol").map(String::as_str), Some("10%"));
+        assert_eq!(l.fields.get("value").map(String::as_str), Some("470n"));
     }
 
     #[test]

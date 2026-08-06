@@ -1747,6 +1747,25 @@ button {
   white-space: nowrap;
 }
 
+/* Once the user has dragged a column edge, every column is pinned (BomTab freezes the
+   measured widths) and the table switches to fixed layout: pulling one edge then moves
+   only that boundary. The table may exceed the viewport — .bom-scroll scrolls it. */
+.bom-table.sized { table-layout: fixed; width: max-content; min-width: 100%; }
+.bom-cmt-col { width: 24px; }
+/* A column dragged narrower must clip its own header rather than push the layout. */
+.bom-table.sized th { overflow: hidden; text-overflow: ellipsis; }
+
+.bom-col-resize {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 6px;
+  height: 100%;
+  cursor: col-resize;
+  touch-action: none;
+}
+.bom-col-resize:hover { background: var(--accent); }
+
 .bom-table td {
   padding: 3px var(--sp-2);
   border-bottom: 1px solid var(--border-0);

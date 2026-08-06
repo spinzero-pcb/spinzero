@@ -35,12 +35,15 @@ export interface BomLayout {
   /** preset name ("" for Default) → hidden column ids. */
   hidden: Record<string, string[]>;
   sort: { key: string; dir: 1 | -1 } | null;
+  /** preset name ("" for Default) → column id → pixel width the user dragged to.
+   *  Empty/absent = auto layout (the browser sizes the columns). */
+  widths: Record<string, Record<string, number>>;
 }
 
 const BOM_LAYOUT_KEY = "bom.layout";
 
 function loadBomLayout(): BomLayout {
-  const empty: BomLayout = { preset: null, hidden: {}, sort: null };
+  const empty: BomLayout = { preset: null, hidden: {}, sort: null, widths: {} };
   try {
     const raw = localStorage.getItem(BOM_LAYOUT_KEY);
     if (!raw) return empty;
@@ -51,13 +54,26 @@ function loadBomLayout(): BomLayout {
         if (Array.isArray(v)) hidden[k] = v.filter((x): x is string => typeof x === "string");
       }
     }
+    // Hostile/older payloads: keep only finite positive numbers, so a corrupt entry
+    // can't collapse a column to 0px.
+    const widths: Record<string, Record<string, number>> = {};
+    if (p?.widths && typeof p.widths === "object") {
+      for (const [preset, cols] of Object.entries(p.widths)) {
+        if (!cols || typeof cols !== "object") continue;
+        const clean: Record<string, number> = {};
+        for (const [id, w] of Object.entries(cols)) {
+          if (typeof w === "number" && Number.isFinite(w) && w > 0) clean[id] = w;
+        }
+        widths[preset] = clean;
+      }
+    }
     const sort =
       p?.sort && typeof p.sort.key === "string" && (p.sort.dir === 1 || p.sort.dir === -1)
         ? { key: p.sort.key, dir: p.sort.dir }
         : null;
     // A layout written before presets existed (or by a hide/sort save) has no preset
     // string: treat that as "never chose" so the project's default can apply.
-    return { preset: typeof p?.preset === "string" ? p.preset : null, hidden, sort };
+    return { preset: typeof p?.preset === "string" ? p.preset : null, hidden, sort, widths };
   } catch {
     return empty;
   }
@@ -90,6 +106,9 @@ interface ViewState {
   setBomPreset: (preset: string) => void;
   toggleBomColumn: (preset: string, colId: string) => void;
   setBomSort: (sort: { key: string; dir: 1 | -1 }) => void;
+  /** Replace the dragged column widths of one preset (all columns at once — a resize
+   *  pins every column, otherwise the untouched ones would reflow). */
+  setBomColWidths: (preset: string, widths: Record<string, number>) => void;
 }
 
 export const useViewStore = create<ViewState>((set) => ({
@@ -130,6 +149,15 @@ export const useViewStore = create<ViewState>((set) => ({
   setBomSort: (sort) =>
     set((s) => {
       const bomLayout = { ...s.bomLayout, sort };
+      saveBomLayout(bomLayout);
+      return { bomLayout };
+    }),
+  setBomColWidths: (preset, widths) =>
+    set((s) => {
+      const bomLayout = {
+        ...s.bomLayout,
+        widths: { ...s.bomLayout.widths, [preset]: widths },
+      };
       saveBomLayout(bomLayout);
       return { bomLayout };
     }),
