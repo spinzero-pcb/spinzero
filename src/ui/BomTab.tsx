@@ -26,6 +26,7 @@ import {
   DEFAULT_COLS,
   STATUS_COL,
   customFieldValue,
+  groupLines,
   presetColumns,
   type BomCol,
 } from "../lib/bomColumns";
@@ -189,6 +190,14 @@ export function BomTab() {
         : "";
   const activePreset = presets.find((p) => p.name === presetName);
 
+  // Grouping belongs to the preset, not to the extractor: fold the extracted lines onto
+  // the fields KiCad flags `group_by` in the active preset (none flagged / Default set →
+  // the extracted lines stand as they are).
+  const grouped = useMemo(
+    () => (lines ? groupLines(lines, activePreset?.fields ?? []) : null),
+    [lines, activePreset],
+  );
+
   /** Every column of the active set (before the user's hide list), Δ first in diff mode. */
   const allCols = useMemo<BomCol[]>(() => {
     const base = activePreset ? presetColumns(activePreset) : DEFAULT_COLS;
@@ -268,11 +277,11 @@ export function BomTab() {
   const changeById = useMemo(() => new Map(changes.map((c) => [c.id, c])), [changes]);
 
   const rows = useMemo<DiffBomRow[]>(() => {
-    if (!lines) return [];
+    if (!grouped) return [];
     const decorated =
       diffActive && changes.length > 0
-        ? decorateBomRows(lines, changes)
-        : lines.map((line) => ({
+        ? decorateBomRows(grouped, changes)
+        : grouped.map((line) => ({
             line,
             status: null,
             changeIds: [],
@@ -309,7 +318,7 @@ export function BomTab() {
       const vb = cellText(b, sortCol, mpnFallback);
       return va.localeCompare(vb, undefined, { numeric: true }) * dir;
     });
-  }, [lines, changes, diffActive, filter, sort.dir, sortCol, bomChips, indexes, cols]);
+  }, [grouped, changes, diffActive, filter, sort.dir, sortCol, bomChips, indexes, cols]);
 
   // Collapse everything when the row set is rebuilt by a filter/preset switch: the keys
   // would still match, but the groups on screen have changed under the user.
@@ -635,6 +644,9 @@ export function BomTab() {
           <td
             key={col.id}
             className={`bom-dsg${child ? " bom-dsg-child" : ""}`}
+            // A grouped line can carry dozens of designators: the cell clips to one line
+            // (see .bom-dsg-text) and the full list lives on the tooltip / the expander.
+            title={l.designators.join(", ")}
             onContextMenu={(e) => openCellMenu(e, r, col)}
           >
             {expandable && (
@@ -651,21 +663,23 @@ export function BomTab() {
                 {open ? "▾" : "▸"}
               </button>
             )}
-            {diffActive && r.status
-              ? l.designators.map((d) => (
-                  <button
-                    key={d}
-                    className="bom-dsg-chip"
-                    title={`Jump to ${d} (the underlying schematic/PCB change)`}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      goDesignator(d);
-                    }}
-                  >
-                    {d}
-                  </button>
-                ))
-              : l.designators.join(", ")}
+            <span className="bom-dsg-text">
+              {diffActive && r.status
+                ? l.designators.map((d) => (
+                    <button
+                      key={d}
+                      className="bom-dsg-chip"
+                      title={`Jump to ${d} (the underlying schematic/PCB change)`}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        goDesignator(d);
+                      }}
+                    >
+                      {d}
+                    </button>
+                  ))
+                : l.designators.join(", ")}
+            </span>
           </td>
         );
       }

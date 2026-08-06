@@ -1789,7 +1789,21 @@ button {
 .bom-table tbody tr.bom-spacer:hover { background: none; }
 .bom-table tbody tr.bom-spacer td { padding: 0; border: 0; }
 
-.bom-dsg { max-width: 320px; word-break: break-word; }
+/* Designators: a grouped line can list dozens, which used to wrap and blow the row
+   height up. The cell stays one line and the list clips with an ellipsis — the full set
+   is on the cell's tooltip and behind the expander. The inner span's max-width is what
+   caps the column in auto layout; once the user has sized the columns it fills whatever
+   width they dragged. */
+.bom-dsg { max-width: 340px; white-space: nowrap; overflow: hidden; }
+.bom-dsg-text {
+  display: inline-block;
+  vertical-align: bottom;
+  max-width: 300px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.bom-table.sized .bom-dsg-text { max-width: 100%; }
 
 /* Expandable grouped designators (KiCad's Symbol Fields Table): a chevron in the
    designators cell unfolds one child row per designator underneath the line. */

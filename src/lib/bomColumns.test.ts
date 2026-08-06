@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { builtinFor, customFieldValue, presetColumns } from "./bomColumns";
+import { MIXED_VALUES, builtinFor, customFieldValue, groupLines, presetColumns } from "./bomColumns";
 import type { BomLine, BomPreset } from "./types";
 
 const line = (fields: Record<string, string>): BomLine => ({
@@ -75,6 +75,53 @@ describe("presetColumns", () => {
       ]),
     );
     expect(new Set(cols.map((c) => c.id)).size).toBe(2);
+  });
+});
+
+describe("groupLines", () => {
+  const bom = (over: Partial<BomLine>): BomLine => ({ ...line({}), ...over });
+
+  it("returns the lines untouched when no field is flagged", () => {
+    const lines = [bom({ item: 1 }), bom({ item: 2, value: "1k" })];
+    expect(groupLines(lines, [{ name: "Value", label: "Value", show: true }])).toBe(lines);
+  });
+
+  it("folds lines that agree on every flagged field", () => {
+    const out = groupLines(
+      [
+        bom({ item: 1, qty: 2, designators: ["R1", "R10"], footprint: "0402", fields: { MSL: "1" } }),
+        bom({ item: 2, qty: 1, designators: ["R2"], footprint: "0603", fields: { MSL: "1" } }),
+        bom({ item: 3, qty: 1, designators: ["R3"], value: "1k" }),
+      ],
+      [
+        { name: "Value", label: "Value", show: true, group_by: true },
+        { name: "MPN", label: "MPN", show: true, group_by: true },
+        { name: "Footprint", label: "Footprint", show: true },
+      ],
+    );
+    expect(out.map((l) => l.value)).toEqual(["10k", "1k"]);
+    expect(out[0].qty).toBe(3);
+    // Natural designator order across the merged lines, item numbers re-issued.
+    expect(out[0].designators).toEqual(["R1", "R2", "R10"]);
+    expect(out.map((l) => l.item)).toEqual([1, 2]);
+    // Agreeing fields survive; a field the members disagree on reports mixed.
+    expect(out[0].fields.MSL).toBe("1");
+    expect(out[0].footprint).toBe(MIXED_VALUES);
+  });
+
+  it("marks a field only one member carries as mixed", () => {
+    const out = groupLines(
+      [bom({ fields: { MSL: "1" } }), bom({ fields: {} })],
+      [{ name: "Value", label: "Value", show: true, group_by: true }],
+    );
+    expect(out).toHaveLength(1);
+    expect(out[0].fields.MSL).toBe(MIXED_VALUES);
+  });
+
+  it("keeps DNP only when every member is DNP", () => {
+    const flags = [{ name: "Value", label: "Value", show: true, group_by: true }];
+    expect(groupLines([bom({ dnp: true }), bom({ dnp: false })], flags)[0].dnp).toBe(false);
+    expect(groupLines([bom({ dnp: true }), bom({ dnp: true })], flags)[0].dnp).toBe(true);
   });
 });
 

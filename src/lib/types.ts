@@ -178,6 +178,9 @@ export interface BomPresetField {
   name: string;
   label: string;
   show: boolean;
+  /** KiCad's "group by" flag: symbols coalesce into one BOM line when every field
+   *  flagged here has the same value. Absent in an older payload → false. */
+  group_by?: boolean;
 }
 
 /** A KiCad BOM column set from the project's .kicad_pro (mirrors design.rs BomPreset). */

@@ -1,4 +1,4 @@
-import type { BomLine, BomPreset } from "./types";
+import type { BomLine, BomPreset, BomPresetField } from "./types";
 
 /** The BOM table's built-in columns — the ones the row object carries natively and the
  *  ones diff mode decorates (old → new, designator chips, status tint). A preset column
@@ -96,6 +96,90 @@ export function presetColumns(preset: BomPreset | undefined): BomCol[] {
     out.push({ id, label, builtin: builtinFor(f.name), field: f.name });
   }
   return out;
+}
+
+// ---------------------------------------------------------------- preset grouping
+//
+// KiCad coalesces two symbols into one BOM line when every field its preset flags
+// `group_by` matches. The extractor emits its own (finer) grouping, so the table
+// re-groups those lines on the active preset's flagged fields — nothing about the
+// grouping is hardcoded here; an empty flag set leaves the lines exactly as extracted.
+
+/** Shown for a field whose members disagree inside one grouped line (mirrors the
+ *  extractor's marker in src-tauri/crates/extract/src/bom.rs). */
+export const MIXED_VALUES = "-- mixed values --";
+
+/** The value a preset field name reads on a line — built-in columns off the line
+ *  itself, everything else out of `line.fields`. */
+export function fieldValue(line: BomLine, name: string, label?: string): string {
+  switch (builtinFor(name)) {
+    case "item":
+      return String(line.item);
+    case "qty":
+      return String(line.qty);
+    case "designators":
+      return line.designators.join(", ");
+    case "value":
+      return line.value;
+    case "footprint":
+      return line.footprint;
+    case "mpn":
+      return line.mpn;
+    case "dnp":
+      return line.dnp ? "DNP" : "";
+    default:
+      return customFieldValue(line, name, label);
+  }
+}
+
+/** Merge two values of the same field: equal (ignoring case/padding) keeps the first,
+ *  otherwise the line reports mixed members. */
+function mergeValue(a: string, b: string): string {
+  if (a === b) return a;
+  if (a.trim().toLowerCase() === b.trim().toLowerCase()) return a;
+  return MIXED_VALUES;
+}
+
+/** Natural designator order (R2 < R10 < U1) — the extractor sorts within a line, and a
+ *  merge has to restore that across the lines it joined. */
+const byDesignator = (a: string, b: string) => a.localeCompare(b, undefined, { numeric: true });
+
+/** Re-group extracted BOM lines on the preset's `group_by` fields. Lines whose flagged
+ *  fields all match fold into one: designators concatenated, quantities summed, and any
+ *  other field the members disagree on collapsed to MIXED_VALUES (a field one member
+ *  carries and another doesn't counts as a disagreement, as in the extractor). Item
+ *  numbers are re-issued in the resulting order. No flagged fields → the input, untouched. */
+export function groupLines(lines: BomLine[], keyFields: BomPresetField[]): BomLine[] {
+  const flagged = keyFields.filter((f) => f.group_by);
+  if (flagged.length === 0) return lines;
+  const groups = new Map<string, BomLine>();
+  for (const line of lines) {
+    const key = flagged
+      .map((f) => fieldValue(line, f.name, f.label).trim().toLowerCase())
+      .join("");
+    const prev = groups.get(key);
+    if (!prev) {
+      groups.set(key, { ...line, designators: [...line.designators], fields: { ...line.fields } });
+      continue;
+    }
+    const fields: Record<string, string> = {};
+    for (const k of new Set([...Object.keys(prev.fields), ...Object.keys(line.fields)])) {
+      fields[k] = mergeValue(prev.fields[k] ?? "", line.fields[k] ?? "");
+    }
+    groups.set(key, {
+      ...prev,
+      qty: prev.qty + line.qty,
+      designators: [...prev.designators, ...line.designators].sort(byDesignator),
+      value: mergeValue(prev.value, line.value),
+      footprint: mergeValue(prev.footprint, line.footprint),
+      mpn: mergeValue(prev.mpn, line.mpn),
+      // Only an all-DNP line reads as DNP (the tint and the "DNP only" chip mean
+      // "nothing here gets populated").
+      dnp: prev.dnp && line.dnp,
+      fields,
+    });
+  }
+  return [...groups.values()].map((l, i) => ({ ...l, item: i + 1 }));
 }
 
 /** Read a custom (non-built-in) column off a BOM line. The extractor may normalise field

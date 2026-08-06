@@ -672,6 +672,9 @@ pub struct BomPresetField {
     pub name: String,
     pub label: String,
     pub show: bool,
+    /// KiCad's per-field "group by" flag: the set of fields whose values must match for
+    /// two symbols to coalesce into one BOM line. The frontend regroups on these.
+    pub group_by: bool,
 }
 
 /// A KiCad BOM column set, from the project's `.kicad_pro`.
@@ -710,6 +713,7 @@ fn parse_bom_preset(v: &Value, fallback_name: &str) -> Option<BomPreset> {
                 name,
                 label,
                 show: f.get("show").and_then(|s| s.as_bool()).unwrap_or(true),
+                group_by: f.get("group_by").and_then(|g| g.as_bool()).unwrap_or(false),
             })
         })
         .collect();
@@ -899,6 +903,12 @@ mod tests {
         assert_eq!(project.fields[1].label, "Qty");
         assert_eq!(project.fields[3].label, "Automotive Grade");
         assert!(!project.fields[3].show);
+        // The per-field group_by flag drives the table's grouping; absent = false.
+        assert_eq!(
+            project.fields.iter().map(|f| f.group_by).collect::<Vec<_>>(),
+            [false, false, true, false]
+        );
+        assert!(!presets[1].fields[0].group_by, "missing group_by defaults to false");
         assert!(project.is_project_default, "live bom_settings is the project default");
 
         let named = &presets[1];
