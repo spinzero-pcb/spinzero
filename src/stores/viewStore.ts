@@ -11,7 +11,7 @@ export type BomChips = Record<BomChip, boolean>;
 const BOM_CHIPS_KEY = "bom.chips";
 
 function loadBomChips(): BomChips {
-  const empty: BomChips = { dnpOnly: false, missingMpn: false, changedOnly: false };
+  const empty: BomChips = { dnpOnly: false, missingMpn: false, changedOnly: true };
   try {
     const raw = localStorage.getItem(BOM_CHIPS_KEY);
     if (!raw) return empty;
@@ -19,11 +19,25 @@ function loadBomChips(): BomChips {
     return {
       dnpOnly: parsed?.dnpOnly === true,
       missingMpn: parsed?.missingMpn === true,
-      changedOnly: parsed?.changedOnly === true,
+      // Opt-out, not opt-in: a comparison is about the lines it changed, so the BOM tab
+      // starts filtered to them unless the user has turned the chip off before.
+      changedOnly: parsed?.changedOnly !== false,
     };
   } catch {
     return empty;
   }
+}
+
+/** Set one chip and remember the set. A full/blocked localStorage must never break the
+ *  toggle, so the write is best-effort. */
+function writeBomChips(cur: BomChips, chip: BomChip, on: boolean): { bomChips: BomChips } {
+  const bomChips = { ...cur, [chip]: on };
+  try {
+    localStorage.setItem(BOM_CHIPS_KEY, JSON.stringify(bomChips));
+  } catch {
+    /* ignored */
+  }
+  return { bomChips };
 }
 
 /** BOM table layout the user picked: the active KiCad BOM preset ("" = the built-in
@@ -101,6 +115,7 @@ interface ViewState {
   /** BOM tab quick-filter chips (persisted). */
   bomChips: BomChips;
   toggleBomChip: (chip: BomChip) => void;
+  setBomChip: (chip: BomChip, on: boolean) => void;
   /** BOM table preset / hidden columns / sort (persisted). */
   bomLayout: BomLayout;
   setBomPreset: (preset: string) => void;
@@ -118,16 +133,8 @@ export const useViewStore = create<ViewState>((set) => ({
   setFullscreen: (fullscreen) => set({ fullscreen }),
   toggleFullscreen: () => set((s) => ({ fullscreen: !s.fullscreen })),
   bomChips: loadBomChips(),
-  toggleBomChip: (chip) =>
-    set((s) => {
-      const bomChips = { ...s.bomChips, [chip]: !s.bomChips[chip] };
-      try {
-        localStorage.setItem(BOM_CHIPS_KEY, JSON.stringify(bomChips));
-      } catch {
-        /* a full/blocked localStorage must never break the toggle */
-      }
-      return { bomChips };
-    }),
+  toggleBomChip: (chip) => set((s) => writeBomChips(s.bomChips, chip, !s.bomChips[chip])),
+  setBomChip: (chip, on) => set((s) => writeBomChips(s.bomChips, chip, on)),
   bomLayout: loadBomLayout(),
   setBomPreset: (preset) =>
     set((s) => {

@@ -1750,26 +1750,45 @@ button {
 /* Once the user has dragged a column edge, every column is pinned (BomTab freezes the
    measured widths) and the table switches to fixed layout: pulling one edge then moves
    only that boundary. The table may exceed the viewport — .bom-scroll scrolls it. */
-.bom-table.sized { table-layout: fixed; width: max-content; min-width: 100%; }
+/* `width` is set inline to the exact sum of the column widths: `max-content` looks right
+   but Chrome sizes a fixed-layout table's max-content from the cell *content*, then hands
+   the surplus back to the columns — so a column dragged narrower silently sprang back. */
+.bom-table.sized { table-layout: fixed; min-width: 100%; }
 .bom-cmt-col { width: 24px; }
+/* The one column with no width: in fixed layout it swallows whatever is left over to the
+   pane edge. Without it the surplus is shared out over the real columns, so dragging one
+   narrower just fattens the rest and the column never actually shrinks. */
+.bom-fill-th, .bom-fill-cell { padding: 0; }
+.bom-fill-th { cursor: default; }
 /* A column dragged narrower must clip its own header rather than push the layout. */
 .bom-table.sized th { overflow: hidden; text-overflow: ellipsis; }
 
+/* Column boundary: a hairline that is always on screen (so the user can see where to
+   grab), sitting at the right edge of a wider invisible grab strip. */
 .bom-col-resize {
   position: absolute;
   top: 0;
   right: 0;
-  width: 6px;
+  width: 9px;
   height: 100%;
   cursor: col-resize;
   touch-action: none;
+  background: linear-gradient(var(--border-1), var(--border-1)) right / 1px 100% no-repeat;
 }
-.bom-col-resize:hover { background: var(--accent); }
+.bom-col-resize:hover {
+  background: linear-gradient(var(--accent), var(--accent)) right / 1px 100% no-repeat;
+}
 
 .bom-table td {
   padding: 3px var(--sp-2);
   border-bottom: 1px solid var(--border-0);
   vertical-align: top;
+  /* Every column clips rather than wraps: one long Description used to double the height
+     of its row. The full text is on the cell's tooltip. */
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 320px;
 }
 
 .bom-table tbody tr { cursor: pointer; }
@@ -1779,12 +1798,6 @@ button {
 /* Windowed mode (long BOMs): rows must be exactly ROW_H tall in BomTab.tsx, so the
    spacer arithmetic lands on the right offsets — cells stay on one line. */
 .bom-table.virt tbody tr { height: 26px; }
-.bom-table.virt tbody td {
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  max-width: 320px;
-}
 .bom-table tbody tr.bom-spacer { height: auto; cursor: default; background: none; }
 .bom-table tbody tr.bom-spacer:hover { background: none; }
 .bom-table tbody tr.bom-spacer td { padding: 0; border: 0; }
@@ -1794,7 +1807,7 @@ button {
    is on the cell's tooltip and behind the expander. The inner span's max-width is what
    caps the column in auto layout; once the user has sized the columns it fills whatever
    width they dragged. */
-.bom-dsg { max-width: 340px; white-space: nowrap; overflow: hidden; }
+.bom-table td.bom-dsg { max-width: 340px; }
 .bom-dsg-text {
   display: inline-block;
   vertical-align: bottom;
@@ -1833,6 +1846,15 @@ button {
 .bom-table tbody tr.dnp td { color: var(--fg-2); }
 .bom-empty { padding: var(--sp-3); color: var(--fg-2); }
 
+/* "-- mixed values --": the grouped line's members disagree on this field. A quiet amber
+   highlight — a caution that the cell is not a real value, not an error. */
+.bom-mixed {
+  color: var(--bom-mixed-fg);
+  background: var(--warn-dim);
+  border-radius: var(--radius-1);
+  padding: 0 4px;
+}
+
 /* Sort indicator + header affordance (theme-aware; no hardcoded colours). */
 .bom-sort-arrow { color: var(--accent); }
 .bom-table th:hover { color: var(--fg-0); }
@@ -1847,9 +1869,12 @@ button {
 .bom-table tbody tr.bom-removed td { text-decoration: line-through; color: var(--fg-2); }
 .bom-table tbody tr.bom-removed td.bom-status-cell { text-decoration: none; }
 .bom-table tbody tr.bom-removed td.bom-comment-cell { text-decoration: none; }
-/* Inline "old → new" inside a changed row's affected cells — the old value dimmed
-   and struck, so the delta reads without opening the Changes panel. */
-.bom-was { color: var(--fg-2); text-decoration: line-through; }
+/* Inline "old → new" inside a changed row's affected cells — the old value struck and
+   red, the new one green, so the delta reads without opening the Changes panel. Both are
+   muted a step from the full-strength --err/--ok: a changed line is information, not an
+   alarm, and a row can carry several of these at once. */
+.bom-was { color: var(--diff-was-fg); text-decoration: line-through; }
+.bom-now { color: var(--diff-now-fg); }
 .bom-was-arrow { color: var(--fg-2); margin: 0 4px; }
 
 /* ---------- BOM review comments ---------- */

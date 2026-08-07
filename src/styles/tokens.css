@@ -149,6 +149,12 @@
   --diff-add: var(--ok);
   --diff-remove: var(--err);
   --diff-change: var(--warn);
+  /* Inline "old → new" text in the BOM's changed rows, and the BOM's "-- mixed values --"
+     marker. Each is its semantic colour pulled toward the background, so a row carrying
+     several of them reads as information rather than as an alarm. */
+  --diff-was-fg: #c4746c;
+  --diff-now-fg: #6db77e;
+  --bom-mixed-fg: #c5943c;
 
   /* Type */
   --font-ui: "Inter", "Segoe UI", system-ui, sans-serif;

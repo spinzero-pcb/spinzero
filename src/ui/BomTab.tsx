@@ -25,6 +25,7 @@ import {
 import {
   DEFAULT_COLS,
   DEFAULT_GROUP_BY,
+  MIXED_VALUES,
   STATUS_COL,
   customFieldValue,
   groupLines,
@@ -34,19 +35,25 @@ import {
 import type { BomLine, BomPreset } from "../lib/types";
 import type { Change } from "../lib/diff";
 
-/** Cell content in diff mode: "old → new" with the old value dimmed, or just the
- *  new value when there is no extractable old one. */
+/** Cell content in diff mode: "old → new" — the old value struck through in red, the new
+ *  one in green — or just the value when there is no extractable old one. */
 const isChange = (c: Change | undefined): c is Change => !!c;
 
 function wasCell(old: string | number | undefined, now: string | number) {
-  if (old === undefined || String(old) === String(now)) return now;
+  if (old === undefined || String(old) === String(now)) return plainCell(now);
   return (
     <>
       <span className="bom-was">{String(old) || "∅"}</span>
       <span className="bom-was-arrow">→</span>
-      {now}
+      <span className="bom-now">{plainCell(now)}</span>
     </>
   );
+}
+
+/** A cell's value, with the grouped-line "mixed members" marker highlighted rather than
+ *  reading as an ordinary value. */
+function plainCell(v: string | number) {
+  return v === MIXED_VALUES ? <span className="bom-mixed">{v}</span> : v;
 }
 
 // WS7: BOM keeps a tab; it is not canvas content. Row click = select the line's
@@ -71,6 +78,8 @@ const MIN_COL_W = 40;
 /** Width for a column that appears after the table was sized (the diff-mode Δ column, a
  *  column un-hidden later) — fixed layout would otherwise leave it degenerate. */
 const DEFAULT_COL_W = 120;
+/** The leading comment gutter's width — mirrors .bom-cmt-col in app.css. */
+const CMT_COL_W = 24;
 
 const STATUS_LABEL = { added: "Added", removed: "Removed", changed: "Changed" } as const;
 const STATUS_ROLE = { added: "ok", removed: "err", changed: "warn" } as const;
@@ -120,6 +129,7 @@ export function BomTab() {
   const setView = useViewStore((s) => s.setView);
   const bomChips = useViewStore((s) => s.bomChips);
   const toggleBomChip = useViewStore((s) => s.toggleBomChip);
+  const setBomChip = useViewStore((s) => s.setBomChip);
   const bomLayout = useViewStore((s) => s.bomLayout);
   const setBomPreset = useViewStore((s) => s.setBomPreset);
   const toggleBomColumn = useViewStore((s) => s.toggleBomColumn);
@@ -221,6 +231,11 @@ export function BomTab() {
   const [dragWidths, setDragWidths] = useState<Record<string, number> | null>(null);
   const widths = dragWidths ?? bomLayout.widths[presetName] ?? {};
   const sized = Object.keys(widths).length > 0;
+  // The sized table is laid out at exactly the sum of its columns (see .bom-table.sized):
+  // any narrower and .bom-scroll scrolls; any wider and the trailing filler column eats
+  // the slack, so a column the user drags narrower stays narrow.
+  const totalW =
+    CMT_COL_W + cols.reduce((n, c) => n + (widths[c.id] ?? DEFAULT_COL_W), 0);
   const thRefs = useRef<Map<string, HTMLTableCellElement>>(new Map());
   const drag = useRef<{ id: string; x: number; base: Record<string, number> } | null>(null);
   const dragLive = useRef<Record<string, number> | null>(null);
@@ -265,7 +280,11 @@ export function BomTab() {
       return;
     }
     setSort(diffActive ? { key: "status", dir: 1 } : { key: "item", dir: 1 });
-  }, [diffActive]);
+    // Entering a comparison also re-arms "Changed only": the affected lines are what the
+    // comparison is about. Only on the flip — the user's own chip click still wins, and a
+    // tab switch mid-comparison doesn't undo it. (Its remembered default is on too.)
+    if (diffActive) setBomChip("changedOnly", true);
+  }, [diffActive, setBomChip]);
 
   // A persisted sort column can vanish (preset switch, column hidden) — fall back to the
   // first live column rather than silently sorting on nothing.
@@ -726,12 +745,16 @@ export function BomTab() {
             {l.dnp ? "DNP" : ""}
           </td>
         );
-      default:
+      default: {
+        // Custom preset columns carry the long values (Description, Manufacturer, …) and
+        // every cell now clips with an ellipsis, so the full text lives on the tooltip.
+        const v = text(r, col);
         return (
-          <td key={col.id} onContextMenu={(e) => openCellMenu(e, r, col)}>
-            {text(r, col)}
+          <td key={col.id} title={v} onContextMenu={(e) => openCellMenu(e, r, col)}>
+            {plainCell(v)}
           </td>
         );
+      }
     }
   }
 
@@ -829,6 +852,7 @@ export function BomTab() {
       >
         <table
           className={`bom-table ${armed ? "arming" : ""} ${virt ? "virt" : ""} ${sized ? "sized" : ""}`}
+          style={sized ? { width: totalW } : undefined}
         >
           <colgroup>
             <col className="bom-cmt-col" />
@@ -838,6 +862,10 @@ export function BomTab() {
                 style={sized ? { width: widths[c.id] ?? DEFAULT_COL_W } : undefined}
               />
             ))}
+            {/* Slack eater: the only column with no width, so in fixed layout it absorbs
+                whatever is left over to the pane edge. Without it the surplus is shared
+                out over the real columns and dragging one narrower does nothing. */}
+            <col className="bom-fill-col" />
           </colgroup>
           <thead ref={headRef}>
             <tr>
@@ -869,12 +897,13 @@ export function BomTab() {
                   />
                 </th>
               ))}
+              <th className="bom-fill-th" aria-hidden />
             </tr>
           </thead>
           <tbody>
             {start > 0 && (
               <tr className="bom-spacer" style={{ height: start * ROW_H }} aria-hidden>
-                <td colSpan={cols.length + 1} />
+                <td colSpan={cols.length + 2} />
               </tr>
             )}
             {windowRows.map(({ row: r, key: displayKey, child }) => {
@@ -959,12 +988,13 @@ export function BomTab() {
                     )}
                   </td>
                   {cols.map((c) => renderCell(r, c, old, displayKey, child))}
+                  <td className="bom-fill-cell" />
                 </tr>
               );
             })}
             {end < display.length && (
               <tr className="bom-spacer" style={{ height: (display.length - end) * ROW_H }} aria-hidden>
-                <td colSpan={cols.length + 1} />
+                <td colSpan={cols.length + 2} />
               </tr>
             )}
           </tbody>
