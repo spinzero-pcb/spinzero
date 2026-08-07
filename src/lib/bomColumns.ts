@@ -101,13 +101,24 @@ export function presetColumns(preset: BomPreset | undefined): BomCol[] {
 // ---------------------------------------------------------------- preset grouping
 //
 // KiCad coalesces two symbols into one BOM line when every field its preset flags
-// `group_by` matches. The extractor emits its own (finer) grouping, so the table
-// re-groups those lines on the active preset's flagged fields — nothing about the
-// grouping is hardcoded here; an empty flag set leaves the lines exactly as extracted.
+// `group_by` matches. The extractor emits one line per component and does no grouping of
+// its own, so this is the only place a BOM line is formed: the active preset's flagged
+// fields decide, and a preset that flags nothing shows every component on its own row.
 
-/** Shown for a field whose members disagree inside one grouped line (mirrors the
- *  extractor's marker in src-tauri/crates/extract/src/bom.rs). */
+/** Shown for a field whose members disagree inside one grouped line (KiCad's Symbol
+ *  Fields Table shows a similar marker rather than an arbitrary member's value). */
 export const MIXED_VALUES = "-- mixed values --";
+
+/** Grouping for the built-in "Default" column set, which carries no KiCad preset to take
+ *  `group_by` flags from: the key the extractor used to group on before the table owned
+ *  grouping, so the default view is unchanged. */
+export const DEFAULT_GROUP_BY: BomPresetField[] = [
+  "Value",
+  "Footprint",
+  "Description",
+  "MPN",
+  "DNP",
+].map((name) => ({ name, label: name, show: true, group_by: true }));
 
 /** The value a preset field name reads on a line — built-in columns off the line
  *  itself, everything else out of `line.fields`. */
@@ -144,11 +155,11 @@ function mergeValue(a: string, b: string): string {
  *  merge has to restore that across the lines it joined. */
 const byDesignator = (a: string, b: string) => a.localeCompare(b, undefined, { numeric: true });
 
-/** Re-group extracted BOM lines on the preset's `group_by` fields. Lines whose flagged
- *  fields all match fold into one: designators concatenated, quantities summed, and any
- *  other field the members disagree on collapsed to MIXED_VALUES (a field one member
- *  carries and another doesn't counts as a disagreement, as in the extractor). Item
- *  numbers are re-issued in the resulting order. No flagged fields → the input, untouched. */
+/** Group the extractor's per-component BOM lines on the preset's `group_by` fields. Lines
+ *  whose flagged fields all match fold into one: designators concatenated, quantities
+ *  summed, and any other field the members disagree on collapsed to MIXED_VALUES (a field
+ *  one member carries and another doesn't counts as a disagreement). Item numbers are
+ *  re-issued in the resulting order. No flagged fields → the input, untouched. */
 export function groupLines(lines: BomLine[], keyFields: BomPresetField[]): BomLine[] {
   const flagged = keyFields.filter((f) => f.group_by);
   if (flagged.length === 0) return lines;

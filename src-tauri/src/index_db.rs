@@ -360,7 +360,8 @@ pub fn ingest(
         }
     }
 
-    // BOM (grouped-json: {schema, lines:[{item, quantity, designators[], dnp, fields{}}]}).
+    // BOM (bom JSON: {schema, lines:[{item, quantity, designators[], dnp, fields{}}]} —
+    // one line per component; the BOM table does the preset grouping).
     let bom_dir = cache_dir.join("bom");
     if let Ok(rd) = fs::read_dir(&bom_dir) {
         for entry in rd.flatten() {

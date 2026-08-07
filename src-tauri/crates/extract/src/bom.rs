@@ -541,7 +541,46 @@ fn merge_fields(into: &mut BTreeMap<String, String>, add: &BTreeMap<String, Stri
     }
 }
 
-/// Build the grouped BOM for the app (groups by value/footprint/lib_ref/desc).
+/// Build the per-component BOM document the app ingests: one line per in-BOM component,
+/// ungrouped. Grouping is the BOM table's job — it folds these onto the fields the active
+/// KiCad preset flags `group_by`, which the extractor cannot know. Pre-grouping here would
+/// cap what the table can do: fields already collapsed to `MIXED_VALUES` can never be
+/// separated again. The fab CSV keeps its own grouping (`build_grouped`).
+pub fn build_flat(components: &[Component], mapping: &Mapping, project_path: &str, stem: &str) -> GroupedBom {
+    let mut lines: Vec<GroupedLine> = components
+        .iter()
+        .filter(|c| in_bom(c))
+        .map(|c| GroupedLine {
+            item: 0,
+            quantity: 1,
+            designators: vec![c.designator.clone()],
+            dnp: is_dnp(c),
+            fields: line_fields(c, mapping),
+        })
+        .collect();
+    lines.sort_by(|a, b| nat_key(&a.designators[0]).cmp(&nat_key(&b.designators[0])));
+    let dnp_line_count = lines.iter().filter(|l| l.dnp).count() as u32;
+    for (i, l) in lines.iter_mut().enumerate() {
+        l.item = (i + 1) as u32;
+    }
+    let count = lines.len() as u32;
+
+    GroupedBom {
+        schema: "extract.bom.flat.a0".into(),
+        source: GroupedSource {
+            path: project_path.to_string(),
+            name: format!("{stem}.kicad_pro"),
+            stem: stem.to_string(),
+        },
+        variant: None,
+        line_count: count,
+        component_count: count,
+        dnp_line_count,
+        lines,
+    }
+}
+
+/// Build the grouped BOM for the fab CSV (groups by value/footprint/lib_ref/desc).
 pub fn build_grouped(components: &[Component], mapping: &Mapping, project_path: &str, stem: &str) -> GroupedBom {
     type Key = (String, String, String, String, String, bool);
     let mut groups: BTreeMap<Key, GroupedLine> = BTreeMap::new();
@@ -691,6 +730,27 @@ mod tests {
         let grouped = build_grouped(&comps, &mapping, "p", "p");
         assert_eq!(grouped.component_count, 3); // MH1 excluded
         assert_eq!(grouped.line_count, 2);
+    }
+
+    #[test]
+    fn flat_keeps_one_line_per_component() {
+        let comps = vec![
+            comp("C2", "470n", "0603", "passive_2pin", &[("MSL", "1")]),
+            comp("C1", "470n", "0603", "passive_2pin", &[]),
+            comp("MH1", "M2", "Hole", "mounting_hole", &[("kicad_in_bom", "false")]),
+        ];
+        let mapping = resolve_mapping(&comps);
+        let flat = build_flat(&comps, &mapping, "p", "p");
+        // MH1 excluded; C1/C2 stay apart so the table can group them per preset.
+        assert_eq!(flat.line_count, 2);
+        assert_eq!(flat.component_count, 2);
+        let refs: Vec<&str> = flat.lines.iter().map(|l| l.designators[0].as_str()).collect();
+        assert_eq!(refs, vec!["C1", "C2"]); // natural designator order, items 1..n
+        assert_eq!(flat.lines.iter().map(|l| l.item).collect::<Vec<_>>(), vec![1, 2]);
+        assert!(flat.lines.iter().all(|l| l.quantity == 1));
+        // Nothing is collapsed to a mixed marker: C1 simply has no MSL.
+        assert_eq!(flat.lines[0].fields.get("MSL"), None);
+        assert_eq!(flat.lines[1].fields.get("MSL").map(String::as_str), Some("1"));
     }
 
     #[test]

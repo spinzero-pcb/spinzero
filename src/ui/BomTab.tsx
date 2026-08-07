@@ -24,6 +24,7 @@ import {
 } from "../lib/bomDiff";
 import {
   DEFAULT_COLS,
+  DEFAULT_GROUP_BY,
   STATUS_COL,
   customFieldValue,
   groupLines,
@@ -190,11 +191,13 @@ export function BomTab() {
         : "";
   const activePreset = presets.find((p) => p.name === presetName);
 
-  // Grouping belongs to the preset, not to the extractor: fold the extracted lines onto
-  // the fields KiCad flags `group_by` in the active preset (none flagged / Default set →
-  // the extracted lines stand as they are).
+  // Grouping belongs to the preset, not to the extractor: the backend hands us one line
+  // per component, and we fold those onto the fields KiCad flags `group_by` in the active
+  // preset. No preset (built-in Default set) → the default key; a preset that flags
+  // nothing → one row per component, exactly as KiCad shows it.
   const grouped = useMemo(
-    () => (lines ? groupLines(lines, activePreset?.fields ?? []) : null),
+    () =>
+      lines ? groupLines(lines, activePreset ? (activePreset.fields ?? []) : DEFAULT_GROUP_BY) : null,
     [lines, activePreset],
   );
 

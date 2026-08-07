@@ -39,7 +39,7 @@ pub fn version() -> String {
 /// re-extracts. `CARGO_PKG_VERSION` does NOT move on a logic-only edit, so this
 /// explicit epoch is what makes "update the extractor later" safe — it is folded
 /// into the cache key alongside the source-file hashes.
-pub const EXTRACTOR_CACHE_EPOCH: u32 = 24;
+pub const EXTRACTOR_CACHE_EPOCH: u32 = 25;
 
 /// Cache-key component identifying the extractor's output contract: the epoch plus
 /// the crate version. The app combines this with the design's source hashes to key

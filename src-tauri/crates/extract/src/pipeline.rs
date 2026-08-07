@@ -578,8 +578,10 @@ pub fn run_bom(
 
     match format {
         "grouped-json" => {
-            let grouped = bom::build_grouped(&components, &mapping, &project_str, &name);
-            let json = serde_json::to_string_pretty(&grouped).map_err(|e| e.to_string())?;
+            // Ungrouped on purpose: the app's BOM table groups per the active KiCad
+            // preset, so the extractor must not pre-collapse the lines.
+            let flat = bom::build_flat(&components, &mapping, &project_str, &name);
+            let json = serde_json::to_string_pretty(&flat).map_err(|e| e.to_string())?;
             write(&format!("{name}_bom.json"), &json, emit)?;
         }
         "grouped-csv" => {

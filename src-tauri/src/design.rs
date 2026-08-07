@@ -599,7 +599,8 @@ pub struct BomLine {
     pub fields: HashMap<String, String>,
 }
 
-/// BOM table payload (WS7), read straight from the crunched grouped-json bundle so
+/// BOM table payload (WS7), read straight from the crunched BOM JSON bundle (one line per
+/// component — the table groups them per the active KiCad preset) so
 /// it works in both vault mode and the `PCBREVIEW_CACHE_DIR` dev override (which has
 /// no SQLite index).
 pub fn bom_lines(vault_cache: Option<PathBuf>) -> Result<Vec<BomLine>, String> {
