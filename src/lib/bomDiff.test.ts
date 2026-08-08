@@ -159,6 +159,17 @@ describe("bomDiff helpers", () => {
       ).toEqual({ fields: {} });
     });
 
+    it("reads the changed field out of the headline when the row leads with it", () => {
+      expect(
+        bomOldValues([
+          bomCh("ch_1", "modified", { key: "k", designators: ["D10"] }, {
+            title: "BOM: D10 MPN OLD-1 → NEW-2",
+            detail: "now on a different LED LED_0603 line",
+          }),
+        ]),
+      ).toEqual({ mpn: "OLD-1", fields: {} });
+    });
+
     it("takes symbol-property edits off the anchor, keyed loosely", () => {
       expect(
         bomOldValues([

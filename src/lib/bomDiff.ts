@@ -141,8 +141,10 @@ export function bomOldValues(changes: Change[]): BomOldValues {
       const key = looseField(e.field);
       if (key && out.fields[key] === undefined) out.fields[key] = e.old;
     }
-    for (const bit of (c.detail ?? "").split(";")) {
-      const m = /^(value|footprint|MPN)\s+(.*?)\s+→\s+(.*)$/.exec(bit.trim());
+    // The headline carries the first changed field when both sides of the row label the
+    // same ("BOM: D10 MPN OLD-1 → NEW-2"), so it is scanned alongside the detail bits.
+    for (const bit of [c.title ?? "", ...(c.detail ?? "").split(";")]) {
+      const m = /(?:^|[\s:])(value|footprint|MPN)\s+(.*?)\s+→\s+(.*)$/.exec(bit.trim());
       if (!m) continue;
       const field = FIELD[m[1]];
       if (out[field] === undefined) out[field] = m[2] === EMPTY_MARK ? "" : m[2];

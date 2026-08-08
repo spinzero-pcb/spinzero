@@ -1493,10 +1493,11 @@ fn bom_mpn_change_on_one_of_many_is_one_move_row() {
     let rows = bom_rows(&doc);
     assert_eq!(rows.len(), 1, "one bom row for one edit: {rows:?}");
     let c = rows[0];
-    assert!(c.title.contains("D10") && c.title.contains("moved"), "{}", c.title);
-    // The labels are identical for a pure MPN swap, so the detail must carry the
-    // distinguishing field — in the "MPN A → B" form bomOldValues parses inline.
-    assert_eq!(c.detail, "MPN OLD-1 → NEW-2");
+    // Both lines label as "LED LED_0603" for a pure MPN swap, so "moved X → X" would say
+    // nothing: the headline names the field that moved (in the "MPN A → B" form
+    // bomOldValues parses inline) and the regrouping goes to the detail.
+    assert_eq!(c.title, "BOM: D10 MPN OLD-1 → NEW-2");
+    assert_eq!(c.detail, "now on a different LED LED_0603 line");
     // Anchored to the DESTINATION line with the moved ref in `added` (decorateBomRows).
     let anch = c.anchors.bom.as_ref().expect("bom anchor");
     assert_eq!(anch.mpn, "NEW-2");

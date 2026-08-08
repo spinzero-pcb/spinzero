@@ -1617,6 +1617,23 @@ fn bom_param_edits(
         .collect()
 }
 
+/// Headline + detail for a BOM row whose line identity may or may not have visibly moved.
+///
+/// A BOM label is "value footprint", so an MPN swap or a property edit regroups the line
+/// without changing either side's label — and "Conn_01x26 → Conn_01x26" tells the reviewer
+/// nothing while burying the field that did move. When the two labels read the same, the
+/// headline names the first changed field instead and the label is stated once; when they
+/// genuinely differ, the old → new labels stay the headline.
+fn line_headline(label_a: &str, label_b: &str, prefix: &str, bits: &[String]) -> (String, String) {
+    if label_a != label_b {
+        return (format!("{prefix} {label_a} → {label_b}"), bits.join("; "));
+    }
+    match bits.split_first() {
+        Some((first, rest)) => (format!("{prefix} {label_b}: {first}"), rest.join("; ")),
+        None => (format!("{prefix} {label_b} changed"), String::new()),
+    }
+}
+
 /// The panel-facing `"<field> old → new"` lines for a set of edits.
 fn edit_bits(edits: &[BomFieldEdit]) -> impl Iterator<Item = String> + '_ {
     edits.iter().map(|e| format!("{} {} → {}", e.field, disp(&e.old), disp(&e.new)))
@@ -1688,14 +1705,16 @@ fn diff_bom(a: &Bundle, b: &Bundle, comps: &CompDelta, out: &mut Vec<Change>) {
             bom_anchor(kb, gb, ga.dsg.len() as i64, gb.dsg.len() as i64, added, removed),
             edits,
         );
+        let (title, detail) = line_headline(
+            &bom_label(&ga.value, &ga.footprint, &ga.mpn),
+            &bom_label(&gb.value, &gb.footprint, &gb.mpn),
+            "BOM line",
+            &bits,
+        );
         out.push(bom_change(
             Kind::Modified,
-            format!(
-                "BOM line {} → {}",
-                bom_label(&ga.value, &ga.footprint, &ga.mpn),
-                bom_label(&gb.value, &gb.footprint, &gb.mpn)
-            ),
-            bits.join("; "),
+            title,
+            detail,
             Side::Both,
             anchors,
         ));
@@ -1708,11 +1727,12 @@ fn diff_bom(a: &Bundle, b: &Bundle, comps: &CompDelta, out: &mut Vec<Change>) {
     // survive (a move onto a brand-new line, or out of a line that empties). The
     // line add/remove and qty passes below then suppress what these rows explain.
     let mut movers: HashSet<String> = HashSet::new(); // refs explained by a move row
-    // (ref, from, to, toKey, bits) — `bits` is the same "value A → B; MPN A → B"
-    // string the fold pass builds, so the title's from/to labels are never ambiguous
-    // (a pure MPN swap renders identical labels) and the frontend's inline old→new
-    // parsing (bomOldValues) lights up for the moved part too.
-    let mut move_rows: Vec<(String, String, String, String, String)> = Vec::new();
+    // (ref, title, detail, toKey). Title and detail are built here (see `line_headline`):
+    // when the from/to line labels read the same — a pure MPN or property edit — the
+    // headline names the field that moved instead of repeating "9.1k R_0402 → 9.1k
+    // R_0402". The detail keeps the full "value A → B; MPN A → B" list the fold pass
+    // builds, which is also what the frontend's inline old → new rendering reads.
+    let mut move_rows: Vec<(String, String, String, String)> = Vec::new();
     // Kept beside `move_rows` rather than in it: the tuple is sorted, and the edits are
     // looked up by designator when the row's anchor is built below.
     let mut move_edits: HashMap<String, Vec<BomFieldEdit>> = HashMap::new();
@@ -1738,29 +1758,32 @@ fn diff_bom(a: &Bundle, b: &Bundle, comps: &CompDelta, out: &mut Vec<Change>) {
         let edits = bom_param_edits(a, b, &rename, &BTreeSet::from([d.to_string()]));
         bits.extend(edit_bits(&edits));
         move_edits.insert(d.to_string(), edits);
-        move_rows.push((
-            d.to_string(),
-            bom_label(&ca.value, &ca.fp, &ca.mpn),
-            bom_label(&cb.value, &cb.fp, &cb.mpn),
-            kb,
-            bits.join("; "),
-        ));
+        let from = bom_label(&ca.value, &ca.fp, &ca.mpn);
+        let to = bom_label(&cb.value, &cb.fp, &cb.mpn);
+        let (title, detail) = if from != to {
+            (format!("BOM: {d} moved {from} → {to} line"), bits.join("; "))
+        } else {
+            // Same label on both lines: say what actually moved, and note the regrouping.
+            match bits.split_first() {
+                Some((first, rest)) => {
+                    let mut detail = vec![format!("now on a different {to} line")];
+                    detail.extend(rest.iter().cloned());
+                    (format!("BOM: {d} {first}"), detail.join("; "))
+                }
+                None => (format!("BOM: {d} regrouped onto another {to} line"), String::new()),
+            }
+        };
+        move_rows.push((d.to_string(), title, detail, kb));
     }
     move_rows.sort();
-    for (d, from, to, to_key, bits) in &move_rows {
+    for (d, title, detail, to_key) in &move_rows {
         let line = &lb[to_key];
         let qty_a = la.get(to_key).map(|l| l.dsg.len() as i64).unwrap_or(0);
         let anchors = with_field_edits(
             bom_anchor(to_key, line, qty_a, line.dsg.len() as i64, vec![d.clone()], Vec::new()),
             move_edits.remove(d).unwrap_or_default(),
         );
-        out.push(bom_change(
-            Kind::Modified,
-            format!("BOM: {d} moved {from} → {to} line"),
-            bits.clone(),
-            Side::Both,
-            anchors,
-        ));
+        out.push(bom_change(Kind::Modified, title.clone(), detail.clone(), Side::Both, anchors));
     }
 
     // --- genuine line adds/removes (not folded, and not fully explained by moves:
@@ -1873,17 +1896,13 @@ fn diff_bom(a: &Bundle, b: &Bundle, comps: &CompDelta, out: &mut Vec<Change>) {
         if edits.is_empty() {
             continue;
         }
-        let detail = edit_bits(&edits).collect::<Vec<_>>().join("; ");
+        let bits: Vec<String> = edit_bits(&edits).collect();
         let qty = gb.dsg.len() as i64;
         let anchors =
             with_field_edits(bom_anchor(k, gb, qty, qty, Vec::new(), Vec::new()), edits);
-        out.push(bom_change(
-            Kind::Modified,
-            format!("BOM {}: fields edited", bom_label(&gb.value, &gb.footprint, &gb.mpn)),
-            detail,
-            Side::Both,
-            anchors,
-        ));
+        let label = bom_label(&gb.value, &gb.footprint, &gb.mpn);
+        let (title, detail) = line_headline(&label, &label, "BOM line", &bits);
+        out.push(bom_change(Kind::Modified, title, detail, Side::Both, anchors));
     }
 
     // --- DNP flips, called out separately (fit/no-fit is a build change reviewers
@@ -3352,7 +3371,9 @@ pub fn diff_key(cache_key_a: &str, cache_key_b: &str) -> String {
     // 11: BOM rows carry the line's symbol-property edits (MSL, Automotive Grade, …) on
     //     the anchor, and a line whose members only edited such a property gets its own
     //     BOM row instead of showing up in the component pass alone.
-    const DIFF_ENGINE_VERSION: &str = "11";
+    // 12: a BOM row whose two sides label the same ("9.1k R_0402 → 9.1k R_0402") leads
+    //     with the field that actually changed instead.
+    const DIFF_ENGINE_VERSION: &str = "12";
     let mut h = blake3::Hasher::new();
     h.update(DIFF_ENGINE_VERSION.as_bytes());
     h.update(b" ");
