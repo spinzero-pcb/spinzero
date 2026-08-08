@@ -211,6 +211,19 @@ pub struct BomAnchor {
     /// Designators responsible for a qty decrease.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub removed: Vec<String>,
+    /// Symbol-property edits every member of the line agrees on (MSL, Automotive Grade,
+    /// …), so the table can render "old → new" in whatever preset column shows them.
+    /// The same edits are spelled out in the change's `detail` for the panel.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fields: Vec<BomFieldEdit>,
+}
+
+/// One `field: old → new` edit carried on a BOM anchor.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+pub struct BomFieldEdit {
+    pub field: String,
+    pub old: String,
+    pub new: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
@@ -1501,6 +1514,7 @@ fn bom_anchor(
             designators: line.dsg.iter().cloned().collect(),
             added,
             removed,
+            fields: Vec::new(),
         }),
     }
 }
@@ -1518,6 +1532,102 @@ fn bom_change(kind: Kind, title: String, detail: String, side: Side, anchors: An
         anchors,
         side,
     }
+}
+
+/// The symbol-property edits (MSL, Automotive Grade, Tolerance, …) shared by every
+/// member of a BOM line. They ride structured on the anchor — a free-form field name and
+/// a free-form value can't be split back out of the `detail` string — so a preset column
+/// showing one of them can render "old → new" like the built-in columns do.
+///
+/// Only edits every common member agrees on are reported: a BOM line is one purchasing
+/// decision, and attributing one member's edit to the whole line would put a wrong "old"
+/// value in the cell. Members that exist on only one side are ignored (their line already
+/// has an add/remove/qty row).
+/// Symbol properties `bom_param_edits` must not report: the ones the BOM row already
+/// compares itself, and KiCad's internal bookkeeping (`ki_*`/`kicad_*`, which the BOM
+/// extractor drops too). Unlike the component pass this keeps `Manufacturer` — it is a
+/// BOM column and a purchasing-relevant change — but still drops `Description`, whose
+/// blurb churns without the part changing.
+fn is_bom_line_field(key: &str) -> bool {
+    matches!(key, "Reference" | "Value" | "Footprint" | "MPN" | "Description" | "Datasheet")
+        || key.starts_with("ki_")
+        || key.starts_with("kicad_")
+}
+
+fn bom_param_edits(
+    a: &Bundle,
+    b: &Bundle,
+    rename: &HashMap<&str, &str>,
+    dsgs_b: &BTreeSet<String>,
+) -> Vec<BomFieldEdit> {
+    // B-side designator → its A-side name (the rename map runs A → B).
+    let back: HashMap<&str, &str> = rename.iter().map(|(x, y)| (*y, *x)).collect();
+    let empty = std::collections::BTreeMap::new();
+    let mut agreed: BTreeMap<String, (String, String)> = BTreeMap::new(); // field → (old, new)
+    let mut rejected: HashSet<String> = HashSet::new();
+    let mut members = 0usize;
+    for d in dsgs_b {
+        let ra = back.get(d.as_str()).copied().unwrap_or(d.as_str());
+        if !a.indexes.components.contains_key(ra) {
+            continue;
+        }
+        members += 1;
+        let pa = a.comp_params.get(ra).unwrap_or(&empty);
+        let pb = b.comp_params.get(d.as_str()).unwrap_or(&empty);
+        let mut keys: Vec<&String> = pa.keys().chain(pb.keys()).collect();
+        keys.sort_unstable();
+        keys.dedup();
+        let mut seen: HashSet<&str> = HashSet::new();
+        for key in keys {
+            if is_bom_line_field(key) {
+                continue;
+            }
+            let old = pa.get(key).map(String::as_str).unwrap_or("");
+            let new = pb.get(key).map(String::as_str).unwrap_or("");
+            if old == new {
+                continue;
+            }
+            seen.insert(key.as_str());
+            match agreed.get(key) {
+                Some((o, n)) if o == old && n == new => {}
+                Some(_) => {
+                    rejected.insert(key.clone());
+                }
+                None if members == 1 => {
+                    agreed.insert(key.clone(), (old.to_string(), new.to_string()));
+                }
+                // A later member introducing an edit the earlier ones didn't have means
+                // the members disagree.
+                None => {
+                    rejected.insert(key.clone());
+                }
+            }
+        }
+        // An edit an earlier member had but this one doesn't is a disagreement too.
+        for key in agreed.keys() {
+            if !seen.contains(key.as_str()) {
+                rejected.insert(key.clone());
+            }
+        }
+    }
+    agreed
+        .into_iter()
+        .filter(|(k, _)| !rejected.contains(k))
+        .map(|(field, (old, new))| BomFieldEdit { field, old, new })
+        .collect()
+}
+
+/// The panel-facing `"<field> old → new"` lines for a set of edits.
+fn edit_bits(edits: &[BomFieldEdit]) -> impl Iterator<Item = String> + '_ {
+    edits.iter().map(|e| format!("{} {} → {}", e.field, disp(&e.old), disp(&e.new)))
+}
+
+/// Attach the line's field edits to a BOM anchor built by `bom_anchor`.
+fn with_field_edits(mut anchors: Anchors, edits: Vec<BomFieldEdit>) -> Anchors {
+    if let Some(bom) = anchors.bom.as_mut() {
+        bom.fields = edits;
+    }
+    anchors
 }
 
 /// Derive the BOM changeset (plan §8). `comps` is the component pass's verdict —
@@ -1570,9 +1680,14 @@ fn diff_bom(a: &Bundle, b: &Bundle, comps: &CompDelta, out: &mut Vec<Change>) {
         if ga.dsg.len() != gb.dsg.len() {
             bits.push(format!("qty {} → {}", ga.dsg.len(), gb.dsg.len()));
         }
+        let edits = bom_param_edits(a, b, &rename, &gb.dsg);
+        bits.extend(edit_bits(&edits));
         let added: Vec<String> = gb.dsg.difference(&ga.dsg).cloned().collect();
         let removed: Vec<String> = ga.dsg.difference(&gb.dsg).cloned().collect();
-        let anchors = bom_anchor(kb, gb, ga.dsg.len() as i64, gb.dsg.len() as i64, added, removed);
+        let anchors = with_field_edits(
+            bom_anchor(kb, gb, ga.dsg.len() as i64, gb.dsg.len() as i64, added, removed),
+            edits,
+        );
         out.push(bom_change(
             Kind::Modified,
             format!(
@@ -1598,6 +1713,9 @@ fn diff_bom(a: &Bundle, b: &Bundle, comps: &CompDelta, out: &mut Vec<Change>) {
     // (a pure MPN swap renders identical labels) and the frontend's inline old→new
     // parsing (bomOldValues) lights up for the moved part too.
     let mut move_rows: Vec<(String, String, String, String, String)> = Vec::new();
+    // Kept beside `move_rows` rather than in it: the tuple is sorted, and the edits are
+    // looked up by designator when the row's anchor is built below.
+    let mut move_edits: HashMap<String, Vec<BomFieldEdit>> = HashMap::new();
     for (ra, ca) in &a.indexes.components {
         let d = rename.get(ra.as_str()).copied().unwrap_or(ra.as_str());
         let Some(cb) = b.indexes.components.get(d) else { continue };
@@ -1617,6 +1735,9 @@ fn diff_bom(a: &Bundle, b: &Bundle, comps: &CompDelta, out: &mut Vec<Change>) {
         if ca.mpn != cb.mpn {
             bits.push(format!("MPN {} → {}", disp(&ca.mpn), disp(&cb.mpn)));
         }
+        let edits = bom_param_edits(a, b, &rename, &BTreeSet::from([d.to_string()]));
+        bits.extend(edit_bits(&edits));
+        move_edits.insert(d.to_string(), edits);
         move_rows.push((
             d.to_string(),
             bom_label(&ca.value, &ca.fp, &ca.mpn),
@@ -1629,7 +1750,10 @@ fn diff_bom(a: &Bundle, b: &Bundle, comps: &CompDelta, out: &mut Vec<Change>) {
     for (d, from, to, to_key, bits) in &move_rows {
         let line = &lb[to_key];
         let qty_a = la.get(to_key).map(|l| l.dsg.len() as i64).unwrap_or(0);
-        let anchors = bom_anchor(to_key, line, qty_a, line.dsg.len() as i64, vec![d.clone()], Vec::new());
+        let anchors = with_field_edits(
+            bom_anchor(to_key, line, qty_a, line.dsg.len() as i64, vec![d.clone()], Vec::new()),
+            move_edits.remove(d).unwrap_or_default(),
+        );
         out.push(bom_change(
             Kind::Modified,
             format!("BOM: {d} moved {from} → {to} line"),
@@ -1731,6 +1855,32 @@ fn diff_bom(a: &Bundle, b: &Bundle, comps: &CompDelta, out: &mut Vec<Change>) {
                 gb.dsg.len()
             ),
             bits.join("; "),
+            Side::Both,
+            anchors,
+        ));
+    }
+
+    // --- symbol-property edits on a line that is otherwise untouched: same grouping key,
+    // same designators, but a field the purchaser cares about moved (MSL, Automotive
+    // Grade, Tolerance, …). Without this the BOM tab shows nothing for such a revision,
+    // even though the component pass reports it.
+    for (k, gb) in &lb {
+        let Some(ga) = la.get(k) else { continue };
+        if ga.dsg != gb.dsg {
+            continue; // the qty/fold passes above already own this line
+        }
+        let edits = bom_param_edits(a, b, &rename, &gb.dsg);
+        if edits.is_empty() {
+            continue;
+        }
+        let detail = edit_bits(&edits).collect::<Vec<_>>().join("; ");
+        let qty = gb.dsg.len() as i64;
+        let anchors =
+            with_field_edits(bom_anchor(k, gb, qty, qty, Vec::new(), Vec::new()), edits);
+        out.push(bom_change(
+            Kind::Modified,
+            format!("BOM {}: fields edited", bom_label(&gb.value, &gb.footprint, &gb.mpn)),
+            detail,
             Side::Both,
             anchors,
         ));
@@ -3199,7 +3349,10 @@ pub fn diff_key(cache_key_a: &str, cache_key_b: &str) -> String {
     //    no longer reads as "no change".
     // 10: BOM changeset (group "bom" rows + BomAnchor) derived from the component
     //     changeset (phase 3).
-    const DIFF_ENGINE_VERSION: &str = "10";
+    // 11: BOM rows carry the line's symbol-property edits (MSL, Automotive Grade, …) on
+    //     the anchor, and a line whose members only edited such a property gets its own
+    //     BOM row instead of showing up in the component pass alone.
+    const DIFF_ENGINE_VERSION: &str = "11";
     let mut h = blake3::Hasher::new();
     h.update(DIFF_ENGINE_VERSION.as_bytes());
     h.update(b" ");

@@ -20,6 +20,7 @@ import {
   changesFirstCompare,
   decorateBomRows,
   bomOldValues,
+  looseField,
   type DiffBomRow,
 } from "../lib/bomDiff";
 import {
@@ -748,10 +749,13 @@ export function BomTab() {
       default: {
         // Custom preset columns carry the long values (Description, Manufacturer, …) and
         // every cell now clips with an ellipsis, so the full text lives on the tooltip.
+        // A symbol property the comparison changed (MSL, Automotive Grade, …) reads
+        // old → new here just like the built-in columns.
         const v = text(r, col);
+        const was = old.fields[looseField(col.field ?? col.label)];
         return (
           <td key={col.id} title={v} onContextMenu={(e) => openCellMenu(e, r, col)}>
-            {plainCell(v)}
+            {wasCell(was, v)}
           </td>
         );
       }
@@ -926,7 +930,7 @@ export function BomTab() {
               const old =
                 r.status === "changed"
                   ? bomOldValues(r.changeIds.map((id) => changeById.get(id)).filter(isChange))
-                  : {};
+                  : { fields: {} };
               return (
                 <tr
                   key={displayKey}

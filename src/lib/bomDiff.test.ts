@@ -132,7 +132,7 @@ describe("bomDiff helpers", () => {
             },
           ),
         ]),
-      ).toEqual({ value: "10k", mpn: "OLD-1", qty: 3 });
+      ).toEqual({ value: "10k", mpn: "OLD-1", qty: 3, fields: {} });
     });
 
     it("maps the ∅ placeholder to an empty old value", () => {
@@ -142,7 +142,7 @@ describe("bomDiff helpers", () => {
             detail: "footprint ∅ → R_0402",
           }),
         ]),
-      ).toEqual({ footprint: "" });
+      ).toEqual({ footprint: "", fields: {} });
     });
 
     it("ignores added/removed changes and details with no old → new bits", () => {
@@ -156,7 +156,27 @@ describe("bomDiff helpers", () => {
           }),
           bomCh("ch_3", "modified", { key: "k3", designators: ["C1"] }, { detail: "+1: C9" }),
         ]),
-      ).toEqual({});
+      ).toEqual({ fields: {} });
+    });
+
+    it("takes symbol-property edits off the anchor, keyed loosely", () => {
+      expect(
+        bomOldValues([
+          bomCh(
+            "ch_1",
+            "modified",
+            {
+              key: "k",
+              designators: ["J1"],
+              fields: [
+                { field: "Automotive Grade", old: "", new: "YES" },
+                { field: "MSL", old: "1", new: "2" },
+              ],
+            },
+            { detail: "Automotive Grade ∅ → YES; MSL 1 → 2" },
+          ),
+        ]),
+      ).toEqual({ fields: { automotivegrade: "", msl: "1" } });
     });
   });
 

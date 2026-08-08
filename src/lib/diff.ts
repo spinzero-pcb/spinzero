@@ -67,6 +67,16 @@ export interface BomAnchor {
   added?: string[];
   /** Designators responsible for a qty decrease. */
   removed?: string[];
+  /** Symbol-property edits every member of the line agrees on (MSL, Automotive Grade, …),
+   *  so the table can render "old → new" in whatever preset column shows them. */
+  fields?: BomFieldEdit[];
+}
+
+/** One `field: old → new` edit carried on a BOM anchor (mirrors diff.rs BomFieldEdit). */
+export interface BomFieldEdit {
+  field: string;
+  old: string;
+  new: string;
 }
 
 export interface ChangeAnchors {

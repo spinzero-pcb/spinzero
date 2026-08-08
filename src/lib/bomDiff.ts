@@ -111,6 +111,10 @@ export interface BomOldValues {
   footprint?: string;
   mpn?: string;
   qty?: number;
+  /** Old values of the symbol properties the line's members changed (MSL, Automotive
+   *  Grade, …), keyed by `loose()` field name so a preset column matches whatever
+   *  spelling/casing KiCad used. */
+  fields: Record<string, string>;
 }
 
 /** "∅" is the Rust side's empty-field placeholder (see `disp` in diff.rs). */
@@ -121,7 +125,7 @@ const EMPTY_MARK = "∅";
  *  folded BOM line), plus qty from the anchor's qtyA/qtyB. Only "modified"
  *  changes contribute — added/removed rows have no old-vs-new within one line. */
 export function bomOldValues(changes: Change[]): BomOldValues {
-  const out: BomOldValues = {};
+  const out: BomOldValues = { fields: {} };
   const FIELD: Record<string, "value" | "footprint" | "mpn"> = {
     value: "value",
     footprint: "footprint",
@@ -131,6 +135,12 @@ export function bomOldValues(changes: Change[]): BomOldValues {
     if (c.group !== "bom" || c.kind === "added" || c.kind === "removed") continue;
     const anchor = c.anchors.bom;
     if (anchor && anchor.qtyA !== anchor.qtyB && out.qty === undefined) out.qty = anchor.qtyA;
+    // Symbol-property edits ride structured on the anchor (their names and values are
+    // free-form, so they can't be recovered from `detail` unambiguously).
+    for (const e of anchor?.fields ?? []) {
+      const key = looseField(e.field);
+      if (key && out.fields[key] === undefined) out.fields[key] = e.old;
+    }
     for (const bit of (c.detail ?? "").split(";")) {
       const m = /^(value|footprint|MPN)\s+(.*?)\s+→\s+(.*)$/.exec(bit.trim());
       if (!m) continue;
@@ -139,6 +149,12 @@ export function bomOldValues(changes: Change[]): BomOldValues {
     }
   }
   return out;
+}
+
+/** Loose field key for matching a diff bit's field name to a preset column — lowercased
+ *  with non-alphanumerics dropped (mirrors `loose` in bomColumns.ts). */
+export function looseField(s: string): string {
+  return s.toLowerCase().replace(/[^a-z0-9]/g, "");
 }
 
 /** Changes-first comparator (the diff-mode default sort): tinted rows before
