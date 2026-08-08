@@ -349,6 +349,15 @@ export function BomTab() {
     setExpanded((s) => (s.size === 0 ? s : new Set()));
   }, [filter, presetName, diffActive]);
 
+  /** The ungrouped (one-per-component) line each designator came from, so an expanded
+   *  child can show that component's own field values instead of the group's merged
+   *  ones — which read MIXED_VALUES wherever the members disagree. */
+  const lineByDesignator = useMemo(() => {
+    const m = new Map<string, BomLine>();
+    for (const l of lines ?? []) for (const d of l.designators) if (!m.has(d)) m.set(d, l);
+    return m;
+  }, [lines]);
+
   /** The flattened list actually rendered: every parent row, each followed by its
    *  designator children while expanded. All windowing arithmetic runs on this list, so
    *  spacer heights, rowIndex and scrollToKey stay in step with what is on screen. */
@@ -359,14 +368,23 @@ export function BomTab() {
       out.push({ row: r, key, child: false });
       if (r.line.designators.length < 2 || !expanded.has(key)) continue;
       for (const d of r.line.designators) {
+        // A child is one component's own line narrowed to that designator, so
+        // cellText/renderCell (and therefore copy and the MPN fallback) just work — and
+        // the fields the group folded to MIXED_VALUES read as this member's values. A
+        // designator the ungrouped set doesn't carry (a synthetic removed row) keeps the
+        // old behaviour: the group's line, narrowed.
+        const own = lineByDesignator.get(d) ?? r.line;
         out.push({
-          // A child is the same line narrowed to one designator, so cellText/renderCell
-          // (and therefore copy, sorting-free display and the MPN fallback) just work.
           row: {
             ...r,
             status: null,
             changeIds: [],
-            line: { ...r.line, designators: [d], mpn: indexes?.components[d]?.mpn || r.line.mpn },
+            line: {
+              ...own,
+              item: r.line.item,
+              designators: [d],
+              mpn: own.mpn || indexes?.components[d]?.mpn || "",
+            },
           },
           key: `${key}:${d}`,
           child: true,
@@ -374,7 +392,7 @@ export function BomTab() {
       }
     }
     return out;
-  }, [rows, expanded, indexes]);
+  }, [rows, expanded, indexes, lineByDesignator]);
 
   function toggleExpand(key: string) {
     setExpanded((s) => {

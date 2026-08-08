@@ -419,7 +419,11 @@ pub struct ProjectSummary {
     pub layer_count: i64,
     pub component_count: i64,
     pub net_count: i64,
-    pub bom_line_count: i64,
+    /// Rows in the extracted BOM. The extractor emits one row per BOM-included
+    /// component (grouping is the table's job), so this is a component count — not the
+    /// number of grouped lines the BOM tab shows, and not `component_count` either,
+    /// which also counts parts excluded from the BOM.
+    pub bom_component_count: i64,
 }
 
 fn latest_revision(conn: &Connection) -> Option<(String, String)> {
@@ -458,7 +462,11 @@ pub fn project_summary(conn: &Connection, want: Option<&str>) -> Option<ProjectS
         layer_count: count(conn, "SELECT COUNT(*) FROM layers WHERE revision_id=?1", &rev),
         component_count: count(conn, "SELECT COUNT(*) FROM components WHERE revision_id=?1", &rev),
         net_count: count(conn, "SELECT COUNT(*) FROM nets WHERE revision_id=?1", &rev),
-        bom_line_count: count(conn, "SELECT COUNT(*) FROM bom_lines WHERE revision_id=?1", &rev),
+        bom_component_count: count(
+            conn,
+            "SELECT COUNT(*) FROM bom_lines WHERE revision_id=?1",
+            &rev,
+        ),
         revision_id: rev,
     })
 }

@@ -119,7 +119,9 @@ export interface ProjectSummary {
   layer_count: number;
   component_count: number;
   net_count: number;
-  bom_line_count: number;
+  /** BOM rows = BOM-included components (the extractor emits one row per component;
+   *  grouping is the BOM table's job). Not the grouped-line count on screen. */
+  bom_component_count: number;
 }
 
 export interface SheetInfo {
