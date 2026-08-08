@@ -1807,6 +1807,12 @@ button {
    is on the cell's tooltip and behind the expander. The inner span's max-width is what
    caps the column in auto layout; once the user has sized the columns it fills whatever
    width they dragged. */
+/* The expander lives in a fixed-width gutter carved out of the cell's own left padding,
+   so a grouped row (chevron) and a single-component row (none) start their designators at
+   the same x — and the header label sits over that same edge. */
+.bom-table { --bom-dsg-gutter: 14px; }
+.bom-table td.bom-dsg,
+.bom-table th.bom-dsg-th { padding-left: calc(var(--sp-2) + var(--bom-dsg-gutter)); }
 .bom-table td.bom-dsg { max-width: 340px; }
 .bom-dsg-text {
   display: inline-block;
@@ -1824,7 +1830,12 @@ button {
   background: none;
   border: 0;
   padding: 0;
-  margin-right: var(--sp-1);
+  /* Hangs back into the gutter the cell's padding reserves, so the text after it lands
+     where a chevron-less row's text does. */
+  display: inline-block;
+  width: var(--bom-dsg-gutter);
+  margin-left: calc(-1 * var(--bom-dsg-gutter));
+  text-align: left;
   color: var(--fg-2);
   cursor: pointer;
   font-size: 10px;

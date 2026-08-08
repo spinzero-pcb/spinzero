@@ -895,6 +895,9 @@ export function BomTab() {
               {cols.map((c) => (
                 <th
                   key={c.id}
+                  // The designators header carries the same expander gutter its cells do,
+                  // so the label sits over the designator text rather than left of it.
+                  className={c.builtin === "designators" ? "bom-dsg-th" : undefined}
                   ref={(el) => {
                     if (el) thRefs.current.set(c.id, el);
                     else thRefs.current.delete(c.id);
