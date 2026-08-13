@@ -118,6 +118,23 @@ describe("groupLines", () => {
     expect(out[0].fields.MSL).toBe(MIXED_VALUES);
   });
 
+  it("separates the key fields so a value/footprint split can't collide", () => {
+    // "1" + "0k_R0402" and "10" + "k_R0402" concatenate to the same string; only the
+    // U+001F separator keeps them apart. Without it these fold into one qty-2 line.
+    const out = groupLines(
+      [
+        bom({ item: 1, qty: 1, value: "1", footprint: "0k_R0402" }),
+        bom({ item: 2, qty: 1, value: "10", footprint: "k_R0402" }),
+      ],
+      [
+        { name: "Value", label: "Value", show: true, group_by: true },
+        { name: "Footprint", label: "Footprint", show: true, group_by: true },
+      ],
+    );
+    expect(out).toHaveLength(2);
+    expect(out.map((l) => l.qty)).toEqual([1, 1]);
+  });
+
   it("keeps DNP only when every member is DNP", () => {
     const flags = [{ name: "Value", label: "Value", show: true, group_by: true }];
     expect(groupLines([bom({ dnp: true }), bom({ dnp: false })], flags)[0].dnp).toBe(false);

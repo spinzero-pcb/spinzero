@@ -206,7 +206,56 @@ fn load_hierarchy(
             }
         }
     }
+
+    // Project text variables (`${PCB_REVISION}` &c.) are a project-file concept, so the
+    // parser can't resolve them — do it once here, before anything reads a sheet. That
+    // way the expanded text reaches the design model, the BOM and the rendered SVG
+    // alike (the board self-resolves in the parser: it mirrors the vars into itself).
+    let vars = read_text_vars(&project.with_extension("kicad_pro"));
+    if !vars.is_empty() {
+        for s in &mut out {
+            expand_sheet_text_vars(&mut s.sch, &vars);
+            // SheetInfo copies the title-block/note text out of the sheet, so refresh
+            // the copies from the now-expanded source.
+            s.info.title = s.sch.title.clone().unwrap_or_default();
+            s.info.company = s.sch.company.clone().unwrap_or_default();
+            s.info.rev = s.sch.rev.clone().unwrap_or_default();
+            s.info.date = s.sch.date.clone().unwrap_or_default();
+            s.info.notes = s.sch.notes.iter().map(|t| t.text.clone()).collect();
+        }
+    }
     Ok((name, out))
+}
+
+/// Expand `${KEY}` project text variables in place, everywhere KiCad substitutes them
+/// on a schematic sheet: symbol fields (which is what the BOM reads), free text notes
+/// and the title block. Deliberately NOT applied to labels or sheet names — those name
+/// nets and hierarchy paths, and expanding them would silently re-key connectivity.
+fn expand_sheet_text_vars(sch: &mut Schematic, vars: &BTreeMap<String, String>) {
+    for sym in &mut sch.symbols {
+        for p in &mut sym.properties {
+            if p.value.contains("${") {
+                p.value = expand_text_vars(&p.value, vars);
+            }
+        }
+    }
+    for n in &mut sch.notes {
+        if n.text.contains("${") {
+            n.text = expand_text_vars(&n.text, vars);
+        }
+    }
+    for f in [&mut sch.title, &mut sch.company, &mut sch.rev, &mut sch.date] {
+        if let Some(s) = f.as_mut() {
+            if s.contains("${") {
+                *s = expand_text_vars(s, vars);
+            }
+        }
+    }
+    for c in &mut sch.comments {
+        if c.contains("${") {
+            *c = expand_text_vars(c, vars);
+        }
+    }
 }
 
 /// The KiCad instance path of a sheet, rebuilt from the walker's `sheet_path_uuids`.
@@ -324,26 +373,17 @@ pub fn run_design(project: &Path, out_dir: &Path, emit: &mut dyn FnMut(Msg)) -> 
     std::fs::create_dir_all(&sch_dir).map_err(|e| e.to_string())?;
     let mut schematic_svgs = Vec::new();
     // Title-block fields are per-sheet in KiCad — a sub-sheet shows ONLY its own
-    // fields (an empty title stays empty; it does NOT inherit the root's), with
-    // project text variables (e.g. ${PCB_REVISION}) expanded. Matches KiCad's plot.
-    let text_vars = read_text_vars(&project.with_extension("kicad_pro"));
+    // fields (an empty title stays empty; it does NOT inherit the root's). Project
+    // text variables were already expanded by `load_hierarchy`.
     let total = sheets.len() as i64;
     for s in &sheets {
         let display = sheet_display_name(&s.info);
         let file_name = format!("{:02}_{}.svg", s.info.sheet_number, slug(&display));
-        let eff = |own: &Option<String>| {
-            expand_text_vars(own.as_deref().unwrap_or(""), &text_vars)
-        };
-        let (title, company, rev, date) = (
-            eff(&s.sch.title),
-            eff(&s.sch.company),
-            eff(&s.sch.rev),
-            eff(&s.sch.date),
-        );
-        // KiCad version is a file field, not a user-entered one — no text-var pass.
+        let own = |f: &Option<String>| f.clone().unwrap_or_default();
+        let (title, company, rev, date) =
+            (own(&s.sch.title), own(&s.sch.company), own(&s.sch.rev), own(&s.sch.date));
         let version = s.sch.generator_version.clone().unwrap_or_default();
-        let comments: Vec<String> =
-            s.sch.comments.iter().map(|c| expand_text_vars(c, &text_vars)).collect();
+        let comments: Vec<String> = s.sch.comments.clone();
         let frame = crate::svg::SheetFrame {
             number: s.info.sheet_number,
             page: &s.info.page,
@@ -613,6 +653,38 @@ mod tests {
     fn test_project() -> Option<PathBuf> {
         let p = PathBuf::from(std::env::var("SPINZERO_TEST_PROJECT").ok()?);
         p.exists().then_some(p)
+    }
+
+    /// A `${VAR}` in a symbol field (e.g. an MPN of `EX-…-Rev ${PCB_REVISION}`) must
+    /// read expanded — that field is what both the BOM table and the rendered
+    /// schematic show. Notes and the title block go the same way; an unknown key stays
+    /// literal, and labels stay untouched so connectivity isn't re-keyed.
+    #[test]
+    fn expands_text_vars_in_symbol_fields_notes_and_title_block() {
+        let src = r#"
+        (kicad_sch
+          (uuid "root")
+          (title_block (title "Rev ${PCB_REVISION}") (comment 1 "c ${PCB_REVISION}"))
+          (symbol (lib_id "Device:R") (at 0 0 0) (uuid "r1")
+            (property "Reference" "R1")
+            (property "MPN" "EX-0000035-00-Rev ${PCB_REVISION}")
+            (property "Note" "${NOPE}"))
+          (text "n ${PCB_REVISION}" (at 0 0 0))
+          (label "NET_${PCB_REVISION}" (at 0 0 0)))
+        "#;
+        let mut sch = Schematic::parse_str(src).expect("parse");
+        let vars = BTreeMap::from([("PCB_REVISION".to_string(), "B".to_string())]);
+        expand_sheet_text_vars(&mut sch, &vars);
+
+        let field = |k: &str| {
+            sch.symbols[0].properties.iter().find(|p| p.key == k).unwrap().value.clone()
+        };
+        assert_eq!(field("MPN"), "EX-0000035-00-Rev B");
+        assert_eq!(field("Note"), "${NOPE}", "unknown key stays literal, as KiCad does");
+        assert_eq!(sch.notes[0].text, "n B");
+        assert_eq!(sch.title.as_deref(), Some("Rev B"));
+        assert_eq!(sch.comments[0], "c B");
+        assert_eq!(sch.labels[0].text, "NET_${PCB_REVISION}", "labels name nets — untouched");
     }
 
     /// `design.json` must be byte-identical across runs — the runtime cache key and

@@ -7,7 +7,6 @@ export type KeyAction =
   | "palette"
   | "commands"
   | "fit"
-  | "overview"
   | "crossProbe"
   | "zoomIn"
   | "zoomOut"

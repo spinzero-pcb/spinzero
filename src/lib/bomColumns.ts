@@ -161,13 +161,18 @@ const byDesignator = (a: string, b: string) => a.localeCompare(b, undefined, { n
  *  one member carries and another doesn't counts as a disagreement). Item numbers are
  *  re-issued in the resulting order. No flagged fields → the input, untouched. */
 export function groupLines(lines: BomLine[], keyFields: BomPresetField[]): BomLine[] {
+  // U+001F between fields, spelled as an escape rather than a raw control character:
+  // without it Value "1" + Footprint "0k_R0402" and Value "10" + Footprint "k_R0402"
+  // would collide into one line with a summed qty. Same convention as `lineKey`
+  // (bomDiff.ts) and `bom_key` (src-tauri/src/diff.rs).
+  const SEP = "\u001f";
   const flagged = keyFields.filter((f) => f.group_by);
   if (flagged.length === 0) return lines;
   const groups = new Map<string, BomLine>();
   for (const line of lines) {
     const key = flagged
       .map((f) => fieldValue(line, f.name, f.label).trim().toLowerCase())
-      .join("");
+      .join(SEP);
     const prev = groups.get(key);
     if (!prev) {
       groups.set(key, { ...line, designators: [...line.designators], fields: { ...line.fields } });

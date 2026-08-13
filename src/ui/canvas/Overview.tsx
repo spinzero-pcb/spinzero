@@ -4,7 +4,7 @@ import { useSelectionStore } from "../../stores/selectionStore";
 import type { DesignIndexes } from "../../lib/design";
 
 // Contact-sheet of all sheets (spec WS6) — the secondary "picker" tier, reached by
-// zooming out past the sheet edge or the overview key. U4 crunch-time thumbnails
+// zooming out past the sheet edge. U4 crunch-time thumbnails
 // don't exist yet, so sheets are rasterized client-side once per revision: keyed by
 // the indexes object identity, the cache dies with the revision that made it.
 const thumbCache = new WeakMap<DesignIndexes, Map<number, string>>();

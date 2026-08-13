@@ -745,6 +745,9 @@ fn prepare_diff_blocking(
     let rev_meta_a = resolved_a.revision().clone();
     let rev_meta_b = resolved_b.revision().clone();
     log::info!("prepare_diff: {} → {}", rev_meta_a.id, rev_meta_b.id);
+    // Counted once both revisions resolve, so every path below (byte-identical
+    // short-circuit, cached doc, freshly computed) reports one diff prepared.
+    telemetry::bump("diffs_prepared");
 
     let key_a = cache::cache_key(&rev_meta_a.source_hashes);
     let key_b = cache::cache_key(&rev_meta_b.source_hashes);
@@ -1153,9 +1156,14 @@ fn get_settings(app: AppHandle) -> serde_json::Value {
 #[tauri::command]
 fn set_settings(app: AppHandle, settings: serde_json::Value) -> Result<(), String> {
     let path = ui_settings_path(&app).ok_or("no config dir")?;
-    fs::create_dir_all(path.parent().unwrap()).map_err(|e| e.to_string())?;
-    fs::write(&path, serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())?)
-        .map_err(|e| e.to_string())
+    let json = serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())?;
+    // Atomic write (tmp + rename) like set_highlights and every other whole-file writer.
+    // This file is the ONLY copy of the user's prefs — keymap, accent, and every
+    // project's remembered UI — and the frontend persists the WHOLE object on every
+    // setter, so a bare fs::write reopens a truncation window on each one (the opacity
+    // slider fires one per drag tick). A torn file parses as invalid and get_settings
+    // swallows it into Null: every preference gone, silently.
+    project::write_atomic(&path, json.as_bytes())
 }
 
 // ------------------------------------------------------------ external links

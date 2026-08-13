@@ -4,6 +4,7 @@ import { useDesignStore } from "./designStore";
 import { useReviewStore } from "./reviewStore";
 import { useSelectionStore } from "./selectionStore";
 import { useNetClassStore } from "./netClassStore";
+import { useViewStore } from "./viewStore";
 import { useToastStore, type ToastInput } from "./toastStore";
 import {
   normalizeExtraction,
@@ -166,6 +167,8 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       void useReviewStore.getState().load();
       // Net-class/net colour picks are remembered per project (machine-local settings).
       void useNetClassStore.getState().hydrate(project.project_dir);
+      // Same tier for the BOM preset / hidden columns / sort (project-defined ids).
+      void useViewStore.getState().hydrateBom(project.project_dir);
     } catch (e) {
       set({ errorMsg: String(e) });
       // Surface it everywhere (the Home error card is invisible once a project is
@@ -200,6 +203,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       void get().refreshIndex();
       void useReviewStore.getState().load();
       void useNetClassStore.getState().hydrate(project.project_dir);
+      void useViewStore.getState().hydrateBom(project.project_dir);
     } catch (e) {
       set({ errorMsg: String(e) });
       throw e;

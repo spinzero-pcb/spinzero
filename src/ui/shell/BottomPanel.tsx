@@ -1,18 +1,40 @@
 import { useEffect, useRef, useState } from "react";
 import { useCrunchStore } from "../../stores/crunchStore";
+import { useSettingsStore } from "../../stores/settingsStore";
 import { ipc } from "../../lib/ipc";
 
 const MIN_H = 64;
-const STORE_KEY = "bottomPanelH";
+const DEFAULT_H = 200;
+/** Pre-settings localStorage key, read once to migrate. Droppable once no install
+ *  predates the move to ui_settings.json. */
+const LEGACY_KEY = "bottomPanelH";
 
 export function BottomPanel() {
   const { phase, lines, artifacts, error, skipReason } = useCrunchStore();
   const bodyRef = useRef<HTMLDivElement>(null);
-  // Drag-resizable height (item 10), persisted across sessions.
-  const [height, setHeight] = useState(() => {
-    const h = Number(localStorage.getItem(STORE_KEY));
-    return Number.isFinite(h) && h >= MIN_H ? h : 200;
-  });
+  // Drag-resizable height (item 10), persisted across sessions in ui_settings.json.
+  const savedH = useSettingsStore((s) => s.bottomPanelH);
+  const settingsLoaded = useSettingsStore((s) => s.loaded);
+  const [height, setHeight] = useState(DEFAULT_H);
+  // Settings load asynchronously, so adopt the saved height once — and only until the
+  // user drags, which is what `touched` guards (a late load must not yank the panel).
+  const touched = useRef(false);
+
+  useEffect(() => {
+    if (!settingsLoaded || touched.current) return;
+    if (typeof savedH === "number" && savedH >= MIN_H) {
+      setHeight(savedH);
+      return;
+    }
+    const legacy = Number(localStorage.getItem(LEGACY_KEY));
+    if (Number.isFinite(legacy) && legacy >= MIN_H) {
+      setHeight(legacy);
+      void useSettingsStore
+        .getState()
+        .setBottomPanelH(legacy)
+        .then(() => localStorage.removeItem(LEGACY_KEY));
+    }
+  }, [settingsLoaded, savedH]);
 
   useEffect(() => {
     bodyRef.current?.scrollTo({ top: bodyRef.current.scrollHeight });
@@ -26,13 +48,15 @@ export function BottomPanel() {
     handle.setPointerCapture(e.pointerId);
     const clamp = (h: number) =>
       Math.min(Math.round(window.innerHeight * 0.7), Math.max(MIN_H, h));
+    touched.current = true;
     const onMove = (ev: PointerEvent) => setHeight(clamp(startH + (startY - ev.clientY)));
     const onUp = (ev: PointerEvent) => {
       handle.releasePointerCapture(ev.pointerId);
       handle.removeEventListener("pointermove", onMove);
       handle.removeEventListener("pointerup", onUp);
+      // One write per completed drag, not per pointermove.
       setHeight((h) => {
-        localStorage.setItem(STORE_KEY, String(h));
+        void useSettingsStore.getState().setBottomPanelH(h);
         return h;
       });
     };

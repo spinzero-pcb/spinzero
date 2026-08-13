@@ -14,26 +14,21 @@
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { ipc } from "./ipc";
 import { useUpdateStore } from "../stores/updateStore";
+import { useSettingsStore } from "../stores/settingsStore";
 
 /** Version we downloaded + offered, but the user closed the app without applying. Kept
- *  in localStorage (persists across launches) so the NEXT launch can auto-apply it
- *  rather than prompting again. Cleared once we're on the latest build. */
-const DEFERRED_KEY = "spinzero.update.deferred";
-// NOTE: a readDeferred() reader belongs here when auto-apply is re-enabled (see the
-// paused block in checkForUpdates). It's omitted while paused so the build has no dead code.
+ *  in ui_settings.json (persists across launches) so the NEXT launch can auto-apply it
+ *  rather than prompting again. Cleared once we're on the latest build.
+ *  NOTE: a readDeferred() reader belongs here when auto-apply is re-enabled (see the
+ *  paused block below) — `useSettingsStore.getState().updateDeferred`. It's omitted
+ *  while paused so the build has no dead code. */
 const writeDeferred = (v: string): void => {
-  try {
-    localStorage.setItem(DEFERRED_KEY, v);
-  } catch {
-    /* storage unavailable (rare) — we simply re-offer next launch instead of auto-applying */
-  }
+  // Best-effort, like every settings write: a failure just means we re-offer next
+  // launch instead of auto-applying.
+  void useSettingsStore.getState().setUpdateDeferred(v);
 };
 const clearDeferred = (): void => {
-  try {
-    localStorage.removeItem(DEFERRED_KEY);
-  } catch {
-    /* ignore */
-  }
+  void useSettingsStore.getState().setUpdateDeferred(null);
 };
 
 /** Check the release endpoint for a newer signed build and either auto-apply a

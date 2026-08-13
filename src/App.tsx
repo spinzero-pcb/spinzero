@@ -218,9 +218,6 @@ export default function App() {
           if (inSchematic) nav.fitView();
           else if (useViewStore.getState().view === "pcb") pcbNav.fit();
           break;
-        case "overview":
-          if (inSchematic) nav.toggleOverview();
-          break;
         case "zoomIn":
           if (inSchematic) nav.zoomBy(1.4);
           else if (useViewStore.getState().view === "pcb") pcbNav.zoomBy(1.4);

@@ -17,6 +17,15 @@ interface SettingsState {
   projectUi: Record<string, ProjectUi>;
   /** Remembered PCB per-class transparency (0..1 per object class); null = defaults. */
   pcbOpacity: Record<string, number> | null;
+  /** BOM quick-filter chips; null = never saved (viewStore applies its own defaults,
+   *  which are NOT all-false — see `changedOnly`). */
+  bomChips: Record<string, boolean> | null;
+  /** PCB compare blink toggle; null = never saved (defaults off). */
+  diffBlink: boolean | null;
+  /** Output panel height in px; null = never saved (the component's default). */
+  bottomPanelH: number | null;
+  /** Downloaded-but-unapplied update version; null = nothing pending. */
+  updateDeferred: string | null;
   loaded: boolean;
   load: () => Promise<void>;
   setKeymap: (k: KeymapPreset) => Promise<void>;
@@ -25,8 +34,17 @@ interface SettingsState {
   setAuthorName: (n: string | null) => Promise<void>;
   /** Merge a patch into one project's remembered review UI and persist. */
   setProjectUi: (projectDir: string, patch: Partial<ProjectUi>) => Promise<void>;
-  /** Persist the PCB transparency sliders (whole map, so one class never clobbers another). */
-  setPcbOpacity: (opacity: Record<string, number>) => Promise<void>;
+  /** Persist the PCB transparency sliders (whole map, so one class never clobbers
+   *  another). Debounced: the sliders fire on every tick of a drag. */
+  setPcbOpacity: (opacity: Record<string, number>) => void;
+  /** Persist the BOM chip set (whole map, same reason as pcbOpacity). */
+  setBomChips: (chips: Record<string, boolean>) => Promise<void>;
+  /** Persist the PCB compare blink toggle. */
+  setDiffBlink: (on: boolean) => Promise<void>;
+  /** Persist the output panel height (called once per completed drag). */
+  setBottomPanelH: (h: number) => Promise<void>;
+  /** Persist (or clear, with null) the pending update version. */
+  setUpdateDeferred: (v: string | null) => Promise<void>;
 }
 
 export const useSettingsStore = create<SettingsState>((set, get) => ({
@@ -36,6 +54,10 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   authorName: null,
   projectUi: {},
   pcbOpacity: null,
+  bomChips: null,
+  diffBlink: null,
+  bottomPanelH: null,
+  updateDeferred: null,
   loaded: false,
 
   load: async () => {
@@ -57,27 +79,43 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
             ? (s.project_ui as Record<string, ProjectUi>)
             : {},
         pcbOpacity,
+        // Kept raw here; the consuming stores validate on hydrate (settings are
+        // hand-editable, so every field is untrusted at this boundary).
+        bomChips:
+          s && typeof s.bom_chips === "object" && s.bom_chips !== null
+            ? (s.bom_chips as Record<string, boolean>)
+            : null,
+        diffBlink: typeof s?.diff_blink === "boolean" ? s.diff_blink : null,
+        bottomPanelH:
+          typeof s?.bottom_panel_h === "number" && Number.isFinite(s.bottom_panel_h)
+            ? s.bottom_panel_h
+            : null,
+        updateDeferred: typeof s?.update_deferred === "string" ? s.update_deferred : null,
         loaded: true,
       });
       // Push the saved transparency into the PCB view store so the sliders open where
       // the user left them (validated + clamped there).
       usePcbViewStore.getState().hydrateOpacity(pcbOpacity);
+      void pruneProjectUi();
     } catch {
       set({ loaded: true });
     }
   },
 
   setKeymap: async (keymap) => {
+    await ensureLoaded();
     set({ keymap });
     await persist();
   },
 
   setProjectRoot: async (projectRoot) => {
+    await ensureLoaded();
     set({ projectRoot });
     await persist();
   },
 
   setAccentColor: async (accentColor) => {
+    await ensureLoaded();
     const next = normalizeHex(accentColor);
     applyAccent(next);
     set({ accentColor: next });
@@ -85,25 +123,80 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   },
 
   setAuthorName: async (name) => {
+    await ensureLoaded();
     set({ authorName: normalizeName(name) });
     await persist();
   },
 
   setProjectUi: async (projectDir, patch) => {
+    await ensureLoaded();
     const prev = get().projectUi[projectDir] ?? {};
-    set({ projectUi: { ...get().projectUi, [projectDir]: { ...prev, ...patch } } });
+    // Stamped on every write so pruneProjectUi has an LRU key to fall back on.
+    const next = { ...prev, ...patch, last_seen: new Date().toISOString() };
+    set({ projectUi: { ...get().projectUi, [projectDir]: next } });
     await persist();
   },
 
-  setPcbOpacity: async (opacity) => {
+  setPcbOpacity: (opacity) => {
     set({ pcbOpacity: opacity });
+    // Debounced: the Appearance sliders fire setOpacity on every tick of a drag, and
+    // each persist() is a whole-file rewrite. The UI already shows `opacity` from the
+    // store, so delaying only the disk write costs nothing visible.
+    persistSoon();
+  },
+
+  setBomChips: async (chips) => {
+    await ensureLoaded();
+    set({ bomChips: chips });
+    await persist();
+  },
+
+  setDiffBlink: async (on) => {
+    await ensureLoaded();
+    set({ diffBlink: on });
+    await persist();
+  },
+
+  setBottomPanelH: async (h) => {
+    await ensureLoaded();
+    set({ bottomPanelH: h });
+    await persist();
+  },
+
+  setUpdateDeferred: async (v) => {
+    await ensureLoaded();
+    if (get().updateDeferred === v) return; // no-op clears run on every launch
+    set({ updateDeferred: v });
     await persist();
   },
 }));
 
+/** Read the file before the first write of a session. Every setter mutates state and
+ *  then persists the WHOLE object, so writing before `load()` would push this store's
+ *  defaults over the real file and wipe every preference. Setters call this before
+ *  they mutate — after would be too late, since `load()` overwrites what they set.
+ *  A launch-time setter (the updater's deferral) can genuinely beat App's load(). */
+async function ensureLoaded(): Promise<void> {
+  if (useSettingsStore.getState().loaded) return;
+  try {
+    await useSettingsStore.getState().load();
+  } catch {
+    /* load() swallows its own errors and still marks loaded */
+  }
+}
+
 // Persist the full settings object so one setter never clobbers another's field.
 async function persist() {
-  const { keymap, projectRoot, accentColor, authorName, projectUi, pcbOpacity } =
+  pending = false;
+  if (timer !== null) {
+    clearTimeout(timer);
+    timer = null;
+  }
+  // Safety net for the same hazard `ensureLoaded` handles — the debounced path can
+  // fire without a setter in front of it. Every real setter awaits ensureLoaded, so
+  // this returning early means there was nothing worth writing yet.
+  if (!useSettingsStore.getState().loaded) return;
+  const { keymap, projectRoot, accentColor, authorName, projectUi, pcbOpacity, bomChips, diffBlink, bottomPanelH, updateDeferred } =
     useSettingsStore.getState();
   try {
     await ipc.setSettings({
@@ -113,10 +206,82 @@ async function persist() {
       author_name: authorName,
       project_ui: projectUi,
       pcb_opacity: pcbOpacity,
+      bom_chips: bomChips,
+      diff_blink: diffBlink,
+      bottom_panel_h: bottomPanelH,
+      update_deferred: updateDeferred,
     });
   } catch {
     // Persisting failed (e.g. read-only config dir) — the in-memory choice stands.
   }
+}
+
+// ---- debounced persist ----------------------------------------------------
+// For state that changes continuously (a slider drag). Trailing edge only: the
+// in-memory value is already live, so the disk write just needs to land eventually.
+
+const PERSIST_DEBOUNCE_MS = 250;
+let timer: ReturnType<typeof setTimeout> | null = null;
+let pending = false;
+
+function persistSoon() {
+  pending = true;
+  if (timer !== null) clearTimeout(timer);
+  timer = setTimeout(() => void persist(), PERSIST_DEBOUNCE_MS);
+}
+
+/** Flush a debounced write immediately. Exported for tests; also wired to page
+ *  teardown so quitting mid-drag doesn't drop the last slider position. */
+export function flushSettings(): Promise<void> {
+  return pending ? persist() : Promise.resolve();
+}
+
+if (typeof window !== "undefined") {
+  // `pagehide` fires on webview teardown; the IPC may not complete if the process
+  // dies immediately, which is why the debounce is short rather than lazy.
+  window.addEventListener("pagehide", () => void flushSettings());
+}
+
+// ---- project_ui pruning ---------------------------------------------------
+
+/** `project_ui` is keyed by project dir and nothing ever removed an entry, so it grew
+ *  without bound as projects came and went. Bounded here rather than pruned eagerly:
+ *  a project can be legitimately absent right now (unplugged drive, offline network
+ *  share) and its remembered UI is worth more than the bytes. So do nothing until the
+ *  map is well past the recents cap (8), then drop entries whose folder is no longer a
+ *  project, oldest-first, and only if still over. */
+const PROJECT_UI_CAP = 24;
+
+async function pruneProjectUi(): Promise<void> {
+  const current = useSettingsStore.getState().projectUi;
+  const dirs = Object.keys(current);
+  if (dirs.length <= PROJECT_UI_CAP) return;
+
+  const alive = new Set<string>();
+  for (const dir of dirs) {
+    try {
+      // "unknown" = neither a SpinZero project nor a design folder — i.e. gone. Any
+      // IPC failure counts as alive, so a transient error never deletes state.
+      if ((await ipc.inspectFolder(dir)) !== "unknown") alive.add(dir);
+    } catch {
+      alive.add(dir);
+    }
+  }
+
+  let keep = dirs.filter((d) => alive.has(d));
+  if (keep.length > PROJECT_UI_CAP) {
+    // Still over: oldest last_seen goes first. Entries written before last_seen
+    // existed sort oldest, which is the correct guess for them.
+    keep = keep
+      .sort((a, b) => (current[b].last_seen ?? "").localeCompare(current[a].last_seen ?? ""))
+      .slice(0, PROJECT_UI_CAP);
+  }
+  if (keep.length === dirs.length) return;
+
+  const projectUi: Record<string, ProjectUi> = {};
+  for (const d of keep) projectUi[d] = current[d];
+  useSettingsStore.setState({ projectUi });
+  await persist();
 }
 
 // A display name is trimmed; blank collapses to null (fall back to the identity slug).

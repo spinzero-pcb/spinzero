@@ -10,6 +10,7 @@ import { useProjectStore } from "./projectStore";
 import { useViewStore } from "./viewStore";
 import { useReviewStore } from "./reviewStore";
 import { usePcbViewStore } from "./pcbViewStore";
+import { useSettingsStore } from "./settingsStore";
 import { useToastStore } from "./toastStore";
 import { pcbNav, diffPaint, bomNav } from "../ui/canvas/navigator";
 import type { ExtractionMeta } from "../lib/types";
@@ -18,9 +19,9 @@ import type { ExtractionMeta } from "../lib/types";
 // optional per plan §4 and NOT shipped in this change; when it lands it needs a stored
 // mode field + a toggle, but until then the store carries no dead state for it.
 
-/** localStorage key for the blink toggle — a remembered per-user preference (the
- *  same tier as BottomPanel's height; not project state). */
-const BLINK_STORE_KEY = "diff.blink";
+/** Pre-UiSettings localStorage key for the blink toggle, read once at the first
+ *  enterDiff to migrate. Droppable once no install predates the move. */
+const LEGACY_BLINK_KEY = "diff.blink";
 
 interface DiffState {
   /** True while a comparison is active (diff mode) — view-global. */
@@ -33,7 +34,7 @@ interface DiffState {
    *  want the base/target metadata read those, not a mirrored copy on the store. */
   doc: DiffDoc | null;
   /** Blink the changed copper (added/removed pulse in opposite phases over the stable
-   *  grey base). A remembered user preference (localStorage), not per-session. */
+   *  grey base). A remembered user preference (ui_settings.json), not per-session. */
   blink: boolean;
   /** Hide zone pours in the PCB compare (pours re-flow around edits and can wash the
    *  view even with the semantic gate). Session-scoped; reset on enter. */
@@ -130,7 +131,7 @@ export const useDiffStore = create<DiffState>((set, get) => ({
   cacheKeyA: null,
   cacheKeyB: null,
   doc: null,
-  blink: localStorage.getItem(BLINK_STORE_KEY) === "1",
+  blink: false, // replaced by hydrateBlink() on the first enterDiff
   hideZones: false,
   hiddenChangeIds: new Set(),
   focusedChangeId: null,
@@ -143,6 +144,7 @@ export const useDiffStore = create<DiffState>((set, get) => ({
 
   enterDiff: async (revA, revB, opts) => {
     if (get().preparing) return; // don't overlap a prepare
+    hydrateBlink(); // the toggle only exists in diff mode, so this is its first read
     const token = ++diffSeq;
     const { extractions, activeExtraction, setActiveExtraction } = useProjectStore.getState();
     const [older, newer] =
@@ -333,8 +335,8 @@ export const useDiffStore = create<DiffState>((set, get) => ({
     }),
 
   setBlink: (on) => {
-    localStorage.setItem(BLINK_STORE_KEY, on ? "1" : "0");
     set({ blink: on });
+    void useSettingsStore.getState().setDiffBlink(on);
   },
 
   setHideZones: (on) => set({ hideZones: on }),
@@ -391,6 +393,31 @@ export const useDiffStore = create<DiffState>((set, get) => ({
     return p;
   },
 }));
+
+let blinkHydrated = false;
+
+/** Adopt the saved blink preference the first time a comparison is entered. Settings
+ *  are already loaded by then (a project is open), so this stays synchronous. An
+ *  install that predates the settings field migrates its localStorage value once. */
+function hydrateBlink() {
+  if (blinkHydrated) return;
+  blinkHydrated = true;
+  const settings = useSettingsStore.getState();
+  if (settings.diffBlink !== null) {
+    useDiffStore.setState({ blink: settings.diffBlink });
+    return;
+  }
+  let legacy = false;
+  try {
+    legacy = localStorage.getItem(LEGACY_BLINK_KEY) === "1";
+  } catch {
+    /* blocked storage — the default (off) stands */
+  }
+  if (legacy) {
+    useDiffStore.setState({ blink: true });
+    void settings.setDiffBlink(true).then(() => localStorage.removeItem(LEGACY_BLINK_KEY));
+  }
+}
 
 /** Show the union of layers the given changes land on ("relevant layers"), hiding the
  *  rest — the whole changeset on enter / show-all, the visible subset after shift-click

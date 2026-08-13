@@ -215,6 +215,16 @@ export interface UiSettings {
   project_ui?: Record<string, ProjectUi>;
   /** Remembered PCB per-class transparency (object class → opacity 0..1). */
   pcb_opacity?: Record<string, number> | null;
+  /** BOM tab quick-filter chips. App-global (not ProjectUi): the chip ids are fixed
+   *  by the app, unlike BOM preset/column ids which each project defines. */
+  bom_chips?: Record<string, boolean> | null;
+  /** Blink the changed copper in the PCB compare. */
+  diff_blink?: boolean | null;
+  /** Output panel height in px (drag-resized). */
+  bottom_panel_h?: number | null;
+  /** Update version downloaded + offered but not applied; the next launch may
+   *  auto-apply it. Null = nothing pending. */
+  update_deferred?: string | null;
 }
 
 /** Machine-local, per-project review UI state remembered across sessions. */
@@ -228,6 +238,19 @@ export interface ProjectUi {
   net_class_colors?: Record<string, string>;
   /** PCB Net Classes panel: colour picked per individual net (#rrggbb). */
   net_colors?: Record<string, string>;
+  /** BOM tab: active KiCad BOM preset ("" = the built-in Default column set; absent
+   *  = never chose, so the project's own default wins). Per-project because presets
+   *  and their column ids are defined by the project's KiCad files, not by the app. */
+  bom_preset?: string | null;
+  /** BOM tab: preset name ("" for Default) → hidden column ids. */
+  bom_hidden?: Record<string, string[]>;
+  /** BOM tab: sort column id + direction (+1/-1). */
+  bom_sort?: { key: string; dir: number } | null;
+  /** BOM tab: preset name ("" for Default) → column id → dragged pixel width. */
+  bom_widths?: Record<string, Record<string, number>>;
+  /** ISO timestamp of the last write for this project — the LRU key that bounds
+   *  `project_ui` growth (see pruneProjectUi). */
+  last_seen?: string;
 }
 
 export interface CrunchStatus {

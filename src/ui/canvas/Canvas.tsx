@@ -74,7 +74,7 @@ export function Canvas() {
   // hit-test + selection helpers live), then rendered from this state.
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null);
 
-  // Overview contact-sheet (WS6) — opened by zoom-out-past-fit or the overview key.
+  // Overview contact-sheet (WS6) — opened by zooming out past the sheet edge.
   const [overviewOpen, setOverviewOpen] = useState(false);
   const overviewRef = useRef(overviewOpen);
   useEffect(() => {
@@ -1508,8 +1508,8 @@ export function Canvas() {
 
   return (
     <div className="canvas-host">
-      {/* The top nav bar (Fit / overview / hint text) was removed (item 4): Fit = F
-          key or right-click; overview = O key or zoom-out past the sheet edge. */}
+      {/* The top nav bar (Fit / overview / hint text) was removed (item 4): Fit = Home
+          key or right-click; overview = zoom-out past the sheet edge. */}
       <div ref={stageRef} className="canvas-stage">
         <div ref={worldRef} className="canvas-world">
           <div ref={islandRef} className="canvas-island" />

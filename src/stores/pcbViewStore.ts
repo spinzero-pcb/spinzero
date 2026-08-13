@@ -132,8 +132,9 @@ export const usePcbViewStore = create<PcbViewState>((set, get) => ({
   setOpacity: (key, v) => {
     const opacity = { ...get().opacity, [key]: v };
     set({ opacity });
-    // Remember the transparency sliders across sessions (machine-local user preference).
-    void useSettingsStore.getState().setPcbOpacity(opacity);
+    // Remember the transparency sliders across sessions (machine-local user
+    // preference). Debounced inside the settings store — this fires per drag tick.
+    useSettingsStore.getState().setPcbOpacity(opacity);
   },
   hydrateOpacity: (saved) => {
     if (!saved) return;
