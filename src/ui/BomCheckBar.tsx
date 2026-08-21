@@ -5,6 +5,7 @@ import { useReviewStore } from "../stores/reviewStore";
 import { useSettingsStore } from "../stores/settingsStore";
 import { BOM_PROFILES, isBomProfile, severityCounts } from "../lib/findings";
 import type { FindingSeverity } from "../lib/findings";
+import type { CommentSeverity } from "../lib/types";
 import { IconChecklist } from "./icons";
 
 // BOM check strip — the free deterministic review, run from the BOM tab.
@@ -21,12 +22,24 @@ import { IconChecklist } from "./icons";
 
 /** Findings-schema severity → the review UI's four-level severity vocabulary, so a
  *  finding chip is the same colour here as its comment is in the rail. */
-const SEVERITY_ROLE: Record<FindingSeverity, string> = {
+const SEVERITY_ROLE: Record<FindingSeverity, CommentSeverity> = {
   Critical: "critical",
   Major: "major",
   Medium: "minor",
   Low: "info",
   Question: "info",
+};
+
+/** The chips are labelled in that same vocabulary. The strip used to print the raw
+ *  findings-schema words ("Medium", "Low") while the rail said "Minor"/"Info" for the
+ *  very same comments — two names for one level, and two chips ("Low", "Question")
+ *  that both filtered the rail to the same "info" set. One vocabulary, one chip
+ *  per level. */
+const ROLE_LABEL: Record<CommentSeverity, string> = {
+  critical: "Critical",
+  major: "Major",
+  minor: "Minor",
+  info: "Info",
 };
 
 export function BomCheckBar() {
@@ -67,25 +80,26 @@ export function BomCheckBar() {
   }, [run]);
 
   /** Open the review rail on this run's session, optionally filtered to one severity. */
-  function showInReview(severity?: FindingSeverity) {
+  function showInReview(role?: CommentSeverity) {
     const review = useReviewStore.getState();
     if (sessionId) review.setActiveSession(sessionId);
     review.setLeftTab("review");
     review.setFilterStatus("open");
-    review.setFilterSeverity(
-      severity === "Critical"
-        ? "critical"
-        : severity === "Major"
-          ? "major"
-          : severity === "Medium"
-            ? "minor"
-            : severity
-              ? "info"
-              : "all",
-    );
+    review.setFilterSeverity(role ?? "all");
   }
 
-  const counts = doc ? severityCounts(doc) : [];
+  // Findings-severity counts folded onto the review vocabulary, so "Low" and
+  // "Question" land in one "Info" chip instead of two chips filtering to the same
+  // rail. `severityCounts` walks SEVERITY_ORDER, so Map order stays worst-first.
+  const counts = (() => {
+    if (!doc) return [] as { role: CommentSeverity; n: number }[];
+    const byRole = new Map<CommentSeverity, number>();
+    for (const c of severityCounts(doc)) {
+      const role = SEVERITY_ROLE[c.severity];
+      byRole.set(role, (byRole.get(role) ?? 0) + c.n);
+    }
+    return [...byRole].map(([role, n]) => ({ role, n }));
+  })();
 
   return (
     <div className="bom-check-bar">
@@ -155,12 +169,12 @@ export function BomCheckBar() {
           </span>
           {counts.map((c) => (
             <button
-              key={c.severity}
-              className={`bom-check-sev sev-${SEVERITY_ROLE[c.severity]}`}
-              title={`Show the ${c.severity.toLowerCase()} findings in the review panel`}
-              onClick={() => showInReview(c.severity)}
+              key={c.role}
+              className={`bom-check-sev sev-${c.role}`}
+              title={`Show the ${c.role} findings in the review panel`}
+              onClick={() => showInReview(c.role)}
             >
-              {c.n} {c.severity}
+              {c.n} {ROLE_LABEL[c.role]}
             </button>
           ))}
           {summary && (summary.filed > 0 || summary.auto_resolved > 0 || summary.reopened > 0) && (

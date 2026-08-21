@@ -356,12 +356,13 @@ export const useReviewStore = create<ReviewState>((set, get) => ({
     }),
   deleteSession: async (id) => {
     // Delete every comment that belongs to this session first (a session owns its
-    // comments). Each delete returns the full folded list; keep the last as the new state.
+    // comments). One batch action, not one call per comment: each call rewrites the
+    // whole event log and re-folds every log, so a big session used to cost N of both.
     try {
       const ids = get().comments.filter((c) => c.session_id === id).map((c) => c.id);
       let comments = get().comments;
-      for (const cid of ids) {
-        comments = await ipc.applyReviewAction({ action: "delete", comment_id: cid });
+      if (ids.length) {
+        comments = await ipc.applyReviewAction({ action: "delete_many", comment_ids: ids });
       }
       const sessions = await ipc.applySessionAction({ action: "delete", session_id: id });
       // The BOM check strip summarises the session it filed into — those counts describe
@@ -376,8 +377,8 @@ export const useReviewStore = create<ReviewState>((set, get) => ({
       }));
     } catch (e) {
       useToastStore.getState().push({ kind: "error", title: "Couldn’t delete session", message: String(e) });
-      // The delete loop may have applied partially (some comments gone, session still
-      // present) — resync from the backend so the panel reflects what actually persisted.
+      // The delete may have applied partially (comments gone, session still present) —
+      // resync from the backend so the panel reflects what actually persisted.
       void get().load();
     }
   },

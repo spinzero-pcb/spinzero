@@ -81,7 +81,7 @@ pub struct Anchor {
 
 /// One raw append-only event. A flat record (not an enum) keeps the JSONL trivial
 /// to read partially / forward-compatible: unknown future fields are ignored.
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 pub struct Event {
     pub event_id: String,
     pub comment_id: String,
@@ -188,6 +188,10 @@ pub struct ActionInput {
     pub action: String,
     #[serde(default)]
     pub comment_id: Option<String>,
+    /// Ids for the batch `delete_many` action (deleting a session deletes every
+    /// comment it owns; one action keeps that to a single log write + fold).
+    #[serde(default)]
+    pub comment_ids: Option<Vec<String>>,
     #[serde(default)]
     pub anchor: Option<Anchor>,
     #[serde(default)]
@@ -378,15 +382,19 @@ fn next_lamport(pcbreview: &Path) -> u64 {
         .unwrap_or(0)
 }
 
-fn append_event(pcbreview: &Path, user: &str, event: &Event) -> Result<(), String> {
+/// Append one or more events in a single whole-file replace. Batching matters:
+/// deleting a session deletes every comment it owns, and one call per comment made
+/// that N whole-file rewrites plus N full folds of every log.
+fn append_events(pcbreview: &Path, user: &str, events: &[Event]) -> Result<(), String> {
     let path = user_log(pcbreview, user);
     let parent = path.parent().ok_or("review log has no parent dir")?;
     fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    let mut line = serde_json::to_string(event).map_err(|e| e.to_string())?;
-    line.push('\n');
-    let existing = fs::read(&path).unwrap_or_default();
-    let mut out = existing;
-    out.extend_from_slice(line.as_bytes());
+    let mut out = fs::read(&path).unwrap_or_default();
+    for event in events {
+        let mut line = serde_json::to_string(event).map_err(|e| e.to_string())?;
+        line.push('\n');
+        out.extend_from_slice(line.as_bytes());
+    }
     // Whole-file atomic replace: a per-user log is small and only this process
     // writes it, so a tmp+rename keeps a crash from truncating prior events.
     let tmp = path.with_extension("jsonl.tmp");
@@ -403,6 +411,34 @@ pub fn apply_action(pcbreview: &Path, user: &str, input: ActionInput) -> Result<
     // assign the same lamport and clobber our appended event on rename.
     let _guard = write_lock().lock_safe();
     let lamport = next_lamport(pcbreview);
+
+    if input.action == "delete_many" {
+        let ids = input.comment_ids.unwrap_or_default();
+        let events: Vec<Event> = ids
+            .into_iter()
+            .enumerate()
+            .map(|(i, comment_id)| {
+                let lamport = lamport + i as u64;
+                let event_id = format!(
+                    "e_{}",
+                    &blake3::hash(format!("{user}{lamport}{ts}{comment_id}").as_bytes())
+                        .to_hex()
+                        .to_string()[..12]
+                );
+                Event {
+                    event_id,
+                    comment_id,
+                    action: "delete".into(),
+                    ts: ts.clone(),
+                    lamport,
+                    user: user.to_string(),
+                    ..Event::default()
+                }
+            })
+            .collect();
+        append_events(pcbreview, user, &events)?;
+        return Ok(list_comments(pcbreview));
+    }
 
     let comment_id = match input.action.as_str() {
         "create" => format!(
@@ -449,7 +485,7 @@ pub fn apply_action(pcbreview: &Path, user: &str, input: ActionInput) -> Result<
         reason: input.reason,
         assignee: input.assignee,
     };
-    append_event(pcbreview, user, &event)?;
+    append_events(pcbreview, user, &[event])?;
     Ok(list_comments(pcbreview))
 }
 
@@ -664,6 +700,7 @@ mod tests {
         ActionInput {
             action: String::new(),
             comment_id: None,
+            comment_ids: None,
             anchor: None,
             view: None,
             session_id: None,

@@ -478,9 +478,9 @@ impl Rule for InvalidDatasheet {
                     )
                     .detail(format!(
                         "{} parts share the same datasheet problem — likely a library-wide \
-                         convention. Examples: {}.",
+                         convention.\n\nExamples:\n{}",
                         hits.len(),
-                        samples.join("; ")
+                        samples.iter().map(|s| format!("  • {s}")).collect::<Vec<_>>().join("\n")
                     ))
                     .fix("Provide complete, resolvable https:// URLs to the manufacturers' documents.")
                     .evidence(format!("Affected: {}", refs_of(&items, 12).join(", ")))

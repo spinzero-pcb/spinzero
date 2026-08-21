@@ -203,6 +203,8 @@ impl Rule for InconsistentFieldsSameMpn {
                         }
                     }
                 }
+                // One spelling per line: these lists run to a handful of entries, and a
+                // reviewer compares them against each other rather than reading a sentence.
                 let detail: Vec<String> = spellings
                     .iter()
                     .map(|(v, its)| {
@@ -211,7 +213,7 @@ impl Rule for InconsistentFieldsSameMpn {
                             .take(6)
                             .map(|i| i.reference.as_str())
                             .collect();
-                        format!("'{v}' on {}", refs.join(", "))
+                        format!("  • '{v}' on {}", refs.join(", "))
                     })
                     .collect();
                 out.push(
@@ -220,12 +222,12 @@ impl Rule for InconsistentFieldsSameMpn {
                         format!("Parts sharing {label} disagree on {field}"),
                     )
                     .detail(format!(
-                        "{} parts share {label} but carry {} different {field}s: {}. The same \
-                         part number cannot be several different parts — some of these lines \
-                         have a wrong value or a wrong PN.",
+                        "{} parts share {label} but carry {} different {field}s. The same part \
+                         number cannot be several different parts — some of these lines have a \
+                         wrong value or a wrong PN.\n\nDiffering {field}s:\n{}",
                         members.len(),
                         spellings.len(),
-                        detail.join("; ")
+                        detail.join("\n")
                     ))
                     .fix(format!(
                         "Parts with the same part number must have identical {field}; reconcile \
@@ -511,8 +513,9 @@ impl Rule for DuplicateLineItemsSamePn {
                 )
                 .detail(format!(
                     "Part {label} appears on multiple lines with equivalent but \
-                     differently-spelled values ({}). It should be a single line item.",
-                    spelled.join(", ")
+                     differently-spelled values. It should be a single line item.\n\nSpellings \
+                     found:\n{}",
+                    spelled.iter().map(|s| format!("  • {s}")).collect::<Vec<_>>().join("\n")
                 ))
                 .fix("Use one consistent value spelling so the lines merge into a single grouped item.")
                 .refdes(members.iter().filter(|m| !m.reference.is_empty()).map(|m| m.reference.clone()))
@@ -580,10 +583,11 @@ impl Rule for RedundantMpnSameValue {
             out.push(
                 Raw::new(ctx.severity, "Multiple part numbers for functionally equivalent parts")
                     .detail(format!(
-                        "Parts that look equivalent ({}) use {} different part numbers: {}.",
+                        "Parts that look equivalent ({}) use {} different part numbers.\n\nPart \
+                         numbers found:\n{}",
                         descriptor.join(", "),
                         idents.len(),
-                        idents.join(", ")
+                        idents.iter().map(|i| format!("  • {i}")).collect::<Vec<_>>().join("\n")
                     ))
                     .fix(
                         "If they are truly interchangeable, standardize on one PN. If they differ \

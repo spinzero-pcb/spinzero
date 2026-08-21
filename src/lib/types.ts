@@ -344,8 +344,10 @@ export interface Comment {
 /** What the frontend sends to `apply_review_action`; the backend stamps
  *  user/ts/lamport/ids authoritatively. */
 export interface ReviewAction {
-  action: "create" | "reply" | "status" | "assign" | "severity" | "delete";
+  action: "create" | "reply" | "status" | "assign" | "severity" | "delete" | "delete_many";
   comment_id?: string;
+  /** Ids for `delete_many` — deleting a session deletes every comment it owns in one call. */
+  comment_ids?: string[];
   anchor?: CommentAnchor;
   view?: CommentView;
   session_id?: string | null;

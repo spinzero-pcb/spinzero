@@ -183,6 +183,7 @@ fn blank_action(action: &str) -> reviews::ActionInput {
     reviews::ActionInput {
         action: action.to_string(),
         comment_id: None,
+        comment_ids: None,
         anchor: None,
         view: None,
         session_id: None,

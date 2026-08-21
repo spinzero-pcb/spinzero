@@ -265,19 +265,44 @@ impl Rule for MissingAecq {
         if hits.is_empty() {
             return Vec::new();
         }
-        // One review point for the whole gap, listing every affected designator: the
+        // One review point for the whole gap, listing every affected part: the
         // reviewer's decision ("qualify these parts, or record an exception") is the
         // same for all of them, so N identical comments would only be N times the noise.
+        // The BOM marks every covered row, so the reviewer still sees each one in place.
         let refs: Vec<String> = hits
             .iter()
             .map(|(item, _)| item.reference.clone())
             .filter(|r| !r.is_empty())
             .collect();
-        let listed = if refs.is_empty() {
-            hits.iter().map(|(item, _)| item.label()).collect::<Vec<_>>().join(", ")
-        } else {
-            refs.join(", ")
-        };
+        // Listed by part, not by designator: what gets qualified (or excepted) is an MPN,
+        // and one MPN usually spans many rows. Designators ride along for the lookup.
+        let mut by_part: Vec<(String, String, Vec<String>)> = Vec::new();
+        for (item, value) in &hits {
+            let part = if item.mpn().trim().is_empty() {
+                item.label().to_string()
+            } else {
+                item.mpn().trim().to_string()
+            };
+            let refdes = item.label().to_string();
+            match by_part.iter_mut().find(|(p, v, _)| p == &part && v == value) {
+                Some((_, _, refs)) => refs.push(refdes),
+                None => by_part.push((part, value.clone(), vec![refdes])),
+            }
+        }
+        let listed = by_part
+            .iter()
+            .map(|(part, value, refs)| {
+                // One part can span dozens of rows; the designators are a lookup aid, not
+                // the point, so the line stays readable.
+                let shown = refs.len().min(8);
+                let mut list = refs[..shown].join(", ");
+                if refs.len() > shown {
+                    list.push_str(&format!(", +{} more", refs.len() - shown));
+                }
+                format!("  • {part} — AEC-Q: {value} ({list})")
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
         vec![Raw::new(
             ctx.severity,
             if hits.len() == 1 {
@@ -287,7 +312,7 @@ impl Rule for MissingAecq {
             },
         )
         .detail(format!(
-            "{} of {} populated parts have no positive AEC-Q status in an automotive design: {listed}.",
+            "{} of {} populated parts have no positive AEC-Q status in an automotive design.\n\nNot qualified:\n{listed}",
             hits.len(),
             populated.len()
         ))

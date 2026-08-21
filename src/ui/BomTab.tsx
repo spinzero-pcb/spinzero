@@ -35,7 +35,7 @@ import {
   presetColumns,
   type BomCol,
 } from "../lib/bomColumns";
-import type { BomLine, BomPreset, CommentSeverity } from "../lib/types";
+import type { BomLine, BomPreset, Comment, CommentSeverity } from "../lib/types";
 import type { Change } from "../lib/diff";
 
 /** Cell content in diff mode: "old → new" — the old value struck through in red, the new
@@ -81,6 +81,25 @@ const MIN_COL_W = 40;
 /** Width for a column that appears after the table was sized (the diff-mode Δ column, a
  *  column un-hidden later) — fixed layout would otherwise leave it degenerate. */
 const DEFAULT_COL_W = 120;
+/** Every BOM row a comment covers. A checker finding that groups many rows into one
+ *  point (AEC-Q, duplicate refdes) anchors on the first designator but carries the whole
+ *  set in its evidence anchors — every one of those rows earns a marker, not just the
+ *  anchor row. Human comments have no evidence, so they stay on their anchor alone. */
+function coveredRefs(c: Comment): string[] {
+  const refs = c.anchor.type === "component" ? [c.anchor.ref] : [];
+  const anchors = (c.evidence as { anchors?: unknown } | null)?.anchors;
+  if (Array.isArray(anchors)) {
+    for (const a of anchors) {
+      // The findings schema names the field `type` (bom-rules' `Anchor.kind` is
+      // `#[serde(rename = "type")]`), so that is what the stored evidence carries.
+      const anchor = a as { type?: unknown; refdes?: unknown } | null;
+      if (anchor?.type !== "bom_row" || !Array.isArray(anchor.refdes)) continue;
+      for (const r of anchor.refdes) if (typeof r === "string" && r) refs.push(r);
+    }
+  }
+  return refs;
+}
+
 /** Severity order, so the row marker shows the worst comment on a line. */
 const SEVERITY_RANK: Record<CommentSeverity, number> = { info: 0, minor: 1, major: 2, critical: 3 };
 
@@ -407,7 +426,7 @@ export function BomTab() {
     });
   }
 
-  // Open/unaddressed BOM comments keyed by their anchored designator, scoped to the
+  // Open/unaddressed BOM comments keyed by every designator they cover, scoped to the
   // active review session (mirrors the canvas chip filter in CommentBridge: resolved and
   // dismissed comments carry no marker). A row shows the marker for the first of its
   // designators that carries one.
@@ -424,14 +443,16 @@ export function BomTab() {
       if (status === "resolved" || status === "dismissed") continue;
       const number = numbers.get(c.id) ?? 0;
       const severity = c.severity ?? "info";
-      const prev = m.get(c.anchor.ref);
-      // The marker now shows severity, so when a row carries several comments the most
-      // severe one wins (oldest breaks a tie) — a critical must never hide behind an info.
-      const better =
-        !prev ||
-        SEVERITY_RANK[severity] > SEVERITY_RANK[prev.severity] ||
-        (SEVERITY_RANK[severity] === SEVERITY_RANK[prev.severity] && number < prev.number);
-      if (better) m.set(c.anchor.ref, { id: c.id, number, status, severity });
+      for (const ref of coveredRefs(c)) {
+        const prev = m.get(ref);
+        // The marker now shows severity, so when a row carries several comments the most
+        // severe one wins (oldest breaks a tie) — a critical must never hide behind an info.
+        const better =
+          !prev ||
+          SEVERITY_RANK[severity] > SEVERITY_RANK[prev.severity] ||
+          (SEVERITY_RANK[severity] === SEVERITY_RANK[prev.severity] && number < prev.number);
+        if (better) m.set(ref, { id: c.id, number, status, severity });
+      }
     }
     return m;
   }, [comments, activeSessionId, indexes]);
