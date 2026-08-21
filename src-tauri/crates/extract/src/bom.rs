@@ -248,6 +248,22 @@ fn in_bom(c: &Component) -> bool {
     c.parameters.get("kicad_in_bom").map(|v| v != "false").unwrap_or(true)
 }
 
+/// One entry per physical part, in source order.
+///
+/// A multi-unit symbol (`U9.A`/`.B`/`.C`) is placed once per unit and so appears
+/// once per unit in the design model — each unit carries its own geometry, which
+/// the schematic view needs. The BOM counts parts, not units, so units past the
+/// first for a given designator are dropped here. KiCad keeps a symbol's fields
+/// in sync across its units, so the first unit's properties speak for the part.
+fn bom_parts(components: &[Component]) -> Vec<&Component> {
+    let mut seen: BTreeSet<&str> = BTreeSet::new();
+    components
+        .iter()
+        .filter(|c| in_bom(c))
+        .filter(|c| seen.insert(c.designator.as_str()))
+        .collect()
+}
+
 fn is_dnp(c: &Component) -> bool {
     c.parameters.get("kicad_dnp").map(|v| v == "true").unwrap_or(false)
 }
@@ -296,7 +312,7 @@ pub fn build_enriched(components: &[Component], mapping: &Mapping) -> (Vec<Enric
     // Group identical parts.
     type Key = (String, String, String, String, bool);
     let mut groups: BTreeMap<Key, EnrichedRow> = BTreeMap::new();
-    for c in components.iter().filter(|c| in_bom(c)) {
+    for c in bom_parts(components) {
         let manufacturer = mapping.value(Field::Manufacturer, c);
         let mpn = mapping.value(Field::Mpn, c);
         let dnp = is_dnp(c);
@@ -547,9 +563,8 @@ fn merge_fields(into: &mut BTreeMap<String, String>, add: &BTreeMap<String, Stri
 /// cap what the table can do: fields already collapsed to `MIXED_VALUES` can never be
 /// separated again. The fab CSV keeps its own grouping (`build_grouped`).
 pub fn build_flat(components: &[Component], mapping: &Mapping, project_path: &str, stem: &str) -> GroupedBom {
-    let mut lines: Vec<GroupedLine> = components
-        .iter()
-        .filter(|c| in_bom(c))
+    let mut lines: Vec<GroupedLine> = bom_parts(components)
+        .into_iter()
         .map(|c| GroupedLine {
             item: 0,
             quantity: 1,
@@ -585,7 +600,7 @@ pub fn build_grouped(components: &[Component], mapping: &Mapping, project_path: 
     type Key = (String, String, String, String, String, bool);
     let mut groups: BTreeMap<Key, GroupedLine> = BTreeMap::new();
     let mut component_count = 0u32;
-    for c in components.iter().filter(|c| in_bom(c)) {
+    for c in bom_parts(components) {
         component_count += 1;
         let dnp = is_dnp(c);
         // MPN participates in the key: two parts that differ only by MPN are
@@ -730,6 +745,30 @@ mod tests {
         let grouped = build_grouped(&comps, &mapping, "p", "p");
         assert_eq!(grouped.component_count, 3); // MH1 excluded
         assert_eq!(grouped.line_count, 2);
+    }
+
+    #[test]
+    fn multi_unit_symbol_counts_once() {
+        // U9 is a dual op-amp: units A/B plus the power unit, three placements, one part.
+        let comps = vec![
+            comp("U9", "TLV9062", "SOIC8", "ic", &[("MPN", "TLV9062QDRQ1")]),
+            comp("U9", "TLV9062", "SOIC8", "ic", &[("MPN", "TLV9062QDRQ1")]),
+            comp("U9", "TLV9062", "SOIC8", "ic", &[("MPN", "TLV9062QDRQ1")]),
+            comp("U10", "TLV9062", "SOIC8", "ic", &[("MPN", "TLV9062QDRQ1")]),
+        ];
+        let mapping = resolve_mapping(&comps);
+        let (rows, _) = build_enriched(&comps, &mapping);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].references, vec!["U9", "U10"]);
+        assert_eq!(rows[0].quantity, 2);
+
+        let grouped = build_grouped(&comps, &mapping, "p", "p");
+        assert_eq!(grouped.component_count, 2);
+        assert_eq!(grouped.lines[0].quantity, 2);
+        assert_eq!(grouped.lines[0].designators, ["U9", "U10"]);
+
+        let flat = build_flat(&comps, &mapping, "p", "p");
+        assert_eq!(flat.line_count, 2);
     }
 
     #[test]

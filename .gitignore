@@ -21,6 +21,7 @@ public/dev-geometry.json
 *.code-workspace
 
 docs/
+output/
 
 # --- Private working files: present locally, never in the public repo ---
 .claude/
