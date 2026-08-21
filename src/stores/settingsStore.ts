@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import { ipc } from "../lib/ipc";
 import { usePcbViewStore } from "./pcbViewStore";
-import type { KeymapPreset, ProjectUi } from "../lib/types";
+import type { KeymapPreset, ProjectUi, ReviewServiceSettings } from "../lib/types";
 
 // App-level UI preferences. `keymap === null` after load means the user has
 // never chosen — App shows the first-launch preset picker (spec: onboarding).
@@ -30,6 +30,9 @@ interface SettingsState {
   bottomPanelH: number | null;
   /** Downloaded-but-unapplied update version; null = nothing pending. */
   updateDeferred: string | null;
+  /** Review-service endpoint + token; null = never configured (the detailed review
+   *  button then explains how to point the app at a service). */
+  reviewService: ReviewServiceSettings | null;
   loaded: boolean;
   load: () => Promise<void>;
   setKeymap: (k: KeymapPreset) => Promise<void>;
@@ -51,6 +54,8 @@ interface SettingsState {
   setBottomPanelH: (h: number) => Promise<void>;
   /** Persist (or clear, with null) the pending update version. */
   setUpdateDeferred: (v: string | null) => Promise<void>;
+  /** Persist the review-service endpoint + token (or clear it with null). */
+  setReviewService: (v: ReviewServiceSettings | null) => Promise<void>;
 }
 
 export const useSettingsStore = create<SettingsState>((set, get) => ({
@@ -65,6 +70,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   bomCheckOnCrunch: null,
   bottomPanelH: null,
   updateDeferred: null,
+  reviewService: null,
   loaded: false,
 
   load: async () => {
@@ -100,6 +106,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
             ? s.bottom_panel_h
             : null,
         updateDeferred: typeof s?.update_deferred === "string" ? s.update_deferred : null,
+        reviewService: normalizeReviewService(s?.review_service ?? null),
         loaded: true,
       });
       // Push the saved transparency into the PCB view store so the sliders open where
@@ -184,6 +191,12 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
     set({ updateDeferred: v });
     await persist();
   },
+
+  setReviewService: async (v) => {
+    await ensureLoaded();
+    set({ reviewService: normalizeReviewService(v) });
+    await persist();
+  },
 }));
 
 /** Read the file before the first write of a session. Every setter mutates state and
@@ -211,7 +224,7 @@ async function persist() {
   // fire without a setter in front of it. Every real setter awaits ensureLoaded, so
   // this returning early means there was nothing worth writing yet.
   if (!useSettingsStore.getState().loaded) return;
-  const { keymap, projectRoot, accentColor, authorName, projectUi, pcbOpacity, bomChips, diffBlink, bomCheckOnCrunch, bottomPanelH, updateDeferred } =
+  const { keymap, projectRoot, accentColor, authorName, projectUi, pcbOpacity, bomChips, diffBlink, bomCheckOnCrunch, bottomPanelH, updateDeferred, reviewService } =
     useSettingsStore.getState();
   try {
     await ipc.setSettings({
@@ -226,10 +239,21 @@ async function persist() {
       bom_check_on_crunch: bomCheckOnCrunch,
       bottom_panel_h: bottomPanelH,
       update_deferred: updateDeferred,
+      review_service: reviewService,
     });
   } catch {
     // Persisting failed (e.g. read-only config dir) — the in-memory choice stands.
   }
+}
+
+/** Settings are hand-editable, so the service config is untrusted at load: an
+ *  endpoint that is not http(s) is dropped rather than handed to fetch. */
+function normalizeReviewService(v: unknown): ReviewServiceSettings | null {
+  if (typeof v !== "object" || v === null) return null;
+  const o = v as { base_url?: unknown; token?: unknown };
+  const baseUrl = typeof o.base_url === "string" ? o.base_url.trim().replace(/\/+$/, "") : "";
+  if (!/^https?:\/\//i.test(baseUrl)) return null;
+  return { base_url: baseUrl, token: typeof o.token === "string" ? o.token : "" };
 }
 
 // ---- debounced persist ----------------------------------------------------

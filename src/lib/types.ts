@@ -228,6 +228,16 @@ export interface UiSettings {
   /** Update version downloaded + offered but not applied; the next launch may
    *  auto-apply it. Null = nothing pending. */
   update_deferred?: string | null;
+  /** Where the paid review service lives, and the token for it. Phase 1 is a static
+   *  dev token (plan §5); Phase 2 replaces it with a Clerk session whose refresh
+   *  token belongs in the OS keychain, not here. */
+  review_service?: ReviewServiceSettings | null;
+}
+
+export interface ReviewServiceSettings {
+  base_url: string;
+  /** Static bearer token. Local-dev only — see the note on `review_service`. */
+  token: string;
 }
 
 /** Machine-local, per-project review UI state remembered across sessions. */

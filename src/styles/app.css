@@ -3819,3 +3819,60 @@ button {
 
 /* Caveats: an unmapped column or a failed run — the check's own blind spots. */
 .bom-check-warn { color: var(--warn); }
+
+/* ---- detailed BOM review (paid tier) ------------------------------------ */
+/* The button sits in the BOM check strip; the pre-flight dialog reuses the wizard
+   card so the app has one modal idiom, not two. */
+
+.bom-check-detailed {
+  flex: none;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+.bom-check-detailed:disabled { color: var(--fg-2); cursor: progress; }
+
+.review-preflight { width: 560px; }
+
+.review-file-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  margin: 0;
+  padding: var(--sp-2);
+  list-style: none;
+  background: var(--bg-1);
+  border: 1px solid var(--border-1);
+  border-radius: var(--radius-1);
+  font-size: var(--fs-0);
+}
+
+.review-file-list li { display: flex; justify-content: space-between; gap: var(--sp-2); }
+.review-file-name { color: var(--fg-1); font-family: var(--font-mono, monospace); }
+.review-file-size { color: var(--fg-2); }
+
+/* The retention promise is the one paragraph in this dialog the user is being asked
+   to rely on, so it reads as a quote, not as body text. */
+.review-retention {
+  border-left: 2px solid var(--border-1);
+  padding-left: var(--sp-2);
+}
+
+.review-preflight-error { color: var(--err); }
+.review-ok { color: var(--ok); }
+.review-change { padding: 0 var(--sp-1); }
+
+.review-service-config {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+}
+
+.review-field {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1 1 180px;
+  font-size: var(--fs-0);
+  color: var(--fg-2);
+}

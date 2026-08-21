@@ -10,6 +10,7 @@ mod logging;
 mod presence;
 mod project;
 mod rawstore;
+mod reviewbundle;
 mod reviews;
 mod sidecar;
 mod telemetry;
@@ -1083,6 +1084,80 @@ fn run_bom_check(
     )
 }
 
+// ------------------------------------------- detailed review (paid tier, Phase 1)
+// The service does the reviewing; the app's job is to send the smallest possible
+// bundle, and to land the result through the SAME ingestion path as the free check
+// so a paid finding refines the free comment instead of duplicating it.
+//
+// The HTTP conversation itself (submit, SSE progress, findings, ack) lives in the
+// frontend (`src/lib/reviewService.ts`): it is plain fetch against a configurable
+// base URL, and keeping it there means no provider token, no job state and no retry
+// policy in the Rust process.
+
+/// Exactly what a detailed review would upload, for the pre-flight dialog. Pure —
+/// nothing is sent, nothing is written.
+#[tauri::command]
+fn build_review_bundle(
+    state: State<AppState>,
+    profile: Option<String>,
+) -> Result<reviewbundle::ReviewBundle, String> {
+    let handle = current_project(&state)?;
+    let profile = profile.unwrap_or_else(|| "default".to_string());
+    let design_tool = handle.design_tool.lock_safe().clone();
+    let component_count = design::bom_lines(opt_active_extraction(&state))
+        .map(|lines| lines.iter().map(|l| l.designators.len()).sum())
+        .unwrap_or(0);
+    reviewbundle::build(
+        opt_active_extraction(&state),
+        &profile,
+        &handle.name,
+        &design_tool,
+        handle.effective_extraction_id(),
+        component_count,
+    )
+}
+
+/// Ingest a findings document the review service produced.
+///
+/// The document is untrusted input from the network, so it is parsed into the same
+/// typed shape the free tier emits (`findings-1.0.json`) and rejected if it is not
+/// that — a malformed or hostile document must not be able to file review comments
+/// with arbitrary shapes into the user's project folder.
+#[tauri::command]
+fn ingest_findings(
+    state: State<AppState>,
+    doc: serde_json::Value,
+) -> Result<bomcheck::CheckOutcome, String> {
+    let handle = current_project(&state)?;
+    let doc: bom_rules::FindingsDoc =
+        serde_json::from_value(doc).map_err(|e| format!("not a findings.json document: {e}"))?;
+    if doc.schema_version != "1.0" {
+        return Err(format!(
+            "findings schema_version {} is not supported by this app (expected 1.0)",
+            doc.schema_version
+        ));
+    }
+    if doc.pipeline == "bom-rules" {
+        // The free tier has its own command; letting a network document file as the
+        // local checker would let it auto-resolve the checker's comments.
+        return Err("a bom-rules document must come from the local check, not the service".into());
+    }
+    telemetry::bump("detailed_reviews");
+    log::info!(
+        "ingesting {} findings from pipeline {} ({})",
+        doc.findings.len(),
+        doc.pipeline,
+        doc.engine_version
+    );
+    bomcheck::ingest(
+        &handle.project_dir,
+        &project::author_slug(),
+        handle.effective_extraction_id(),
+        doc,
+        &bom_rules::load::MappingReport::default(),
+    )
+}
+
 // ------------------------------------------------------------ reviews (Phase 2)
 // Object-anchored review comments synced as per-user append-only logs under the
 // project folder's reviews/ dir. ⟳ re-check is derived on the frontend from
@@ -1388,6 +1463,8 @@ pub fn run() {
             get_bom_lines,
             get_bom_presets,
             run_bom_check,
+            build_review_bundle,
+            ingest_findings,
             get_review_author,
             list_comments,
             apply_review_action,

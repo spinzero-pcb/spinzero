@@ -24,7 +24,8 @@ import type {
   TelemetryInfo,
   UiSettings,
 } from "./types";
-import type { CheckOutcome } from "./findings";
+import type { CheckOutcome, FindingsDoc } from "./findings";
+import type { ReviewBundle } from "./reviewService";
 import type { DesignIndexes } from "./design";
 import type { DiffHandle } from "./diff";
 
@@ -115,6 +116,13 @@ export const ipc = {
    *  comments (dedupe/auto-resolve by fingerprint). Returns the findings document
    *  plus the refreshed comment list, so one round-trip refreshes the whole UI. */
   runBomCheck: (profile: string) => invoke<CheckOutcome>("run_bom_check", { profile }),
+  /** Paid tier, step 1: exactly what a detailed review would upload — shown in the
+   *  pre-flight dialog before anything leaves the machine (plan §4.2). */
+  buildReviewBundle: (profile: string) =>
+    invoke<ReviewBundle>("build_review_bundle", { profile }),
+  /** Paid tier, step 2: the service's findings.json, ingested through the SAME path
+   *  as the free check so fingerprints reconcile against the existing comments. */
+  ingestFindings: (doc: FindingsDoc) => invoke<CheckOutcome>("ingest_findings", { doc }),
 
   getReviewAuthor: () => invoke<string>("get_review_author"),
   listComments: () => invoke<Comment[]>("list_comments"),

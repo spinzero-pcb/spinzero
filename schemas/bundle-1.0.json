@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://spinzero.app/schemas/bundle-1.0.json",
+  "title": "SpinZero review bundle (bom-detailed) v1.0",
+  "description": "Everything a detailed BOM review is allowed to upload — and, by omission, everything it must not. The desktop app builds exactly this set (src-tauri/src/reviewbundle.rs), shows it to the user before sending, and the service rejects any file not named here (spinzero-private/service/src/bundle.ts). Board and schematic geometry, gerbers, project files and datasheet PDFs are never uploaded; the service fetches datasheets itself.",
+  "type": "object",
+  "required": ["pipeline", "profile", "files"],
+  "additionalProperties": false,
+  "properties": {
+    "pipeline": { "const": "bom-detailed" },
+    "profile": {
+      "enum": ["default", "industrial", "medical", "automotive"],
+      "description": "End-application profile; decides which rules fire and at what severity."
+    },
+    "files": {
+      "type": "object",
+      "description": "Bundle-relative path → file text. Only the properties below are accepted.",
+      "required": ["bom_enriched.csv"],
+      "additionalProperties": false,
+      "properties": {
+        "bom_enriched.csv": {
+          "type": "string",
+          "description": "The extractor's enriched review BOM: one row per BOM line with sourcing/compliance fields resolved into stable columns."
+        },
+        "bom_enriched.mapping.json": {
+          "type": "string",
+          "description": "The extractor's column-mapping report (which property fed which logical field, at what coverage). Lets the engine tell a genuinely missing field apart from a column it failed to recognize — the difference between a real finding and a confident false one."
+        },
+        "design_meta.json": {
+          "type": "string",
+          "description": "Board context with no identity in it: a HASH of the project name, the profile, design tool, component and BOM-line counts, extraction id, app version. Never the project name, file paths, net names or geometry."
+        },
+        "datasheets/manifest.json": {
+          "type": "string",
+          "description": "Optional MPN → locally-fetched datasheet manifest, when the app already has one. The PDFs themselves are never uploaded."
+        }
+      }
+    }
+  }
+}

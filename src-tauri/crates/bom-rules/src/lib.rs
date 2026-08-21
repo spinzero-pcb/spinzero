@@ -23,7 +23,7 @@ pub mod value;
 
 mod rules;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 pub use model::{BomItem, Severity};
 
@@ -113,63 +113,76 @@ pub trait Rule: Send + Sync {
 }
 
 // ---------------------------------------------------------------- output document
+//
+// These types are `Deserialize` as well as `Serialize` because findings.json travels
+// BOTH ways: this crate writes it for the free tier, and the app reads the paid
+// engine's document back through the same types so that one ingestion path
+// (`bomcheck::ingest`) serves both tiers. Unknown fields are ignored by serde, which
+// is what lets the engine add `stats.tokens` without breaking the app.
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Anchor {
     #[serde(rename = "type")]
-    pub kind: &'static str,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub refdes: Vec<String>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Finding {
     pub id: String,
     pub section: String,
     pub severity: String,
     /// Always `Unvalidated` here: these are raw rule hits that no validation pass has
     /// confirmed. The paid pipeline replaces this with High/Medium/Low.
-    pub confidence: &'static str,
+    pub confidence: String,
+    #[serde(default)]
     pub rule_id: Option<String>,
     pub title: String,
-    #[serde(skip_serializing_if = "String::is_empty")]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub detail: String,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub evidence: Vec<String>,
-    #[serde(skip_serializing_if = "String::is_empty")]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub fix: String,
     pub anchors: Vec<Anchor>,
     pub fingerprint: String,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AuditEntry {
     pub item: String,
     /// `OK` | `GAP` | `TRUNCATED`
-    pub result: &'static str,
-    #[serde(skip_serializing_if = "String::is_empty")]
+    pub result: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub note: String,
 }
 
-#[derive(Clone, Debug, Serialize, Default)]
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct Stats {
+    #[serde(default)]
     pub item_count: usize,
+    #[serde(default)]
     pub finding_count: usize,
+    #[serde(default)]
     pub duration_ms: u64,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct FindingsDoc {
-    pub schema_version: &'static str,
+    pub schema_version: String,
+    #[serde(default)]
     pub engine_version: String,
-    pub pipeline: &'static str,
+    pub pipeline: String,
     pub profile: String,
     /// RFC3339; the caller stamps it (this crate has no clock by design — it must be
     /// deterministic for the fixture tests).
-    #[serde(skip_serializing_if = "String::is_empty")]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub generated_ts: String,
     pub findings: Vec<Finding>,
+    #[serde(default)]
     pub bom_audit: Vec<AuditEntry>,
+    #[serde(default)]
     pub stats: Stats,
 }
 
@@ -202,9 +215,9 @@ pub fn run(items: &[BomItem], profile: &str, mapping: &load::MappingReport) -> F
     // tracks nothing, which reads as a design defect and isn't one.
     if items.is_empty() {
         return FindingsDoc {
-            schema_version: "1.0",
+            schema_version: "1.0".into(),
             engine_version: format!("bom-rules/{}", env!("CARGO_PKG_VERSION")),
-            pipeline: "bom-rules",
+            pipeline: "bom-rules".into(),
             profile: profile.to_string(),
             generated_ts: String::new(),
             findings: Vec::new(),
@@ -279,13 +292,13 @@ pub fn run(items: &[BomItem], profile: &str, mapping: &load::MappingReport) -> F
             id: format!("B{:02}", i + 1),
             section: section.to_string(),
             severity: raw.severity.as_str().to_string(),
-            confidence: "Unvalidated",
+            confidence: "Unvalidated".into(),
             rule_id: Some(rule_id.to_string()),
             fingerprint: fingerprint(rule_id, &raw.refdes, &raw.key),
             anchors: vec![if raw.refdes.is_empty() {
-                Anchor { kind: "bom", refdes: Vec::new() }
+                Anchor { kind: "bom".into(), refdes: Vec::new() }
             } else {
-                Anchor { kind: "bom_row", refdes: raw.refdes.clone() }
+                Anchor { kind: "bom_row".into(), refdes: raw.refdes.clone() }
             }],
             title: raw.title,
             detail: raw.detail,
@@ -295,9 +308,9 @@ pub fn run(items: &[BomItem], profile: &str, mapping: &load::MappingReport) -> F
         .collect();
 
     FindingsDoc {
-        schema_version: "1.0",
+        schema_version: "1.0".into(),
         engine_version: format!("bom-rules/{}", env!("CARGO_PKG_VERSION")),
-        pipeline: "bom-rules",
+        pipeline: "bom-rules".into(),
         profile: profile.to_string(),
         generated_ts: String::new(),
         bom_audit: audit(items, &findings, mapping),
@@ -326,7 +339,7 @@ fn audit(items: &[BomItem], findings: &[Finding], mapping: &load::MappingReport)
     let mut out = vec![
         AuditEntry {
             item: "Reference designators — unique, annotated".into(),
-            result: if refdes_bad { "GAP" } else { "OK" },
+            result: if refdes_bad { "GAP".into() } else { "OK".into() },
             note: if refdes_bad {
                 "Duplicate or unannotated designators found — see the findings below.".into()
             } else {
@@ -335,7 +348,7 @@ fn audit(items: &[BomItem], findings: &[Finding], mapping: &load::MappingReport)
         },
         AuditEntry {
             item: "Sourcing IDs — MPN or distributor PN on every populated part".into(),
-            result: if missing_src == 0 { "OK" } else { "GAP" },
+            result: if missing_src == 0 { "OK".into() } else { "GAP".into() },
             note: format!(
                 "{} of {} orderable parts carry no sourcing identifier.",
                 missing_src,
@@ -344,7 +357,7 @@ fn audit(items: &[BomItem], findings: &[Finding], mapping: &load::MappingReport)
         },
         AuditEntry {
             item: "Lifecycle status verifiable".into(),
-            result: if lifecycle_tracked { "OK" } else { "GAP" },
+            result: if lifecycle_tracked { "OK".into() } else { "GAP".into() },
             note: if lifecycle_tracked {
                 "Lifecycle column present.".into()
             } else {
@@ -353,7 +366,7 @@ fn audit(items: &[BomItem], findings: &[Finding], mapping: &load::MappingReport)
         },
         AuditEntry {
             item: "RoHS compliance".into(),
-            result: if rohs_tracked { "OK" } else { "GAP" },
+            result: if rohs_tracked { "OK".into() } else { "GAP".into() },
             note: if rohs_tracked {
                 "RoHS column present.".into()
             } else {
@@ -369,7 +382,7 @@ fn audit(items: &[BomItem], findings: &[Finding], mapping: &load::MappingReport)
         let cols: Vec<String> = unmapped.iter().take(6).map(|u| u.column.clone()).collect();
         out.push(AuditEntry {
             item: "Column mapping".into(),
-            result: "GAP",
+            result: "GAP".into(),
             note: format!(
                 "{} well-filled column(s) did not map to a known BOM field: {}. If one carries \
                  MPN/manufacturer/lifecycle data, the checks below could not see it.",
@@ -419,6 +432,19 @@ mod tests {
         assert!(ranks.windows(2).all(|w| w[0] <= w[1]), "not severity-sorted");
         // Duplicate designator is the most severe thing in this BOM.
         assert_eq!(doc.findings[0].rule_id.as_deref(), Some("bom.duplicate_refdes"));
+    }
+
+    #[test]
+    fn fingerprint_matches_the_engine_port() {
+        // Pinned cross-runtime vector. The paid engine (spinzero-private
+        // `engine/src/fingerprint.ts`) re-implements this hash so a validated finding
+        // UPDATES the free tier's comment instead of filing a second one beside it;
+        // if this constant ever has to change, both sides move together or the app
+        // silently starts duplicating every finding.
+        assert_eq!(
+            fingerprint("bom.duplicate_refdes", &["R2".into(), "r1".into()], "R1 Key"),
+            "d74f820695871dbd"
+        );
     }
 
     #[test]

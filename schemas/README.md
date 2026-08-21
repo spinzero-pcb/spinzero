@@ -8,6 +8,7 @@ repos consume them rather than each defining their own shape.
 | File | What it pins |
 |---|---|
 | `findings-1.0.json` | `findings.json` — the one output contract every review producer emits. |
+| `bundle-1.0.json` | The review bundle — every file a detailed review may upload, and by omission everything it may not. |
 | `rule-fixtures/` | Golden BOM fixtures + expected rule hits. Both rule runtimes (the Rust `bom-rules` crate here, the Python `run_bom.py` in the engine) must agree on them. |
 
 ## Consumers
@@ -17,6 +18,14 @@ repos consume them rather than each defining their own shape.
 - TypeScript: `src/lib/findings.ts` mirrors the schema for the UI.
 - The app ingests **both** tiers through one path (`bomcheck.rs` →
   `reviews.rs`), matching on `fingerprint`.
+- The paid engine (`spinzero-private/engine`) mirrors the findings types in
+  `src/contracts.ts` and pins them against this file in its own test suite. Its
+  `bom-detailed` stage 2 shells out to the `bom-rules` binary in this repo, so both
+  tiers produce identical fingerprints and a paid finding refines the free-tier
+  comment in place instead of filing a second one.
+- The bundle spec is enforced on **both** sides: the app builds exactly this file
+  set (`src-tauri/src/reviewbundle.rs`) and shows it to the user before upload; the
+  service rejects any file the spec does not name.
 
 ## Changing the schema
 

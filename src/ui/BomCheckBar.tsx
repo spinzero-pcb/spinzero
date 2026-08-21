@@ -1,5 +1,6 @@
 import { useEffect } from "react";
 import { useBomCheckStore } from "../stores/bomCheckStore";
+import { useDetailedReviewStore } from "../stores/detailedReviewStore";
 import { useReviewStore } from "../stores/reviewStore";
 import { useSettingsStore } from "../stores/settingsStore";
 import { BOM_PROFILES, isBomProfile, severityCounts } from "../lib/findings";
@@ -11,8 +12,12 @@ import { IconChecklist } from "./icons";
 // The findings themselves are NOT rendered here: they are filed as review comments,
 // so they appear in the review rail and as per-row chips in the table, exactly like a
 // human's comment. This strip is the *run* surface — pick the end application, run it,
-// and read what the run did — which is also where the paid "Detailed review" button
-// lands in Phase 1.
+// and read what the run did.
+//
+// The paid "Detailed review" sits beside the free check deliberately: the two emit the
+// same findings document and land through the same ingestion path, differing only in
+// what validated the findings. One strip, one severity summary — not two panels
+// competing to be the review.
 
 /** Findings-schema severity → the review UI's four-level severity vocabulary, so a
  *  finding chip is the same colour here as its comment is in the rail. */
@@ -37,6 +42,13 @@ export function BomCheckBar() {
   // Opt-in auto-run. Default OFF and app-wide: the check writes review comments, so
   // it must never start doing that on its own.
   const auto = useSettingsStore((s) => s.bomCheckOnCrunch) ?? false;
+  // Paid tier. `phase` drives the button: idle → open the pre-flight dialog; running
+  // → show the live stage and offer a cancel.
+  const detailedPhase = useDetailedReviewStore((s) => s.phase);
+  const detailedProgress = useDetailedReviewStore((s) => s.progress);
+  const detailedError = useDetailedReviewStore((s) => s.error);
+  const liveFindings = useDetailedReviewStore((s) => s.liveFindings);
+  const detailedBusy = detailedPhase === "submitting" || detailedPhase === "running" || detailedPhase === "ingesting";
 
   // Mod+Shift+B runs the check while the BOM tab is mounted. Scoped to this component
   // so it can never fire from the schematic/PCB canvases, where it would mean nothing.
@@ -101,6 +113,31 @@ export function BomCheckBar() {
       </select>
 
       <button
+        className="btn-ghost bom-check-detailed"
+        disabled={running || detailedBusy}
+        title="Send the BOM to the review service for an LLM-validated review — you see the exact file list before anything is uploaded"
+        onClick={() => void useDetailedReviewStore.getState().openPreflight()}
+      >
+        {detailedBusy ? "Reviewing…" : "Detailed review"}
+      </button>
+
+      {detailedBusy && (
+        <>
+          <span className="bom-check-count">
+            {detailedProgress}
+            {liveFindings > 0 ? ` · ${liveFindings} so far` : ""}
+          </span>
+          <button
+            className="btn-ghost bom-check-open"
+            title="Cancel the detailed review"
+            onClick={() => void useDetailedReviewStore.getState().cancel()}
+          >
+            Cancel
+          </button>
+        </>
+      )}
+
+      <button
         className={`btn-ghost bom-chip ${auto ? "on" : ""}`}
         aria-pressed={auto}
         title="Re-run the check automatically after every extraction that changed the design"
@@ -162,6 +199,10 @@ export function BomCheckBar() {
         </span>
       )}
       {error && <span className="bom-check-warn">Check failed: {error}</span>}
+      {/* The detailed review is optional by design: when the service is unreachable
+          the free results above stay exactly as they were, and the reason sits here
+          rather than replacing them. */}
+      {detailedError && <span className="bom-check-warn">Detailed review: {detailedError}</span>}
     </div>
   );
 }

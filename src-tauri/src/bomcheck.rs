@@ -2,9 +2,10 @@
 //! BOM, then ingest its `findings.json` as review comments.
 //!
 //! Ingestion is the part that matters long-term: the paid detailed review (plan §10)
-//! emits the *same* findings document, so it lands through this same path with a
-//! higher confidence and updates the free-tier comments in place. The identity key is
-//! the finding `fingerprint`:
+//! emits the *same* findings document and lands through this same path — see
+//! `ingest_findings` in lib.rs, which feeds it the service's document. Reconciliation
+//! is per-producer (`source_for`), and the identity key is the finding
+//! `fingerprint`:
 //!
 //! - fingerprint already on a comment → leave the thread alone (only the severity is
 //!   refreshed), so replies/assignments survive a re-run;
@@ -29,9 +30,22 @@ use crate::reviews;
 /// later run tell its own auto-resolve apart from a human "resolved".
 pub const AUTO_RESOLVED_REASON: &str = "no longer detected by the BOM check";
 
-/// Marks which producer filed a comment, so a re-run only ever auto-resolves its own
-/// findings and never touches the paid review's (or a human's).
-const PIPELINE: &str = "bom-rules";
+/// Which producer filed a comment. Reconciliation is scoped to ONE producer: a
+/// re-run of the free check never auto-resolves a paid finding, and vice versa,
+/// while a finding both tiers detect shares a fingerprint and so shares a comment —
+/// which is how the paid review *refines* the free result instead of duplicating it
+/// (plan §10.4).
+///
+/// The review comment's `source` follows the pipeline: deterministic rules file as
+/// "rule", the LLM pipeline as "agent". The rail already renders those two
+/// differently, so a reader can tell a machine-checked claim from a judged one.
+pub fn source_for(pipeline: &str) -> &'static str {
+    if pipeline == "bom-rules" {
+        "rule"
+    } else {
+        "agent"
+    }
+}
 
 #[derive(Serialize)]
 pub struct CheckOutcome {
@@ -115,11 +129,14 @@ pub fn run_rules(lines: &[BomLine], profile: &str) -> (FindingsDoc, load::Mappin
     (doc, mapping)
 }
 
-/// Title for the auto-created session. Date-scoped: a check re-run the same day lands
-/// in the same session, a check next week starts a fresh one.
-fn session_title(now: OffsetDateTime) -> String {
+/// Title for the auto-created session. Date-scoped: a run re-run the same day lands
+/// in the same session, a run next week starts a fresh one. The tier is part of the
+/// title because the two producers reconcile separately — mixing them in one session
+/// would make "what did the detailed review add?" unanswerable in the rail.
+fn session_title(now: OffsetDateTime, pipeline: &str) -> String {
+    let label = if pipeline == "bom-rules" { "BOM check" } else { "Detailed BOM review" };
     format!(
-        "BOM check {:04}-{:02}-{:02}",
+        "{label} {:04}-{:02}-{:02}",
         now.year(),
         now.month() as u8,
         now.day()
@@ -198,19 +215,34 @@ pub fn ingest(
     mapping: &load::MappingReport,
 ) -> Result<CheckOutcome, String> {
     let now = OffsetDateTime::now_utc();
-    let session_id = ensure_session(pcbreview, user, &session_title(now))?;
+    let session_id = ensure_session(pcbreview, user, &session_title(now, &doc.pipeline))?;
 
-    // Every comment this producer has ever filed in this project, by fingerprint.
+    let source = source_for(&doc.pipeline);
     let existing = reviews::list_comments(pcbreview);
+
+    // Two different scopes, for two different questions.
+    //
+    // `filed_by_a_checker` — every machine-filed comment, whichever tier filed it.
+    // A finding whose fingerprint is already here is the SAME defect, so it updates
+    // that comment instead of filing a second one: this is what makes the paid review
+    // visibly *refine* the free result rather than double it (plan §10.4).
+    let filed_by_a_checker: BTreeMap<String, &reviews::Comment> = existing
+        .iter()
+        .filter(|c| c.source == "rule" || c.source == "agent")
+        .filter_map(|c| c.fingerprint.clone().map(|f| (f, c)))
+        .collect();
+
+    // `mine` — comments THIS producer filed. Only these may be auto-resolved: a tier
+    // must never close a comment it could not have produced (the free rules cannot
+    // re-derive a judgment finding, so a free re-run must not "no longer detect" it).
     let mine: BTreeMap<String, &reviews::Comment> = existing
         .iter()
         .filter(|c| {
-            c.source == "rule"
-                && c.predicate
-                    .as_ref()
-                    .and_then(|p| p.get("pipeline"))
-                    .and_then(|v| v.as_str())
-                    == Some(PIPELINE)
+            c.predicate
+                .as_ref()
+                .and_then(|p| p.get("pipeline"))
+                .and_then(|v| v.as_str())
+                == Some(doc.pipeline.as_str())
         })
         .filter_map(|c| c.fingerprint.clone().map(|f| (f, c)))
         .collect();
@@ -233,7 +265,7 @@ pub fn ingest(
             "confidence": finding.confidence,
         });
 
-        match mine.get(&finding.fingerprint) {
+        match filed_by_a_checker.get(&finding.fingerprint) {
             Some(comment) => {
                 let id = comment.id.clone();
                 // A person's resolve/dismiss stands; only our own auto-resolve reopens.
@@ -263,7 +295,7 @@ pub fn ingest(
                 action.view = Some("bom".into());
                 action.session_id = Some(session_id.clone());
                 action.base_revision = base_revision.clone();
-                action.source = Some("rule".into());
+                action.source = Some(source.into());
                 action.severity = Some(severity);
                 action.body = Some(body_of(finding));
                 action.predicate = Some(predicate);
@@ -449,6 +481,79 @@ mod tests {
         let out = ingest(&pcb, "alice", Some("r3".into()), doc, &mapping).expect("ingest broken");
         assert!(out.reopened > 0);
         assert_eq!(out.filed, 0, "reopen, never re-file");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A findings document as the paid service would send it: same fingerprint as a
+    /// free-tier finding, higher confidence, plus a judgment finding of its own.
+    fn paid_doc(free: &FindingsDoc) -> FindingsDoc {
+        let mut doc = free.clone();
+        doc.pipeline = "bom-detailed".into();
+        doc.engine_version = "engine-0.1.0".into();
+        for f in &mut doc.findings {
+            f.confidence = "High".into();
+        }
+        doc.findings.push(bom_rules::Finding {
+            id: "B99".into(),
+            section: "BOM · Judgment".into(),
+            severity: "Major".into(),
+            confidence: "Medium".into(),
+            rule_id: None,
+            title: "R1 MPN decodes to 4.7k but the value says 10k".into(),
+            detail: String::new(),
+            evidence: vec![],
+            fix: String::new(),
+            anchors: vec![bom_rules::Anchor { kind: "bom_row".into(), refdes: vec!["R1".into()] }],
+            fingerprint: "judgment0000fingerprint"[..16].to_string(),
+        });
+        doc
+    }
+
+    #[test]
+    fn the_paid_review_refines_the_free_comment_instead_of_duplicating_it() {
+        let root = temp_root("tiers");
+        let pcb = root.join(".pcbreview");
+        let broken = vec![
+            line(1, &["R1"], "10k", "RC0402FR-0710KL"),
+            line(2, &["R1"], "4k7", "RC0402FR-074K7L"),
+        ];
+
+        // Free tier files its findings.
+        let (free, mapping) = run_rules(&broken, "default");
+        let free_count = free.findings.len();
+        let out = ingest(&pcb, "alice", None, free.clone(), &mapping).expect("free ingest");
+        assert_eq!(out.filed, free_count);
+
+        // The paid review reports the same defects (same fingerprints) plus one of
+        // its own: only the new one is filed, the rest update in place.
+        let paid = paid_doc(&free);
+        let out = ingest(&pcb, "alice", None, paid, &load::MappingReport::default())
+            .expect("paid ingest");
+        assert_eq!(out.filed, 1, "only the judgment finding is new");
+        assert_eq!(out.unchanged, free_count, "the rule findings refine the existing comments");
+        assert_eq!(
+            out.comments.iter().filter(|c| c.fingerprint.is_some()).count(),
+            free_count + 1,
+            "no duplicate comment for a defect both tiers found"
+        );
+        let judgment = out
+            .comments
+            .iter()
+            .find(|c| c.source == "agent")
+            .expect("the judgment finding filed as an agent comment");
+        assert_eq!(judgment.view, "bom");
+
+        // A later FREE run must not close the judgment finding: the rules cannot
+        // produce it, so "no longer detected" would be a lie.
+        let (free_again, mapping) = run_rules(&broken, "default");
+        let out = ingest(&pcb, "alice", None, free_again, &mapping).expect("free re-ingest");
+        assert_eq!(out.auto_resolved, 0);
+        let judgment = out
+            .comments
+            .iter()
+            .find(|c| c.source == "agent")
+            .expect("still there");
+        assert_eq!(judgment.status, "open");
         let _ = std::fs::remove_dir_all(&root);
     }
 
