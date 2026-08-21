@@ -1,3 +1,4 @@
+mod bomcheck;
 mod cache;
 mod checkpoints;
 mod design;
@@ -1058,6 +1059,30 @@ fn get_bom_presets(state: State<AppState>) -> Result<Vec<design::BomPreset>, Str
     Ok(design::bom_presets(pro))
 }
 
+// ------------------------------------------------------ BOM check (free tier)
+// Deterministic rules over the crunched BOM (`crates/bom-rules`), whose findings.json
+// is ingested as review comments. The paid detailed review emits the same document,
+// so it lands through the same path — see bomcheck.rs.
+
+#[tauri::command]
+fn run_bom_check(
+    state: State<AppState>,
+    profile: Option<String>,
+) -> Result<bomcheck::CheckOutcome, String> {
+    let handle = current_project(&state)?;
+    let lines = design::bom_lines(opt_active_extraction(&state))?;
+    let profile = profile.unwrap_or_else(|| "default".to_string());
+    let (doc, mapping) = bomcheck::run_rules(&lines, &profile);
+    telemetry::bump("bom_checks");
+    bomcheck::ingest(
+        &handle.project_dir,
+        &project::author_slug(),
+        handle.effective_extraction_id(),
+        doc,
+        &mapping,
+    )
+}
+
 // ------------------------------------------------------------ reviews (Phase 2)
 // Object-anchored review comments synced as per-user append-only logs under the
 // project folder's reviews/ dir. ⟳ re-check is derived on the frontend from
@@ -1362,6 +1387,7 @@ pub fn run() {
             read_artifact,
             get_bom_lines,
             get_bom_presets,
+            run_bom_check,
             get_review_author,
             list_comments,
             apply_review_action,

@@ -1,0 +1,7 @@
+Reference,Value,Footprint,Quantity,Manufacturer,MPN,Lifecycle,RoHS
+R1,10k,R_0402_1005Metric,1,Yageo,RC0402FR-0710KL,Active,Yes
+R1,4k7,R_0402_1005Metric,1,Yageo,RC0402FR-074K7L,Active,Yes
+R?,1k,R_0402_1005Metric,1,Yageo,RC0402FR-071KL,Active,Yes
+C1,100nF,,1,Murata,GRM155R61A104KA01D,Active,Yes
+C2,220nF,C_0402_1005Metric,0,Murata,GRM155R61A224KE19D,Active,Yes
+U1,STM32F103C8T6,Package_QFP:LQFP-48_7x7mm_P0.5mm,1,ST,STM32F103C8T6,Active,Yes

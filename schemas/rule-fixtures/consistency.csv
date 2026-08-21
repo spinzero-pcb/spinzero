@@ -1,0 +1,7 @@
+Reference,Value,Footprint,Quantity,Manufacturer,MPN,Lifecycle,RoHS
+C1,100nF,C_0402_1005Metric,1,Murata,GRM155R61A104KA01D,Active,Yes
+C2,0.1uF,C_0402_1005Metric,1,Murata,GRM155R61A104KA01D,Active,Yes
+C3,100nF,C_0402_1005Metric,1,Samsung,CL05B104KO5NNNC,Active,Yes
+R1,10k,R_0603_1608Metric,1,Yageo,RC0603FR-0710KL,Active,Yes
+R2,10k,R_0402_1005Metric,1,Yageo,RC0603FR-0710KL,Active,Yes
+"L1, L2, L3",10uH,L_0805_2012Metric,2,Murata,LQM21PN100MC0D,Active,Yes

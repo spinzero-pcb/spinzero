@@ -1,0 +1,11 @@
+{
+  "profile": "automotive",
+  "comment": "Profile behaviour: U1 is not AEC-Q qualified and is NRND — both only matter (or only reach this severity) under the automotive profile. REACH is required there, and no column carries it.",
+  "expect_rules": [
+    "bom.missing_aecq",
+    "bom.lifecycle_status",
+    "bom.missing_compliance"
+  ],
+  "expect_severities": { "bom.missing_aecq": "Critical", "bom.lifecycle_status": "Critical" },
+  "forbid_rules": ["bom.missing_msl", "bom.missing_sourcing_id"]
+}

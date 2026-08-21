@@ -61,7 +61,7 @@ export function resolveKey(e: KeyboardEvent, preset: KeymapPreset): KeyAction | 
 // may list several alternative combos (e.g. PgUp OR +).
 // ---------------------------------------------------------------------------
 
-export type ShortcutScope = "Global" | "Schematic" | "PCB";
+export type ShortcutScope = "Global" | "Schematic" | "PCB" | "BOM";
 
 export interface ShortcutDef {
   /** Alternative key combos; each inner array is one combo of key tokens. */
@@ -87,6 +87,8 @@ export const SHORTCUTS: ShortcutDef[] = [
   { combos: [["Mod", "Shift", "M"]], action: "Measure tool", scope: "PCB" },
   { combos: [["C"]], action: "Comment mode", scope: "PCB" },
   { combos: [["Mod", "C"]], action: "Measuring: copy the readout", scope: "PCB" },
+
+  { combos: [["Mod", "Shift", "B"]], action: "Run the BOM check", scope: "BOM" },
 ];
 
 /** True on macOS — swaps the "Mod" token to ⌘ and reorders nothing else. */

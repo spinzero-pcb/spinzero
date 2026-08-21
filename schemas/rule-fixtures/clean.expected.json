@@ -1,0 +1,26 @@
+{
+  "profile": "default",
+  "comment": "A well-formed BOM must produce nothing. Every rule here is a chance to over-fire: TP1 is non-orderable (no MPN expected), R1/R2 share an MPN legitimately, and the MSL column exists but only the IC needs a level.",
+  "expect_rules": [],
+  "forbid_rules": [
+    "bom.duplicate_refdes",
+    "bom.unannotated_refdes",
+    "bom.invalid_refdes_format",
+    "bom.missing_required_field",
+    "bom.invalid_quantity",
+    "bom.missing_sourcing_id",
+    "bom.manufacturer_mpn_unpaired",
+    "bom.invalid_datasheet",
+    "bom.placeholder_part_number",
+    "bom.value_format_consistency",
+    "bom.inconsistent_fields_same_mpn",
+    "bom.component_class_consistency",
+    "bom.grouped_qty_vs_count",
+    "bom.duplicate_line_items_same_pn",
+    "bom.lifecycle_status",
+    "bom.missing_msl",
+    "bom.missing_compliance",
+    "bom.dnp_marker_in_text",
+    "bom.misplaced_distributor_code"
+  ]
+}

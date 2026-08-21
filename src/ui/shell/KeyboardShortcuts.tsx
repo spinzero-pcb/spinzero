@@ -15,7 +15,7 @@ export const useShortcutsDialog = create<ShortcutsDialog>((set) => ({
   setOpen: (open) => set({ open }),
 }));
 
-const SCOPES: ShortcutScope[] = ["Global", "Schematic", "PCB"];
+const SCOPES: ShortcutScope[] = ["Global", "Schematic", "PCB", "BOM"];
 
 /** Render one combo (e.g. ["Mod","F"]) as <kbd> chips, "Mod" swapped per platform. */
 function Combo({ tokens, mac }: { tokens: string[]; mac: boolean }) {

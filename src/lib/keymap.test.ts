@@ -45,7 +45,7 @@ describe("resolveKey", () => {
 describe("SHORTCUTS table", () => {
   it("documents every scope and stays non-empty", () => {
     const scopes = new Set(SHORTCUTS.map((s) => s.scope));
-    expect(scopes).toEqual(new Set(["Global", "Schematic", "PCB"]));
+    expect(scopes).toEqual(new Set(["Global", "Schematic", "PCB", "BOM"]));
     for (const s of SHORTCUTS) {
       expect(s.combos.length).toBeGreaterThan(0);
       expect(s.action.length).toBeGreaterThan(0);

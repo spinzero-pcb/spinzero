@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import { ipc } from "../lib/ipc";
 import { useDesignStore } from "./designStore";
+import { useBomCheckStore } from "./bomCheckStore";
 import { useReviewStore } from "./reviewStore";
 import { useSelectionStore } from "./selectionStore";
 import { useNetClassStore } from "./netClassStore";
@@ -73,6 +74,8 @@ function resetForNewProject() {
   // Drop the previous project's review comments/sessions too — otherwise project A's
   // review panel bleeds into project B until the next crunch event happens to reload it.
   useReviewStore.getState().clear();
+  // …and the last BOM check's summary, which describes the outgoing project's BOM.
+  useBomCheckStore.getState().clear();
   const sel = useSelectionStore.getState();
   sel.setHighlights([], "sch");
   sel.setSelection(null, "sch");
@@ -169,6 +172,8 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       void useNetClassStore.getState().hydrate(project.project_dir);
       // Same tier for the BOM preset / hidden columns / sort (project-defined ids).
       void useViewStore.getState().hydrateBom(project.project_dir);
+      // BOM check profile: the end application belongs to the board, not the user.
+      void useBomCheckStore.getState().hydrate(project.project_dir);
     } catch (e) {
       set({ errorMsg: String(e) });
       // Surface it everywhere (the Home error card is invisible once a project is
@@ -204,6 +209,8 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       void useReviewStore.getState().load();
       void useNetClassStore.getState().hydrate(project.project_dir);
       void useViewStore.getState().hydrateBom(project.project_dir);
+      // BOM check profile: the end application belongs to the board, not the user.
+      void useBomCheckStore.getState().hydrate(project.project_dir);
     } catch (e) {
       set({ errorMsg: String(e) });
       throw e;

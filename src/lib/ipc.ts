@@ -24,6 +24,7 @@ import type {
   TelemetryInfo,
   UiSettings,
 } from "./types";
+import type { CheckOutcome } from "./findings";
 import type { DesignIndexes } from "./design";
 import type { DiffHandle } from "./diff";
 
@@ -110,6 +111,10 @@ export const ipc = {
   readArtifact: (relPath: string) => invoke<string>("read_artifact", { relPath }),
   getBomLines: () => invoke<BomLine[]>("get_bom_lines"),
   getBomPresets: () => invoke<BomPreset[]>("get_bom_presets"),
+  /** Free tier: run the deterministic BOM rules and file their findings as review
+   *  comments (dedupe/auto-resolve by fingerprint). Returns the findings document
+   *  plus the refreshed comment list, so one round-trip refreshes the whole UI. */
+  runBomCheck: (profile: string) => invoke<CheckOutcome>("run_bom_check", { profile }),
 
   getReviewAuthor: () => invoke<string>("get_review_author"),
   listComments: () => invoke<Comment[]>("list_comments"),

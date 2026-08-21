@@ -1,0 +1,167 @@
+import { useEffect } from "react";
+import { useBomCheckStore } from "../stores/bomCheckStore";
+import { useReviewStore } from "../stores/reviewStore";
+import { useSettingsStore } from "../stores/settingsStore";
+import { BOM_PROFILES, isBomProfile, severityCounts } from "../lib/findings";
+import type { FindingSeverity } from "../lib/findings";
+import { IconChecklist } from "./icons";
+
+// BOM check strip — the free deterministic review, run from the BOM tab.
+//
+// The findings themselves are NOT rendered here: they are filed as review comments,
+// so they appear in the review rail and as per-row chips in the table, exactly like a
+// human's comment. This strip is the *run* surface — pick the end application, run it,
+// and read what the run did — which is also where the paid "Detailed review" button
+// lands in Phase 1.
+
+/** Findings-schema severity → the review UI's four-level severity vocabulary, so a
+ *  finding chip is the same colour here as its comment is in the rail. */
+const SEVERITY_ROLE: Record<FindingSeverity, string> = {
+  Critical: "critical",
+  Major: "major",
+  Medium: "minor",
+  Low: "info",
+  Question: "info",
+};
+
+export function BomCheckBar() {
+  const running = useBomCheckStore((s) => s.running);
+  const doc = useBomCheckStore((s) => s.doc);
+  const summary = useBomCheckStore((s) => s.summary);
+  const unmapped = useBomCheckStore((s) => s.unmappedColumns);
+  const sessionId = useBomCheckStore((s) => s.sessionId);
+  const error = useBomCheckStore((s) => s.error);
+  const profile = useBomCheckStore((s) => s.profile);
+  const setProfile = useBomCheckStore((s) => s.setProfile);
+  const run = useBomCheckStore((s) => s.run);
+  // Opt-in auto-run. Default OFF and app-wide: the check writes review comments, so
+  // it must never start doing that on its own.
+  const auto = useSettingsStore((s) => s.bomCheckOnCrunch) ?? false;
+
+  // Mod+Shift+B runs the check while the BOM tab is mounted. Scoped to this component
+  // so it can never fire from the schematic/PCB canvases, where it would mean nothing.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.ctrlKey || e.metaKey) || !e.shiftKey) return;
+      if (e.key.toLowerCase() !== "b") return;
+      const el = document.activeElement;
+      // Don't steal the combo from a text field the user is typing in.
+      if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) return;
+      e.preventDefault();
+      void run();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [run]);
+
+  /** Open the review rail on this run's session, optionally filtered to one severity. */
+  function showInReview(severity?: FindingSeverity) {
+    const review = useReviewStore.getState();
+    if (sessionId) review.setActiveSession(sessionId);
+    review.setLeftTab("review");
+    review.setFilterStatus("open");
+    review.setFilterSeverity(
+      severity === "Critical"
+        ? "critical"
+        : severity === "Major"
+          ? "major"
+          : severity === "Medium"
+            ? "minor"
+            : severity
+              ? "info"
+              : "all",
+    );
+  }
+
+  const counts = doc ? severityCounts(doc) : [];
+
+  return (
+    <div className="bom-check-bar">
+      <button
+        className="btn-ghost bom-check-run"
+        disabled={running}
+        title="Run the deterministic BOM checks (Ctrl/⌘+Shift+B) — findings are filed as review comments"
+        onClick={() => void run()}
+      >
+        <IconChecklist size={14} />
+        {running ? "Checking…" : "Check BOM"}
+      </button>
+      <select
+        className="bom-select"
+        value={profile}
+        disabled={running}
+        title="End application — decides which rules apply and how severe a gap is"
+        onChange={(e) => isBomProfile(e.target.value) && setProfile(e.target.value)}
+      >
+        {BOM_PROFILES.map((p) => (
+          <option key={p.id} value={p.id}>
+            {p.label}
+          </option>
+        ))}
+      </select>
+
+      <button
+        className={`btn-ghost bom-chip ${auto ? "on" : ""}`}
+        aria-pressed={auto}
+        title="Re-run the check automatically after every extraction that changed the design"
+        onClick={() => void useSettingsStore.getState().setBomCheckOnCrunch(!auto)}
+      >
+        Auto
+      </button>
+
+      {doc && (
+        <>
+          <span className="bom-check-count">
+            {doc.findings.length === 0
+              ? "No issues found"
+              : `${doc.findings.length} finding${doc.findings.length === 1 ? "" : "s"}`}
+          </span>
+          {counts.map((c) => (
+            <button
+              key={c.severity}
+              className={`bom-check-sev sev-${SEVERITY_ROLE[c.severity]}`}
+              title={`Show the ${c.severity.toLowerCase()} findings in the review panel`}
+              onClick={() => showInReview(c.severity)}
+            >
+              {c.n} {c.severity}
+            </button>
+          ))}
+          {summary && (summary.filed > 0 || summary.auto_resolved > 0 || summary.reopened > 0) && (
+            <span className="bom-check-delta">
+              {[
+                summary.filed ? `${summary.filed} new` : "",
+                summary.reopened ? `${summary.reopened} reopened` : "",
+                summary.auto_resolved ? `${summary.auto_resolved} auto-resolved` : "",
+              ]
+                .filter(Boolean)
+                .join(" · ")}
+            </span>
+          )}
+          {doc.findings.length > 0 && (
+            <button
+              className="btn-ghost bom-check-open"
+              title="Open these findings in the review panel"
+              onClick={() => showInReview()}
+            >
+              Open in review
+            </button>
+          )}
+        </>
+      )}
+
+      {/* A column the checker couldn't map reads as "this data is missing" in every
+          rule that needs it — say so out loud rather than letting the user trust a
+          false all-clear. */}
+      {unmapped.length > 0 && (
+        <span
+          className="bom-check-warn"
+          title="These columns are well filled but did not map to a known BOM field, so the checks could not read them."
+        >
+          Unmapped: {unmapped.slice(0, 3).join(", ")}
+          {unmapped.length > 3 ? ` +${unmapped.length - 3}` : ""}
+        </span>
+      )}
+      {error && <span className="bom-check-warn">Check failed: {error}</span>}
+    </div>
+  );
+}

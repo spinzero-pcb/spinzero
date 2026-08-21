@@ -1,0 +1,6 @@
+Reference,Value,Footprint,Quantity,Manufacturer,MPN,Description,Package,Voltage,DNP,Lifecycle,RoHS
+C1,0.1uF 100V,C_0402_1005Metric,1,Murata,GRM155R71H104KE14D,Ceramic capacitor,1005,16V,,Active,Yes
+C2,220nF,C_0805_2012Metric,1,Murata,GRM21BR71H224KA01L,Ceramic capacitor,1608,50V,,Active,Yes
+D1,SMBJ24A,D_SMB,1,Littelfuse,SMBJ24A,C908801,,,,Active,Yes
+R1,22pF_NM,R_0402_1005Metric,1,Yageo,RC0402FR-0722PL,Resistor,1005,,,Active,Yes
+R2,10k,R_0402_1005Metric,1,Yageo,RC0402FR-0710KL,Resistor,1005,,,Active,Yes

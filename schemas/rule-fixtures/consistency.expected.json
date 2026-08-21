@@ -1,0 +1,12 @@
+{
+  "profile": "default",
+  "comment": "C1/C2 spell the same value two ways under one MPN (split line item); R1/R2 share an MPN but sit on different footprints; L1-L3 declare quantity 2 for three designators; C3 duplicates C1's part with a different MPN.",
+  "expect_rules": [
+    "bom.value_format_consistency",
+    "bom.duplicate_line_items_same_pn",
+    "bom.inconsistent_fields_same_mpn",
+    "bom.grouped_qty_vs_count",
+    "bom.redundant_mpn_same_value"
+  ],
+  "forbid_rules": ["bom.duplicate_refdes", "bom.missing_sourcing_id", "bom.component_class_consistency"]
+}

@@ -1,0 +1,11 @@
+{
+  "profile": "default",
+  "comment": "C1's value embeds 100V while its Voltage column says 16V; C2's Package 1608 contradicts an 0805/2012 footprint; D1 carries an LCSC order code in Description; R1 says _NM in its value but is not flagged DNP.",
+  "expect_rules": [
+    "bom.value_aux_contradiction",
+    "bom.package_footprint_mismatch",
+    "bom.misplaced_distributor_code",
+    "bom.dnp_marker_in_text"
+  ],
+  "forbid_rules": ["bom.duplicate_refdes", "bom.missing_sourcing_id"]
+}

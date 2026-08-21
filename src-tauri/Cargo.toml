@@ -10,7 +10,7 @@ repository = "https://github.com/spinzero-pcb/spinzero"
 # (replacing the external Python importer). `extract` also builds the
 # `pcb-extract` binary used by the review skills.
 [workspace]
-members = ["crates/eda-parse-kicad", "crates/extract"]
+members = ["crates/eda-parse-kicad", "crates/extract", "crates/bom-rules"]
 resolver = "2"
 
 [lib]
@@ -23,6 +23,8 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 # In-process design extraction.
 extract = { path = "crates/extract" }
+# Deterministic BOM checks (the free review tier) — emits findings.json v1.0.
+bom-rules = { path = "crates/bom-rules" }
 tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
 # Auto-update from GitHub Releases (item 6): checks the public releases repo's

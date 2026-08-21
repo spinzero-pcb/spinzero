@@ -1,0 +1,96 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://spinzero.app/schemas/findings-1.0.json",
+  "title": "SpinZero findings.json",
+  "description": "The one output contract every SpinZero review producer emits: the free in-app deterministic checks (confidence 'Unvalidated'), the paid review engine, and any future CLI/CI surface. Consumers ingest it through a single path (findings -> review comments).",
+  "type": "object",
+  "required": ["schema_version", "pipeline", "findings"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": { "const": "1.0" },
+    "engine_version": {
+      "type": "string",
+      "description": "Version of the producer that emitted this document (rule pack / prompt pack)."
+    },
+    "pipeline": {
+      "type": "string",
+      "description": "Which review produced this. 'bom-rules' = free local deterministic checks; 'bom-detailed' = the paid LLM pipeline.",
+      "examples": ["bom-rules", "bom-detailed"]
+    },
+    "profile": {
+      "type": "string",
+      "description": "End-application profile the rules were configured with.",
+      "examples": ["default", "industrial", "medical", "automotive"]
+    },
+    "generated_ts": { "type": "string", "format": "date-time" },
+    "findings": { "type": "array", "items": { "$ref": "#/$defs/finding" } },
+    "bom_audit": { "type": "array", "items": { "$ref": "#/$defs/auditEntry" } },
+    "stats": { "$ref": "#/$defs/stats" }
+  },
+  "$defs": {
+    "severity": { "enum": ["Critical", "Major", "Medium", "Low", "Question"] },
+    "confidence": {
+      "enum": ["High", "Medium", "Low", "Unvalidated"],
+      "description": "'Unvalidated' marks a raw deterministic-rule finding that no validation pass has confirmed — what the free tier emits."
+    },
+    "finding": {
+      "type": "object",
+      "required": ["id", "section", "severity", "confidence", "title", "fingerprint"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string", "description": "Document-local id (B01, B02 …). Not stable across runs — use `fingerprint` for identity." },
+        "section": { "type": "string", "examples": ["BOM · Sourcing"] },
+        "severity": { "$ref": "#/$defs/severity" },
+        "confidence": { "$ref": "#/$defs/confidence" },
+        "rule_id": {
+          "type": ["string", "null"],
+          "description": "Deterministic rule that produced this; null for judgment findings."
+        },
+        "title": { "type": "string" },
+        "detail": { "type": "string" },
+        "evidence": { "type": "array", "items": { "type": "string" } },
+        "fix": { "type": "string" },
+        "anchors": { "type": "array", "items": { "$ref": "#/$defs/anchor" } },
+        "fingerprint": {
+          "type": "string",
+          "description": "blake3(rule_id | anchor set | normalized predicate), truncated. The dedupe key: a re-run updates the existing comment instead of re-filing, and a fingerprint that disappears auto-resolves its comment."
+        }
+      }
+    },
+    "anchor": {
+      "type": "object",
+      "required": ["type"],
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "enum": ["bom_row", "bom"],
+          "description": "'bom_row' anchors to reference designators; 'bom' is a document-level finding with no single row."
+        },
+        "refdes": { "type": "array", "items": { "type": "string" } },
+        "mpn": { "type": "string" }
+      }
+    },
+    "auditEntry": {
+      "type": "object",
+      "required": ["item", "result"],
+      "additionalProperties": false,
+      "properties": {
+        "item": { "type": "string" },
+        "result": { "enum": ["OK", "GAP", "TRUNCATED"] },
+        "note": { "type": "string" },
+        "ref": { "type": "string", "description": "Cross-link to a finding id." }
+      }
+    },
+    "stats": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "item_count": { "type": "integer" },
+        "finding_count": { "type": "integer" },
+        "duration_ms": { "type": "integer" },
+        "tokens": { "type": "object", "additionalProperties": true },
+        "stage_timings": { "type": "object", "additionalProperties": true }
+      }
+    }
+  }
+}

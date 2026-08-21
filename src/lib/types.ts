@@ -220,6 +220,9 @@ export interface UiSettings {
   bom_chips?: Record<string, boolean> | null;
   /** Blink the changed copper in the PCB compare. */
   diff_blink?: boolean | null;
+  /** Run the free BOM check after every successful extraction (opt-in: the check
+   *  files review comments, so it must never start doing that unasked). */
+  bom_check_on_crunch?: boolean | null;
   /** Output panel height in px (drag-resized). */
   bottom_panel_h?: number | null;
   /** Update version downloaded + offered but not applied; the next launch may
@@ -248,6 +251,10 @@ export interface ProjectUi {
   bom_sort?: { key: string; dir: number } | null;
   /** BOM tab: preset name ("" for Default) → column id → dragged pixel width. */
   bom_widths?: Record<string, Record<string, number>>;
+  /** BOM check: end-application profile the rules run with ("default" | "industrial" |
+   *  "medical" | "automotive"). Per-project because the end application is a property
+   *  of the board, not of the user. */
+  bom_check_profile?: string;
   /** ISO timestamp of the last write for this project — the LRU key that bounds
    *  `project_ui` growth (see pruneProjectUi). */
   last_seen?: string;
@@ -275,7 +282,10 @@ export type CommentSeverity = "info" | "minor" | "major" | "critical";
 export type CommentView = "schematic" | "pcb" | "bom";
 
 export interface CommentAnchor {
-  type: "component" | "net" | "region";
+  /** "bom" is the BOM-check scope anchor: a document-level finding ("this BOM has no
+   *  lifecycle column") points at no electrical object, so — like "region" — it never
+   *  participates in the ⟳ re-check drift loop. */
+  type: "component" | "net" | "region" | "bom";
   ref: string;
   sheet?: string | null;
   /** Region (box-select) anchors only: a rectangle in world (sheet/board mm) coords.

@@ -25,6 +25,7 @@ import { useCrunchStore } from "./stores/crunchStore";
 import { useDesignStore } from "./stores/designStore";
 import { useSelectionStore } from "./stores/selectionStore";
 import { useNetClassStore } from "./stores/netClassStore";
+import { useBomCheckStore } from "./stores/bomCheckStore";
 import { useSettingsStore } from "./stores/settingsStore";
 import { useViewStore, type MainView } from "./stores/viewStore";
 import { useReviewStore } from "./stores/reviewStore";
@@ -115,6 +116,12 @@ export default function App() {
           message: `Step “${ev.stage}”.${tail ? ` ${tail}` : ""}`,
           action: { label: "Retry", onClick: () => void ipc.crunchNow() },
         });
+      }
+      if (ev.kind === "succeeded" && useSettingsStore.getState().bomCheckOnCrunch) {
+        // Opt-in (BOM tab → "Auto"): re-check the BOM whenever the design actually
+        // changed. "skipped" is excluded — nothing changed, so a re-run would only
+        // churn the review log. Fire-and-forget; the store owns its error path.
+        void useBomCheckStore.getState().run();
       }
       if (ev.kind === "succeeded" || ev.kind === "skipped") {
         refreshIndex();

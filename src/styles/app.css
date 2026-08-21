@@ -3769,3 +3769,53 @@ button {
 .dag-row.compare-target { cursor: crosshair; }
 .dag-row.compare-target:hover { background: var(--accent-dim); outline: 1px dashed var(--accent); outline-offset: -1px; }
 .statusbar-btn.comparing { color: var(--accent); }
+
+/* --- BOM check strip (free deterministic review) ------------------------------
+   A second toolbar row under .bom-bar: run controls on the left, the last run's
+   result on the right. The findings themselves render as review comments (rail +
+   row chips), so nothing here duplicates them. */
+.bom-check-bar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+  padding: var(--sp-1) var(--sp-3);
+  border-bottom: 1px solid var(--border-0);
+  background: var(--bg-1);
+  font-size: var(--fs-0);
+}
+
+.bom-check-run {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  border-radius: 999px;
+  white-space: nowrap;
+  color: var(--fg-1);
+}
+.bom-check-run:disabled { color: var(--fg-2); cursor: progress; }
+
+.bom-check-count { color: var(--fg-2); }
+.bom-check-delta { color: var(--fg-2); }
+
+/* One chip per severity present — click to filter the review rail to it. */
+.bom-check-sev {
+  flex: none;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  padding: 1px var(--sp-2);
+  font-size: var(--fs-0);
+  font: inherit;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.bom-check-sev.sev-critical { background: var(--err-dim); color: var(--err); }
+.bom-check-sev.sev-major { background: var(--warn-dim); color: var(--warn); }
+.bom-check-sev.sev-minor { background: var(--accent-dim); color: var(--accent); }
+.bom-check-sev.sev-info { background: var(--bg-3); color: var(--fg-1); }
+.bom-check-sev:hover { border-color: currentColor; }
+
+/* Caveats: an unmapped column or a failed run — the check's own blind spots. */
+.bom-check-warn { color: var(--warn); }

@@ -1,0 +1,7 @@
+Reference,Value,Footprint,Quantity,Manufacturer,MPN,Datasheet,LCSC,Lifecycle,RoHS
+R1,10k,R_0402_1005Metric,1,Yageo,RC0402FR-0710KL,https://example.com/r.pdf,C25744,Active,Yes
+R2,4k7,R_0402_1005Metric,1,Yageo,RC0402FR-074K7L,https://example.com/r.pdf,C23162,Active,Yes
+R3,1k,R_0402_1005Metric,1,Yageo,RC0402FR-071KL,C:\datasheets\r.pdf,C11702,Active,Yes
+C1,100nF,C_0402_1005Metric,1,Murata,TBD,https://example.com/c.pdf,C1525,Active,Yes
+C2,220nF,C_0402_1005Metric,1,,,https://example.com/c.pdf,LCSC-99,Active,Yes
+U1,STM32F103C8T6,Package_QFP:LQFP-48_7x7mm_P0.5mm,1,ST,,https://example.com/u.pdf,C8734,Active,Yes

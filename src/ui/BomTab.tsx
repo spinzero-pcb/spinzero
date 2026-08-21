@@ -12,8 +12,10 @@ import {
   type DisplayStatus,
 } from "../stores/reviewStore";
 import { bomNav, nav } from "./canvas/navigator";
-import { IconComment, IconCopy } from "./icons";
+import { IconChecklist, IconComment, IconCopy } from "./icons";
 import { ContextMenu, type MenuItem } from "./ContextMenu";
+import { BomCheckBar } from "./BomCheckBar";
+import { useBomCheckStore } from "../stores/bomCheckStore";
 import {
   bomChanges,
   bomDeltaCsv,
@@ -638,6 +640,11 @@ export function BomTab() {
           icon: <IconCopy size={14} />,
           onClick: () => void copyText(rows.map((row) => text(row, col)).join("\n")),
         },
+        {
+          label: "Run BOM check",
+          icon: <IconChecklist size={14} />,
+          onClick: () => void useBomCheckStore.getState().run(),
+        },
       ],
     });
   }
@@ -863,6 +870,7 @@ export function BomTab() {
           <IconComment size={14} />
         </button>
       </div>
+      <BomCheckBar />
       {error && <div className="bom-empty">BOM unavailable: {error}</div>}
       {!error && lines && lines.length === 0 && (
         <div className="bom-empty">The crunched bundle has no BOM.</div>
