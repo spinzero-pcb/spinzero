@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import { ipc } from "../lib/ipc";
 import { anchorState, metaDiff } from "../lib/objectHash";
+import { useBomCheckStore } from "./bomCheckStore";
 import { useDesignStore } from "./designStore";
 import { useProjectStore } from "./projectStore";
 import { useSettingsStore } from "./settingsStore";
@@ -363,6 +364,9 @@ export const useReviewStore = create<ReviewState>((set, get) => ({
         comments = await ipc.applyReviewAction({ action: "delete", comment_id: cid });
       }
       const sessions = await ipc.applySessionAction({ action: "delete", session_id: id });
+      // The BOM check strip summarises the session it filed into — those counts describe
+      // comments that no longer exist, so drop them with the session.
+      useBomCheckStore.getState().clearForSession(id);
       set((s) => ({
         sessions,
         comments,

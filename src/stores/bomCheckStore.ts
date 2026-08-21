@@ -39,6 +39,7 @@ interface BomCheckState {
   hydrate: (projectDir: string | null) => Promise<void>;
   setProfile: (profile: BomProfile) => void;
   run: () => Promise<void>;
+  clearForSession: (id: string) => void;
   clear: () => void;
 }
 
@@ -106,8 +107,10 @@ export const useBomCheckStore = create<BomCheckState>((set, get) => ({
         error: null,
       });
       // The backend created a session and filed comments; reload the rail so the new
-      // comments, their session, and the row chips all appear together.
+      // comments, their session, and the row chips all appear together, then make that
+      // session the active one — the run's findings are what the user asked to see.
       await useReviewStore.getState().load();
+      if (out.session_id) useReviewStore.getState().setActiveSession(out.session_id);
       useToastStore.getState().push({
         kind: out.findings.findings.length === 0 ? "success" : "info",
         title: runTitle(out),
@@ -121,6 +124,14 @@ export const useBomCheckStore = create<BomCheckState>((set, get) => ({
         title: "BOM check failed",
         message: String(e),
       });
+    }
+  },
+
+  /** Drop the last run's summary when its session is deleted — the counts in the
+   *  strip describe comments that no longer exist. */
+  clearForSession: (id) => {
+    if (get().sessionId === id) {
+      set({ doc: null, summary: null, unmappedColumns: [], sessionId: null, error: null });
     }
   },
 

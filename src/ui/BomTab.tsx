@@ -35,7 +35,7 @@ import {
   presetColumns,
   type BomCol,
 } from "../lib/bomColumns";
-import type { BomLine, BomPreset } from "../lib/types";
+import type { BomLine, BomPreset, CommentSeverity } from "../lib/types";
 import type { Change } from "../lib/diff";
 
 /** Cell content in diff mode: "old → new" — the old value struck through in red, the new
@@ -81,6 +81,9 @@ const MIN_COL_W = 40;
 /** Width for a column that appears after the table was sized (the diff-mode Δ column, a
  *  column un-hidden later) — fixed layout would otherwise leave it degenerate. */
 const DEFAULT_COL_W = 120;
+/** Severity order, so the row marker shows the worst comment on a line. */
+const SEVERITY_RANK: Record<CommentSeverity, number> = { info: 0, minor: 1, major: 2, critical: 3 };
+
 /** The leading comment gutter's width — mirrors .bom-cmt-col in app.css. */
 const CMT_COL_W = 24;
 
@@ -410,15 +413,25 @@ export function BomTab() {
   // designators that carries one.
   const commentByRef = useMemo(() => {
     const numbers = numberMap(comments);
-    const m = new Map<string, { id: string; number: number; status: DisplayStatus }>();
+    const m = new Map<
+      string,
+      { id: string; number: number; status: DisplayStatus; severity: CommentSeverity }
+    >();
     for (const c of comments) {
       if (c.view !== "bom" || c.anchor.type !== "component") continue;
       if (activeSessionId !== null && c.session_id !== activeSessionId) continue;
       const status = displayInfo(c, indexes ?? null).status;
       if (status === "resolved" || status === "dismissed") continue;
       const number = numbers.get(c.id) ?? 0;
+      const severity = c.severity ?? "info";
       const prev = m.get(c.anchor.ref);
-      if (!prev || number < prev.number) m.set(c.anchor.ref, { id: c.id, number, status });
+      // The marker now shows severity, so when a row carries several comments the most
+      // severe one wins (oldest breaks a tie) — a critical must never hide behind an info.
+      const better =
+        !prev ||
+        SEVERITY_RANK[severity] > SEVERITY_RANK[prev.severity] ||
+        (SEVERITY_RANK[severity] === SEVERITY_RANK[prev.severity] && number < prev.number);
+      if (better) m.set(c.anchor.ref, { id: c.id, number, status, severity });
     }
     return m;
   }, [comments, activeSessionId, indexes]);
@@ -1001,12 +1014,11 @@ export function BomTab() {
                   <td className="bom-comment-cell">
                     {child ? null : cmt ? (
                       <button
-                        className={`bom-cmt-badge st-${cmt.status}`}
-                        title="Open the review comment on this line"
+                        className={`bom-cmt-badge sev-${cmt.severity} st-${cmt.status}`}
+                        title={`Open the ${cmt.severity} review comment on this line`}
+                        aria-label={`${cmt.severity} review comment`}
                         onClick={(e) => openRowThread(cmt.id, e)}
-                      >
-                        {cmt.number}
-                      </button>
+                      />
                     ) : (
                       !r.synthetic &&
                       first && (

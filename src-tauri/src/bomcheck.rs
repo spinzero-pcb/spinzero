@@ -168,18 +168,15 @@ fn ensure_session(pcbreview: &Path, user: &str, title: &str) -> Result<String, S
         .ok_or_else(|| "could not create the BOM check session".to_string())
 }
 
-/// The comment body a finding becomes: the claim, why it matters, then the fix.
+/// The comment body a finding becomes: the description on its own. The rule title
+/// and the suggested fix are deliberately left out — the detail already says what is
+/// wrong, and a reviewer reads a comment, not a rule report.
 fn body_of(finding: &bom_rules::Finding) -> String {
-    let mut body = finding.title.clone();
-    if !finding.detail.is_empty() {
-        body.push_str("\n\n");
-        body.push_str(&finding.detail);
+    if finding.detail.is_empty() {
+        finding.title.clone()
+    } else {
+        finding.detail.clone()
     }
-    if !finding.fix.is_empty() {
-        body.push_str("\n\nFix: ");
-        body.push_str(&finding.fix);
-    }
-    body
 }
 
 fn blank_action(action: &str) -> reviews::ActionInput {

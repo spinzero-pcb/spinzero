@@ -262,39 +262,40 @@ impl Rule for MissingAecq {
             })
             .collect();
 
-        if !hits.is_empty() && crate::model::systemic(hits.len(), populated.len(), ctx, 0.35, 8) {
-            let items: Vec<&BomItem> = hits.iter().map(|(i, _)| *i).collect();
-            return vec![Raw::new(
-                ctx.severity,
-                format!(
-                    "AEC-Q qualification missing or negative on {} of {} parts",
-                    hits.len(),
-                    populated.len()
-                ),
-            )
-            .detail(
-                "Most parts in this automotive BOM lack a positive AEC-Q status; qualification is \
-                 not being tracked part-by-part.",
-            )
-            .fix("Populate AEC-Q status (Q100/Q101/Q200) for every part, or document approved exceptions.")
-            .evidence(format!("Affected: {}", refs_of(&items, 12).join(", ")))
-            .key("systemic")];
+        if hits.is_empty() {
+            return Vec::new();
         }
-        hits.into_iter()
-            .map(|(item, shown)| {
-                Raw::new(ctx.severity, "Part not AEC-Q qualified")
-                    .detail(format!(
-                        "Part {} has AEC-Q status '{shown}' in an automotive design.",
-                        item.label()
-                    ))
-                    .fix(
-                        "Use an AEC-Q-qualified equivalent, or record an approved exception with \
-                         the qualification grade.",
-                    )
-                    .item(item)
-                    .key("aecq")
-            })
-            .collect()
+        // One review point for the whole gap, listing every affected designator: the
+        // reviewer's decision ("qualify these parts, or record an exception") is the
+        // same for all of them, so N identical comments would only be N times the noise.
+        let refs: Vec<String> = hits
+            .iter()
+            .map(|(item, _)| item.reference.clone())
+            .filter(|r| !r.is_empty())
+            .collect();
+        let listed = if refs.is_empty() {
+            hits.iter().map(|(item, _)| item.label()).collect::<Vec<_>>().join(", ")
+        } else {
+            refs.join(", ")
+        };
+        vec![Raw::new(
+            ctx.severity,
+            if hits.len() == 1 {
+                "Part not AEC-Q qualified".to_string()
+            } else {
+                format!("{} parts not AEC-Q qualified", hits.len())
+            },
+        )
+        .detail(format!(
+            "{} of {} populated parts have no positive AEC-Q status in an automotive design: {listed}.",
+            hits.len(),
+            populated.len()
+        ))
+        .fix(
+            "Use AEC-Q-qualified equivalents, or record an approved exception with the qualification grade.",
+        )
+        .refdes(refs)
+        .key("aecq")]
     }
 }
 

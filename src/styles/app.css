@@ -1895,26 +1895,28 @@ button {
 .bom-comment-btn.on { color: var(--accent); background: var(--accent-dim); }
 .bom-table.arming tbody tr { cursor: crosshair; }
 
-/* Leading gutter: an existing comment's number badge, or a hover-revealed add button. */
+/* Leading gutter: an existing comment's severity dot, or a hover-revealed add button. */
 .bom-cmt-th { width: 24px; padding: 0; }
 .bom-comment-cell { width: 24px; padding-left: var(--sp-1); padding-right: 0; text-align: center; }
 .bom-cmt-badge {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 17px;
-  height: 17px;
-  padding: 0 4px;
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  padding: 0;
   border-radius: 999px;
   border: none;
-  font-size: 10px;
-  font-weight: 700;
   cursor: pointer;
-  background: var(--accent);
-  color: var(--accent-fg);
+  background: var(--fg-2);
 }
-.bom-cmt-badge.st-recheck { background: var(--warn); color: #000; }
-.bom-cmt-badge.st-addressed { background: var(--ok); color: #000; }
+/* Colour carries the severity — the same vocabulary as the review rail's rows. */
+.bom-cmt-badge.sev-critical { background: var(--err); }
+.bom-cmt-badge.sev-major { background: var(--warn); }
+.bom-cmt-badge.sev-minor { background: var(--accent); }
+.bom-cmt-badge.sev-info { background: var(--fg-2); }
+/* Status stays readable without stealing the colour: a ring for "needs a re-check",
+   a dimmed dot for "addressed". */
+.bom-cmt-badge.st-recheck { box-shadow: 0 0 0 2px var(--warn-dim); }
+.bom-cmt-badge.st-addressed { opacity: 0.55; }
 .bom-cmt-badge:hover { filter: brightness(1.12); }
 .bom-cmt-add {
   display: inline-flex;
