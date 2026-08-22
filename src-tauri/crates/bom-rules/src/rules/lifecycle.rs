@@ -112,6 +112,46 @@ impl Rule for LifecycleStatus {
     }
 }
 
+/// The part list a grouped finding carries in its description: one line per
+/// (part, note), designators riding along for the lookup.
+///
+/// Listed by part, not by designator: what gets qualified or populated is an MPN, and
+/// one MPN usually spans many rows. `note` is the per-part remark ("AEC-Q: (blank)");
+/// pass an empty string when the gap itself is the whole story.
+fn listed_by_part(hits: &[(&BomItem, String)]) -> String {
+    let mut by_part: Vec<(String, String, Vec<String>)> = Vec::new();
+    for (item, note) in hits {
+        let part = if item.mpn().trim().is_empty() {
+            item.label().to_string()
+        } else {
+            item.mpn().trim().to_string()
+        };
+        let refdes = item.label().to_string();
+        match by_part.iter_mut().find(|(p, n, _)| p == &part && n == note) {
+            Some((_, _, refs)) => refs.push(refdes),
+            None => by_part.push((part, note.clone(), vec![refdes])),
+        }
+    }
+    by_part
+        .iter()
+        .map(|(part, note, refs)| {
+            // One part can span dozens of rows; the designators are a lookup aid, not
+            // the point, so the line stays readable.
+            let shown = refs.len().min(8);
+            let mut list = refs[..shown].join(", ");
+            if refs.len() > shown {
+                list.push_str(&format!(", +{} more", refs.len() - shown));
+            }
+            if note.is_empty() {
+                format!("  • {part} ({list})")
+            } else {
+                format!("  • {part} — {note} ({list})")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// MSL (J-STD-020) absent on moisture-sensitive parts — the assembly house needs it
 /// for storage and bake-before-reflow.
 pub struct MissingMsl;
@@ -169,34 +209,37 @@ impl Rule for MissingMsl {
             .copied()
             .filter(|i| !i.filled("msl"))
             .collect();
-        if !missing.is_empty() && crate::model::systemic(missing.len(), scoped.len(), ctx, 0.35, 8) {
-            return vec![Raw::new(
-                ctx.severity,
-                format!(
-                    "MSL not populated for most moisture-sensitive parts ({} of {})",
-                    missing.len(),
-                    scoped.len()
-                ),
-            )
-            .detail("An MSL column exists but is largely unpopulated for moisture-sensitive parts.")
-            .fix("Populate the MSL level (J-STD-020 level 1–6) for all in-scope parts.")
-            .evidence(format!("Affected: {}", refs_of(&missing, 12).join(", ")))
-            .key("systemic")];
+        if missing.is_empty() {
+            return Vec::new();
         }
-        missing
+        // One review point for the whole gap, same shape as AEC-Q: the decision
+        // ("populate the MSL level for these parts") is identical for every row, so N
+        // comments would be N times the noise. The BOM marks every covered row.
+        let refs: Vec<String> = missing
             .iter()
-            .map(|item| {
-                Raw::new(ctx.severity, "Missing MSL rating")
-                    .detail(format!(
-                        "Part {} has no MSL rating; the assembly house needs it for storage and \
-                         bake-before-reflow.",
-                        item.label()
-                    ))
-                    .fix("Populate the MSL level (J-STD-020 level 1–6) for this part.")
-                    .item(item)
-                    .key("missing_msl")
-            })
-            .collect()
+            .map(|item| item.reference.clone())
+            .filter(|r| !r.is_empty())
+            .collect();
+        let hits: Vec<(&BomItem, String)> =
+            missing.iter().map(|item| (*item, String::new())).collect();
+        let listed = listed_by_part(&hits);
+        vec![Raw::new(
+            ctx.severity,
+            if missing.len() == 1 {
+                "Missing MSL rating".to_string()
+            } else {
+                format!("{} parts have no MSL rating", missing.len())
+            },
+        )
+        .detail(format!(
+            "{} of {} moisture-sensitive part(s) have no MSL rating; the assembly house needs \
+             it for storage and bake-before-reflow handling.\n\nNo MSL rating:\n{listed}",
+            missing.len(),
+            scoped.len()
+        ))
+        .fix("Populate the MSL level (J-STD-020 level 1–6) for these parts.")
+        .refdes(refs)
+        .key("missing_msl")]
     }
 }
 
@@ -274,35 +317,11 @@ impl Rule for MissingAecq {
             .map(|(item, _)| item.reference.clone())
             .filter(|r| !r.is_empty())
             .collect();
-        // Listed by part, not by designator: what gets qualified (or excepted) is an MPN,
-        // and one MPN usually spans many rows. Designators ride along for the lookup.
-        let mut by_part: Vec<(String, String, Vec<String>)> = Vec::new();
-        for (item, value) in &hits {
-            let part = if item.mpn().trim().is_empty() {
-                item.label().to_string()
-            } else {
-                item.mpn().trim().to_string()
-            };
-            let refdes = item.label().to_string();
-            match by_part.iter_mut().find(|(p, v, _)| p == &part && v == value) {
-                Some((_, _, refs)) => refs.push(refdes),
-                None => by_part.push((part, value.clone(), vec![refdes])),
-            }
-        }
-        let listed = by_part
+        let labelled: Vec<(&BomItem, String)> = hits
             .iter()
-            .map(|(part, value, refs)| {
-                // One part can span dozens of rows; the designators are a lookup aid, not
-                // the point, so the line stays readable.
-                let shown = refs.len().min(8);
-                let mut list = refs[..shown].join(", ");
-                if refs.len() > shown {
-                    list.push_str(&format!(", +{} more", refs.len() - shown));
-                }
-                format!("  • {part} — AEC-Q: {value} ({list})")
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
+            .map(|(item, value)| (*item, format!("AEC-Q: {value}")))
+            .collect();
+        let listed = listed_by_part(&labelled);
         vec![Raw::new(
             ctx.severity,
             if hits.len() == 1 {

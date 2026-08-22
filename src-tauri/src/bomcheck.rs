@@ -245,7 +245,10 @@ pub fn ingest(
         .filter_map(|c| c.fingerprint.clone().map(|f| (f, c)))
         .collect();
 
-    let mut comments = existing.clone();
+    // Every action this run takes, applied as one log write and one fold at the end.
+    // Filing them one at a time rewrote the whole event log and re-folded every log per
+    // finding — 22 findings were 22 rewrites and 22 folds.
+    let mut actions: Vec<reviews::ActionInput> = Vec::new();
     let mut filed = 0;
     let mut reopened = 0;
     let mut unchanged = 0;
@@ -273,7 +276,7 @@ pub fn ingest(
                     action.comment_id = Some(id.clone());
                     action.status = Some("open".into());
                     action.reason = Some("detected again by the BOM check".into());
-                    comments = reviews::apply_action(pcbreview, user, action)?;
+                    actions.push(action);
                     reopened += 1;
                 } else {
                     unchanged += 1;
@@ -284,7 +287,7 @@ pub fn ingest(
                     let mut action = blank_action("severity");
                     action.comment_id = Some(id);
                     action.severity = Some(severity);
-                    comments = reviews::apply_action(pcbreview, user, action)?;
+                    actions.push(action);
                 }
             }
             None => {
@@ -303,7 +306,7 @@ pub fn ingest(
                     "anchors": finding.anchors,
                 }));
                 action.fingerprint = Some(finding.fingerprint.clone());
-                comments = reviews::apply_action(pcbreview, user, action)?;
+                actions.push(action);
                 filed += 1;
             }
         }
@@ -319,9 +322,11 @@ pub fn ingest(
         action.comment_id = Some(comment.id.clone());
         action.status = Some("resolved".into());
         action.reason = Some(AUTO_RESOLVED_REASON.into());
-        comments = reviews::apply_action(pcbreview, user, action)?;
+        actions.push(action);
         auto_resolved += 1;
     }
+
+    let comments = reviews::apply_actions(pcbreview, user, actions)?;
 
     log::info!(
         "bom check ({}, profile {}): {} findings — {} new, {} unchanged, {} reopened, {} auto-resolved",

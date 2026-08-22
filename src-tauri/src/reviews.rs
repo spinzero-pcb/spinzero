@@ -440,6 +440,48 @@ pub fn apply_action(pcbreview: &Path, user: &str, input: ActionInput) -> Result<
         return Ok(list_comments(pcbreview));
     }
 
+    let event = stamp_event(user, &ts, lamport, input)?;
+    append_events(pcbreview, user, &[event])?;
+    Ok(list_comments(pcbreview))
+}
+
+/// Apply a batch of actions as one log write and one fold.
+///
+/// Same stamping and same semantics as `apply_action`, once per input, with
+/// consecutive lamports so the batch folds in the order it was built (a status change
+/// and a severity refresh on the same comment stay in that order). Filing a check run's
+/// findings is the caller this exists for: one call per finding meant a whole-file
+/// rewrite plus a full fold of every log per finding.
+pub fn apply_actions(
+    pcbreview: &Path,
+    user: &str,
+    inputs: Vec<ActionInput>,
+) -> Result<Vec<Comment>, String> {
+    if inputs.is_empty() {
+        return Ok(list_comments(pcbreview));
+    }
+    let ts = OffsetDateTime::now_utc()
+        .format(&Rfc3339)
+        .map_err(|e| e.to_string())?;
+    let _guard = write_lock().lock_safe();
+    let base = next_lamport(pcbreview);
+    let mut events = Vec::with_capacity(inputs.len());
+    for (i, input) in inputs.into_iter().enumerate() {
+        events.push(stamp_event(user, &ts, base + i as u64, input)?);
+    }
+    append_events(pcbreview, user, &events)?;
+    Ok(list_comments(pcbreview))
+}
+
+/// Turn one action into the event that records it. Ids are derived from
+/// user+lamport+ts, and lamport is unique per event, so a batch sharing one `ts` still
+/// gets distinct comment and event ids.
+fn stamp_event(user: &str, ts: &str, lamport: u64, input: ActionInput) -> Result<Event, String> {
+    // `delete_many` expands into one delete event per id; it is not itself an event,
+    // and stamping it would append an action the fold does not understand.
+    if input.action == "delete_many" {
+        return Err("delete_many must go through apply_action".into());
+    }
     let comment_id = match input.action.as_str() {
         "create" => format!(
             "c_{}",
@@ -461,11 +503,11 @@ pub fn apply_action(pcbreview: &Path, user: &str, input: ActionInput) -> Result<
         return Err("create requires an anchor".into());
     }
 
-    let event = Event {
+    Ok(Event {
         event_id,
         comment_id,
         action: input.action,
-        ts,
+        ts: ts.to_string(),
         lamport,
         user: user.to_string(),
         author_name: input.author_name,
@@ -484,9 +526,7 @@ pub fn apply_action(pcbreview: &Path, user: &str, input: ActionInput) -> Result<
         status: input.status,
         reason: input.reason,
         assignee: input.assignee,
-    };
-    append_events(pcbreview, user, &[event])?;
-    Ok(list_comments(pcbreview))
+    })
 }
 
 // ----------------------------------------------------------- review sessions (item 9)
