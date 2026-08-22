@@ -129,28 +129,44 @@ pub fn run_rules(lines: &[BomLine], profile: &str) -> (FindingsDoc, load::Mappin
     (doc, mapping)
 }
 
-/// Title for the auto-created session. Date-scoped: a run re-run the same day lands
-/// in the same session, a run next week starts a fresh one. The tier is part of the
-/// title because the two producers reconcile separately — mixing them in one session
-/// would make "what did the detailed review add?" unanswerable in the rail.
+/// Which tier a session belongs to. It leads the title because the two producers
+/// reconcile separately — mixing them in one session would make "what did the
+/// detailed review add?" unanswerable in the rail — and because a run finds its
+/// session by this prefix.
+fn session_label(pipeline: &str) -> &'static str {
+    if pipeline == "bom-rules" { "BOM check" } else { "Detailed BOM review" }
+}
+
+/// Title for a newly created session: the tier plus the day it started.
 fn session_title(now: OffsetDateTime, pipeline: &str) -> String {
-    let label = if pipeline == "bom-rules" { "BOM check" } else { "Detailed BOM review" };
     format!(
-        "{label} {:04}-{:02}-{:02}",
+        "{} {:04}-{:02}-{:02}",
+        session_label(pipeline),
         now.year(),
         now.month() as u8,
         now.day()
     )
 }
 
-/// Find (or create) the session findings are filed into.
-fn ensure_session(pcbreview: &Path, user: &str, title: &str) -> Result<String, String> {
-    if let Some(existing) = reviews::list_sessions(pcbreview)
-        .into_iter()
-        .find(|s| s.title == title)
+/// Find (or create) the session findings are filed into: the newest still-active
+/// session of this tier, or a new one when there is none.
+///
+/// Scoping the session by date instead split one review in half the moment the date
+/// rolled over. A finding that already has a comment is left where it was filed, so a
+/// re-run the next day filed nothing new — while the rail landed on the fresh, nearly
+/// empty session and the previous day's session kept the comments. The session ends
+/// when a person completes or deletes it, not when the clock passes midnight.
+fn ensure_session(pcbreview: &Path, user: &str, label: &str, title: &str) -> Result<String, String> {
+    let before = reviews::list_sessions(pcbreview);
+    // list_sessions is oldest-first; take the newest match.
+    if let Some(existing) = before
+        .iter()
+        .rev()
+        .find(|s| s.status == "active" && s.title.starts_with(label))
     {
-        return Ok(existing.id);
+        return Ok(existing.id.clone());
     }
+    let known: BTreeSet<&str> = before.iter().map(|s| s.id.as_str()).collect();
     let sessions = reviews::apply_session_action(
         pcbreview,
         user,
@@ -161,9 +177,10 @@ fn ensure_session(pcbreview: &Path, user: &str, title: &str) -> Result<String, S
             status: None,
         },
     )?;
+    // By id, not by title: a completed session of the same name may still exist.
     sessions
         .iter()
-        .find(|s| s.title == title)
+        .find(|s| !known.contains(s.id.as_str()))
         .map(|s| s.id.clone())
         .ok_or_else(|| "could not create the BOM check session".to_string())
 }
@@ -213,7 +230,12 @@ pub fn ingest(
     mapping: &load::MappingReport,
 ) -> Result<CheckOutcome, String> {
     let now = OffsetDateTime::now_utc();
-    let session_id = ensure_session(pcbreview, user, &session_title(now, &doc.pipeline))?;
+    let session_id = ensure_session(
+        pcbreview,
+        user,
+        session_label(&doc.pipeline),
+        &session_title(now, &doc.pipeline),
+    )?;
 
     let source = source_for(&doc.pipeline);
     let existing = reviews::list_comments(pcbreview);
@@ -484,6 +506,58 @@ mod tests {
         let out = ingest(&pcb, "alice", Some("r3".into()), doc, &mapping).expect("ingest broken");
         assert!(out.reopened > 0);
         assert_eq!(out.filed, 0, "reopen, never re-file");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_later_run_files_into_the_session_the_earlier_one_used() {
+        // The date rolling over must not split one review across two sessions: the
+        // earlier run's comments stay where they are, so a new session would hold only
+        // whatever happened to be new that day.
+        let root = temp_root("session_reuse");
+        let pcb = root.join(".pcbreview");
+        let yesterday = reviews::apply_session_action(
+            &pcb,
+            "alice",
+            reviews::SessionActionInput {
+                action: "create".into(),
+                session_id: None,
+                title: Some("BOM check 2026-08-21".into()),
+                status: None,
+            },
+        )
+        .expect("session")[0]
+            .id
+            .clone();
+
+        let broken = vec![
+            line(1, &["R1"], "10k", "RC0402FR-0710KL"),
+            line(2, &["R1"], "4k7", "RC0402FR-074K7L"),
+        ];
+        let (doc, mapping) = run_rules(&broken, "default");
+        let out = ingest(&pcb, "alice", None, doc, &mapping).expect("ingest");
+        assert_eq!(out.session_id, yesterday, "the open BOM check session is reused");
+        assert_eq!(
+            reviews::list_sessions(&pcb).len(),
+            1,
+            "no second session is created alongside it"
+        );
+
+        // Completing it ends it: the next run starts a session of its own.
+        reviews::apply_session_action(
+            &pcb,
+            "alice",
+            reviews::SessionActionInput {
+                action: "status".into(),
+                session_id: Some(yesterday.clone()),
+                title: None,
+                status: Some("completed".into()),
+            },
+        )
+        .expect("complete");
+        let (doc, mapping) = run_rules(&broken, "default");
+        let out = ingest(&pcb, "alice", None, doc, &mapping).expect("ingest after completing");
+        assert_ne!(out.session_id, yesterday, "a completed session is not reused");
         let _ = std::fs::remove_dir_all(&root);
     }
 
