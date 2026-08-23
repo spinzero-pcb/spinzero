@@ -22,10 +22,6 @@ interface SettingsState {
   bomChips: Record<string, boolean> | null;
   /** PCB compare blink toggle; null = never saved (defaults off). */
   diffBlink: boolean | null;
-  /** Run the free BOM check automatically after every successful extraction;
-   *  null = never saved (defaults off — the check writes review comments, so it
-   *  stays opt-in). */
-  bomCheckOnCrunch: boolean | null;
   /** Output panel height in px; null = never saved (the component's default). */
   bottomPanelH: number | null;
   /** Downloaded-but-unapplied update version; null = nothing pending. */
@@ -49,7 +45,6 @@ interface SettingsState {
   /** Persist the PCB compare blink toggle. */
   setDiffBlink: (on: boolean) => Promise<void>;
   /** Persist the "run the BOM check after each extraction" toggle. */
-  setBomCheckOnCrunch: (on: boolean) => Promise<void>;
   /** Persist the output panel height (called once per completed drag). */
   setBottomPanelH: (h: number) => Promise<void>;
   /** Persist (or clear, with null) the pending update version. */
@@ -67,7 +62,6 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   pcbOpacity: null,
   bomChips: null,
   diffBlink: null,
-  bomCheckOnCrunch: null,
   bottomPanelH: null,
   updateDeferred: null,
   reviewService: null,
@@ -99,8 +93,6 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
             ? (s.bom_chips as Record<string, boolean>)
             : null,
         diffBlink: typeof s?.diff_blink === "boolean" ? s.diff_blink : null,
-        bomCheckOnCrunch:
-          typeof s?.bom_check_on_crunch === "boolean" ? s.bom_check_on_crunch : null,
         bottomPanelH:
           typeof s?.bottom_panel_h === "number" && Number.isFinite(s.bottom_panel_h)
             ? s.bottom_panel_h
@@ -173,12 +165,6 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
     await persist();
   },
 
-  setBomCheckOnCrunch: async (on) => {
-    await ensureLoaded();
-    set({ bomCheckOnCrunch: on });
-    await persist();
-  },
-
   setBottomPanelH: async (h) => {
     await ensureLoaded();
     set({ bottomPanelH: h });
@@ -224,7 +210,7 @@ async function persist() {
   // fire without a setter in front of it. Every real setter awaits ensureLoaded, so
   // this returning early means there was nothing worth writing yet.
   if (!useSettingsStore.getState().loaded) return;
-  const { keymap, projectRoot, accentColor, authorName, projectUi, pcbOpacity, bomChips, diffBlink, bomCheckOnCrunch, bottomPanelH, updateDeferred, reviewService } =
+  const { keymap, projectRoot, accentColor, authorName, projectUi, pcbOpacity, bomChips, diffBlink, bottomPanelH, updateDeferred, reviewService } =
     useSettingsStore.getState();
   try {
     await ipc.setSettings({
@@ -236,7 +222,6 @@ async function persist() {
       pcb_opacity: pcbOpacity,
       bom_chips: bomChips,
       diff_blink: diffBlink,
-      bom_check_on_crunch: bomCheckOnCrunch,
       bottom_panel_h: bottomPanelH,
       update_deferred: updateDeferred,
       review_service: reviewService,

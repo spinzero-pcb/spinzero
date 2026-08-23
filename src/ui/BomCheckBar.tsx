@@ -2,7 +2,6 @@ import { useEffect } from "react";
 import { useBomCheckStore } from "../stores/bomCheckStore";
 import { useDetailedReviewStore } from "../stores/detailedReviewStore";
 import { useReviewStore } from "../stores/reviewStore";
-import { useSettingsStore } from "../stores/settingsStore";
 import { BOM_PROFILES, isBomProfile, severityCounts } from "../lib/findings";
 import type { FindingSeverity } from "../lib/findings";
 import type { CommentSeverity } from "../lib/types";
@@ -52,9 +51,6 @@ export function BomCheckBar() {
   const profile = useBomCheckStore((s) => s.profile);
   const setProfile = useBomCheckStore((s) => s.setProfile);
   const run = useBomCheckStore((s) => s.run);
-  // Opt-in auto-run. Default OFF and app-wide: the check writes review comments, so
-  // it must never start doing that on its own.
-  const auto = useSettingsStore((s) => s.bomCheckOnCrunch) ?? false;
   // Paid tier. `phase` drives the button: idle → open the pre-flight dialog; running
   // → show the live stage and offer a cancel.
   const detailedPhase = useDetailedReviewStore((s) => s.phase);
@@ -79,13 +75,13 @@ export function BomCheckBar() {
     return () => window.removeEventListener("keydown", onKey);
   }, [run]);
 
-  /** Open the review rail on this run's session, optionally filtered to one severity. */
-  function showInReview(role?: CommentSeverity) {
+  /** Open the review rail on this run's session, filtered to one severity. */
+  function showInReview(role: CommentSeverity) {
     const review = useReviewStore.getState();
     if (sessionId) review.setActiveSession(sessionId);
     review.setLeftTab("review");
     review.setFilterStatus("open");
-    review.setFilterSeverity(role ?? "all");
+    review.setFilterSeverity(role);
   }
 
   // Findings-severity counts folded onto the review vocabulary, so "Low" and
@@ -151,15 +147,6 @@ export function BomCheckBar() {
         </>
       )}
 
-      <button
-        className={`btn-ghost bom-chip ${auto ? "on" : ""}`}
-        aria-pressed={auto}
-        title="Re-run the check automatically after every extraction that changed the design"
-        onClick={() => void useSettingsStore.getState().setBomCheckOnCrunch(!auto)}
-      >
-        Auto
-      </button>
-
       {doc && (
         <>
           <span className="bom-check-count">
@@ -187,15 +174,6 @@ export function BomCheckBar() {
                 .filter(Boolean)
                 .join(" · ")}
             </span>
-          )}
-          {doc.findings.length > 0 && (
-            <button
-              className="btn-ghost bom-check-open"
-              title="Open these findings in the review panel"
-              onClick={() => showInReview()}
-            >
-              Open in review
-            </button>
           )}
         </>
       )}

@@ -185,25 +185,4 @@ describe("settingsStore", () => {
     expect(inspected).toEqual([]);
     expect(Object.keys(useSettingsStore.getState().projectUi)).toEqual(["/p/a", "/p/b"]);
   });
-
-  it("persists the BOM-check auto-run flag and reads a missing one as off", async () => {
-    const calls: Array<{ cmd: string; args: unknown }> = [];
-    mockIPC((cmd, args) => {
-      calls.push({ cmd, args });
-      if (cmd === "get_settings") return {};
-      return undefined;
-    });
-
-    await useSettingsStore.getState().load();
-    // Never saved reads as null, which every consumer treats as OFF — the check
-    // writes review comments, so it must not start doing that unasked.
-    expect(useSettingsStore.getState().bomCheckOnCrunch).toBeNull();
-
-    await useSettingsStore.getState().setBomCheckOnCrunch(true);
-    expect(useSettingsStore.getState().bomCheckOnCrunch).toBe(true);
-    expect(calls).toContainEqual({
-      cmd: "set_settings",
-      args: { settings: expect.objectContaining({ bom_check_on_crunch: true }) },
-    });
-  });
 });

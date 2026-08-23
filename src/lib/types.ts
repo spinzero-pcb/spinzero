@@ -222,7 +222,6 @@ export interface UiSettings {
   diff_blink?: boolean | null;
   /** Run the free BOM check after every successful extraction (opt-in: the check
    *  files review comments, so it must never start doing that unasked). */
-  bom_check_on_crunch?: boolean | null;
   /** Output panel height in px (drag-resized). */
   bottom_panel_h?: number | null;
   /** Update version downloaded + offered but not applied; the next launch may

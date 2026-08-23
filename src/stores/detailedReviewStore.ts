@@ -160,6 +160,9 @@ export const useDetailedReviewStore = create<DetailedReviewState>((set, get) => 
         error: null,
       });
       await useReviewStore.getState().load();
+      // Land on the run's own session, exactly as the free check does — the findings
+      // the user just paid to wait for are what the rail should be showing.
+      if (outcome.session_id) useReviewStore.getState().setActiveSession(outcome.session_id);
       useToastStore.getState().push({
         kind: doc.findings.length ? "info" : "success",
         title: `Detailed review: ${doc.findings.length || "no"} finding${doc.findings.length === 1 ? "" : "s"}`,

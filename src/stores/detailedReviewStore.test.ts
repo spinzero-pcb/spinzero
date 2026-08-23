@@ -139,6 +139,8 @@ describe("detailedReviewStore", () => {
     // The BOM strip now summarizes the paid run.
     expect(useBomCheckStore.getState().doc?.pipeline).toBe("bom-detailed");
     expect(useBomCheckStore.getState().sessionId).toBe("s_paid");
+    // …and the rail lands on that run's session, so the findings are on screen.
+    expect(useReviewStore.getState().activeSessionId).toBe("s_paid");
 
     // Ack: the service is told to delete its copy.
     expect(fetchMock.mock.calls.some(([u]) => String(u).endsWith("/ack"))).toBe(true);
