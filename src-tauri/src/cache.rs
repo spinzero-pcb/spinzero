@@ -70,17 +70,22 @@ pub fn is_cached(project_dir: &Path, key: &str) -> bool {
     dir.is_dir() && check_manifest_schema(&dir).is_ok()
 }
 
-/// Run the three KiCad extraction stages into `out` (design model + grouped BOM in
-/// JSON and CSV). `emit` receives progress/artifact messages — the crunch maps them
-/// to `CrunchEvent`s; lazy callers pass a no-op. Mirrors `sidecar::crunch_kicad` but
-/// without the `AppHandle`/per-stage `CrunchError` wrapping, so it is callable from
-/// command handlers (set-active, read-only resolve) that have no crunch context.
+/// Run the four KiCad extraction stages into `out` (design model + grouped BOM in
+/// JSON and CSV + the enriched review BOM). `emit` receives progress/artifact
+/// messages — the crunch maps them to `CrunchEvent`s; lazy callers pass a no-op.
+/// Mirrors `sidecar::crunch_kicad` but without the `AppHandle`/per-stage
+/// `CrunchError` wrapping, so it is callable from command handlers (set-active,
+/// read-only resolve) that have no crunch context.
 pub fn extract_into(design_file: &Path, out: &Path, emit: &mut dyn FnMut(Msg)) -> Result<(), String> {
     let design_dir = out.join("design");
     let bom_dir = out.join("bom");
     run_design(design_file, &design_dir, emit)?;
     run_bom(design_file, &bom_dir, "grouped-json", emit)?;
     run_bom(design_file, &bom_dir, "grouped-csv", emit)?;
+    // The enriched BOM is what `reviewbundle::build` uploads for a detailed review.
+    // Without it the paid tier is unreachable — the pre-flight dialog can only say
+    // "run an extraction first" about an extraction that already ran.
+    run_bom(design_file, &bom_dir, "enriched-csv", emit)?;
     Ok(())
 }
 

@@ -2,6 +2,7 @@ import { useEffect } from "react";
 import { useBomCheckStore } from "../stores/bomCheckStore";
 import { useReviewStore } from "../stores/reviewStore";
 import { BOM_PROFILES, isBomProfile, severityCounts } from "../lib/findings";
+import { runHealthSummary } from "../lib/reviewService";
 import type { FindingSeverity } from "../lib/findings";
 import type { CommentSeverity } from "../lib/types";
 import { IconChecklist } from "./icons";
@@ -79,6 +80,10 @@ export function BomCheckBar() {
   // Findings-severity counts folded onto the review vocabulary, so "Low" and
   // "Question" land in one "Info" chip instead of two chips filtering to the same
   // rail. `severityCounts` walks SEVERITY_ORDER, so Map order stays worst-first.
+  // Stages that did not fully run in the review that produced `doc` (paid tier only
+  // — the free deterministic check has nothing to degrade). null on a clean run.
+  const health = runHealthSummary(doc);
+
   const counts = (() => {
     if (!doc) return [] as { role: CommentSeverity; n: number }[];
     const byRole = new Map<CommentSeverity, number>();
@@ -163,6 +168,16 @@ export function BomCheckBar() {
         >
           Unmapped: {unmapped.slice(0, 3).join(", ")}
           {unmapped.length > 3 ? ` +${unmapped.length - 3}` : ""}
+        </span>
+      )}
+      {/* A review whose validation or judgment stage died (provider rate limit, cost
+          cap, timeout) still returns findings, and the job itself reports "completed"
+          — so without this the user reads an incomplete review as a full one. The
+          reason travels in the document's `run_health`; the tooltip carries every
+          stage verbatim. */}
+      {health && (
+        <span className="bom-check-warn" title={`This review is incomplete.\n\n${health.detail}`}>
+          Incomplete review: {health.text}
         </span>
       )}
       {error && <span className="bom-check-warn">Check failed: {error}</span>}

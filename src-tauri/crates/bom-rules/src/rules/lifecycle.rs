@@ -287,59 +287,114 @@ impl Rule for MissingAecq {
                 .key("no_aecq_column")];
         }
 
-        let hits: Vec<(&BomItem, String)> = populated
-            .iter()
-            .filter_map(|item| {
-                let value = if item.filled("aecq") {
-                    item.aecq().trim().to_string()
-                } else {
-                    String::new()
-                };
-                if !value.is_empty() && !negatives.contains(&value.to_lowercase()) {
-                    return None;
-                }
-                Some((
-                    *item,
-                    if value.is_empty() { "(blank)".to_string() } else { value },
-                ))
-            })
-            .collect();
-
-        if hits.is_empty() {
-            return Vec::new();
-        }
-        // One review point for the whole gap, listing every affected part: the
-        // reviewer's decision ("qualify these parts, or record an exception") is the
-        // same for all of them, so N identical comments would only be N times the noise.
-        // The BOM marks every covered row, so the reviewer still sees each one in place.
-        let refs: Vec<String> = hits
-            .iter()
-            .map(|(item, _)| item.reference.clone())
-            .filter(|r| !r.is_empty())
-            .collect();
-        let labelled: Vec<(&BomItem, String)> = hits
-            .iter()
-            .map(|(item, value)| (*item, format!("AEC-Q: {value}")))
-            .collect();
-        let listed = listed_by_part(&labelled);
-        vec![Raw::new(
-            ctx.severity,
-            if hits.len() == 1 {
-                "Part not AEC-Q qualified".to_string()
+        // A declared "NO" and an empty cell are DIFFERENT CLAIMS and must not share a
+        // finding. "NO" is the designer stating the part is not qualified — actionable
+        // at the profile's severity, no further evidence needed. Blank is *unknown*:
+        // the part may well be qualified and simply undocumented, which is the common
+        // case (a Sumida CDRH127L125NP-221MC reads "Qualified to AEC-Q200." on page 1
+        // of its datasheet while carrying no AEC-Q column and no Digi-Key parameter).
+        //
+        // Merging them, as this rule used to, reports a qualification failure against a
+        // correctly-chosen part. That is the most expensive false positive this pack
+        // can emit: the designer re-sources a part that was already right. So blanks
+        // go out under `missing_severity` as a data gap, with wording that tells the
+        // validation stage exactly what to confirm against the datasheet. Both knobs
+        // are configured to Major (see `config.rs`): one severity category, two
+        // findings — the split is in the claim, not in the ranking.
+        let mut declared: Vec<(&BomItem, String)> = Vec::new();
+        let mut blank: Vec<&BomItem> = Vec::new();
+        for item in &populated {
+            let value = if item.filled("aecq") {
+                item.aecq().trim().to_string()
             } else {
-                format!("{} parts not AEC-Q qualified", hits.len())
-            },
-        )
-        .detail(format!(
-            "{} of {} populated parts have no positive AEC-Q status in an automotive design.\n\nNot qualified:\n{listed}",
-            hits.len(),
-            populated.len()
-        ))
-        .fix(
-            "Use AEC-Q-qualified equivalents, or record an approved exception with the qualification grade.",
-        )
-        .refdes(refs)
-        .key("aecq")]
+                String::new()
+            };
+            if value.is_empty() {
+                blank.push(*item);
+            } else if negatives.contains(&value.to_lowercase()) {
+                declared.push((*item, value));
+            }
+        }
+
+        let mut out = Vec::new();
+
+        // One review point per class, listing every affected part: the reviewer's
+        // decision is the same for all of them, so N identical comments would only be
+        // N times the noise. The BOM marks every covered row, so the reviewer still
+        // sees each one in place.
+        if !declared.is_empty() {
+            let refs: Vec<String> = declared
+                .iter()
+                .map(|(item, _)| item.reference.clone())
+                .filter(|r| !r.is_empty())
+                .collect();
+            let labelled: Vec<(&BomItem, String)> = declared
+                .iter()
+                .map(|(item, value)| (*item, format!("AEC-Q: {value}")))
+                .collect();
+            let listed = listed_by_part(&labelled);
+            out.push(
+                Raw::new(
+                    ctx.severity,
+                    if declared.len() == 1 {
+                        "Part declared not AEC-Q qualified".to_string()
+                    } else {
+                        format!("{} parts declared not AEC-Q qualified", declared.len())
+                    },
+                )
+                .detail(format!(
+                    "{} of {} populated parts carry an explicit negative AEC-Q status in an \
+                     automotive design.\n\nDeclared not qualified:\n{listed}",
+                    declared.len(),
+                    populated.len()
+                ))
+                .fix(
+                    "Use AEC-Q-qualified equivalents, or record an approved exception with the \
+                     qualification grade.",
+                )
+                .refdes(refs)
+                .key("aecq_declared_negative"),
+            );
+        }
+
+        if !blank.is_empty() {
+            let refs: Vec<String> = blank
+                .iter()
+                .map(|item| item.reference.clone())
+                .filter(|r| !r.is_empty())
+                .collect();
+            let labelled: Vec<(&BomItem, String)> = blank
+                .iter()
+                .map(|item| (*item, "AEC-Q: (blank)".to_string()))
+                .collect();
+            let listed = listed_by_part(&labelled);
+            out.push(
+                Raw::new(
+                    ctx.missing_sev(Severity::Low),
+                    format!(
+                        "{} part{} have no AEC-Q status recorded",
+                        blank.len(),
+                        if blank.len() == 1 { "" } else { "s" }
+                    ),
+                )
+                .detail(format!(
+                    "{} of {} populated parts leave the AEC-Q column empty in an automotive \
+                     design. Empty means UNKNOWN, not unqualified — several of these are \
+                     usually qualified parts with an undocumented field, and the datasheet \
+                     settles it either way.\n\nNo AEC-Q status recorded:\n{listed}",
+                    blank.len(),
+                    populated.len()
+                ))
+                .fix(
+                    "Confirm each part's AEC-Q grade against its datasheet and record it; escalate \
+                     only the parts the datasheet shows are not qualified.",
+                )
+                .refdes(refs)
+                .key("aecq_not_recorded"),
+            );
+        }
+
+        out
     }
 }
 

@@ -234,3 +234,23 @@ export const STAGE_LABELS: Record<string, string> = {
 export function stageLabel(stage: string | undefined): string {
   return stage ? (STAGE_LABELS[stage] ?? stage) : "";
 }
+
+/**
+ * What to tell the user when a review came back incomplete — or null when it
+ * didn't.
+ *
+ * A rate-limited or capped stage is the difference between "the BOM is clean" and
+ * "nothing checked the BOM", and the app is the only place the user looks. The
+ * service logs the provider error per job, but the run's own findings must carry
+ * the reason (`run_health`) or the gap is invisible here.
+ */
+export function runHealthSummary(doc: FindingsDoc | null): { text: string; detail: string } | null {
+  const entries = doc?.run_health ?? [];
+  if (!entries.length) return null;
+  const lines = entries.map((h) => `${stageLabel(h.stage)} ${h.status}${h.detail ? `: ${h.detail}` : ""}`);
+  const worst = entries.find((h) => h.status === "failed") ?? entries[0];
+  const text = `${stageLabel(worst?.stage)} ${worst?.status === "failed" ? "failed" : "was cut short"}${
+    entries.length > 1 ? ` (+${entries.length - 1} more)` : ""
+  }`;
+  return { text, detail: lines.join("\n") };
+}

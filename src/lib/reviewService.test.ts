@@ -3,12 +3,14 @@ import {
   ackReview,
   fetchFindings,
   health,
+  runHealthSummary,
   stageLabel,
   streamProgress,
   submitReview,
   ReviewServiceError,
   type ReviewProgress,
 } from "./reviewService";
+import type { FindingsDoc } from "./findings";
 
 // The client's job is to make a remote, optional, failure-prone service feel like a
 // local capability: a dead service must produce an explainable message rather than an
@@ -106,6 +108,25 @@ describe("reviewService client", () => {
   it("rejects when the stream cannot be opened at all", async () => {
     fetchMock.mockResolvedValue(new Response("nope", { status: 502 }));
     await expect(streamProgress(config, "j1", () => {})).rejects.toThrow(/progress stream failed/);
+  });
+
+  it("summarises an incomplete review, and says nothing about a clean one", () => {
+    // The regression this guards: a rate-limited validation stage came back as
+    // findings at Low confidence with no visible reason — the run looked complete.
+    const doc = {
+      run_health: [
+        { stage: "fp_validation", status: "failed" as const, detail: "429 Too Many Requests — rate limited" },
+        { stage: "judgment_pass", status: "degraded" as const, detail: "ended early (cost_cap)" },
+      ],
+    } as unknown as FindingsDoc;
+    const summary = runHealthSummary(doc);
+    expect(summary?.text).toBe("Validating rule findings failed (+1 more)");
+    expect(summary?.detail).toContain("429 Too Many Requests");
+    expect(summary?.detail).toContain("Judgment pass degraded");
+
+    expect(runHealthSummary(null)).toBeNull();
+    expect(runHealthSummary({ run_health: [] } as unknown as FindingsDoc)).toBeNull();
+    expect(runHealthSummary({} as FindingsDoc)).toBeNull();
   });
 
   it("labels stages in human words", () => {

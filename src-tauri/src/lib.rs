@@ -1189,6 +1189,19 @@ fn ingest_findings(
         doc.pipeline,
         doc.engine_version
     );
+    // A stage the service could not run (provider rate limit, cost cap, timeout) is
+    // the difference between "checked and clean" and "never checked". The UI shows it
+    // on the BOM strip; log it too, so a user reporting "the review missed X" can be
+    // answered from the app log without the service's job directory.
+    for h in &doc.run_health {
+        log::warn!(
+            "{} detailed review incomplete: stage '{}' {} — {}",
+            telemetry::LOCAL_ONLY,
+            h.stage,
+            h.status,
+            h.detail
+        );
+    }
     bomcheck::ingest(
         &handle.project_dir,
         &project::author_slug(),

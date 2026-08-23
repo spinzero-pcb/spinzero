@@ -25,6 +25,10 @@ const EXCLUDED_CLASSES: &[&str] = &["mounting_hole", "fiducial", "test_point", "
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Field {
     Mpn,
+    /// A documented second source. Kept separate from `Mpn` (which negates
+    /// "alternate") so a part with an alternate is not read as unsourced, and so a
+    /// single-source risk finding is not filed against a part that has two.
+    MpnAlt,
     Manufacturer,
     Datasheet,
     Lifecycle,
@@ -35,14 +39,15 @@ pub enum Field {
 }
 
 impl Field {
-    fn all() -> [Field; 8] {
+    fn all() -> [Field; 9] {
         use Field::*;
-        [Mpn, Manufacturer, Datasheet, Lifecycle, Msl, Rohs, Reach, Aecq]
+        [Mpn, MpnAlt, Manufacturer, Datasheet, Lifecycle, Msl, Rohs, Reach, Aecq]
     }
 
     fn label(self) -> &'static str {
         match self {
             Field::Mpn => "mpn",
+            Field::MpnAlt => "mpn_alt",
             Field::Manufacturer => "manufacturer",
             Field::Datasheet => "datasheet",
             Field::Lifecycle => "lifecycle",
@@ -59,6 +64,13 @@ impl Field {
             Field::Mpn => (
                 &["mpn", "partnumber", "partno", "ordernumber", "orderingcode", "orderno"],
                 &["alternate", "supplier", "legacy", "deviceid", "internal", "distributor"],
+                false,
+            ),
+            // "Alternate part 1" (KiCad) / "Alternate MPN" / "MPN2". The negatives keep
+            // the companion "Alternate part 1 Manufacturer" column out of this field.
+            Field::MpnAlt => (
+                &["alternatepart", "alternatempn", "altpart", "altmpn", "mpn2", "secondsource"],
+                &["manufacturer", "mfr", "mfg", "supplier", "distributor"],
                 false,
             ),
             Field::Manufacturer => (
@@ -295,6 +307,8 @@ pub struct EnrichedRow {
     pub description: String,
     pub manufacturer: String,
     pub mpn: String,
+    /// Documented second source, when the design records one. Empty otherwise.
+    pub mpn_alt: String,
     pub datasheet: String,
     pub aecq: String,
     pub rohs: String,
@@ -331,6 +345,7 @@ pub fn build_enriched(components: &[Component], mapping: &Mapping) -> (Vec<Enric
             description: c.description.clone(),
             manufacturer: manufacturer.clone(),
             mpn: mpn.clone(),
+            mpn_alt: mapping.value(Field::MpnAlt, c),
             datasheet: mapping.value(Field::Datasheet, c),
             aecq: mapping.value(Field::Aecq, c),
             rohs: mapping.value(Field::Rohs, c),
@@ -344,6 +359,8 @@ pub fn build_enriched(components: &[Component], mapping: &Mapping) -> (Vec<Enric
         entry.quantity += 1;
         // First non-empty wins for fields that may be sparse within a group.
         fill_if_empty(&mut entry.description, &c.description);
+        // Sparse within a group: one member of a grouped line may carry the alternate.
+        fill_if_empty(&mut entry.mpn_alt, &mapping.value(Field::MpnAlt, c));
         for name in &dist_cols {
             let v = mapping.distributor_value(name, c);
             if !v.is_empty() {
@@ -376,6 +393,7 @@ pub fn enriched_csv(rows: &[EnrichedRow], dist_cols: &[String]) -> String {
         "Description",
         "Manufacturer",
         "Manufacturer Part Number",
+        "Alternate MPN",
         "Datasheet",
         "AEC-Q",
         "RoHS",
@@ -400,6 +418,7 @@ pub fn enriched_csv(rows: &[EnrichedRow], dist_cols: &[String]) -> String {
             r.description.clone(),
             r.manufacturer.clone(),
             r.mpn.clone(),
+            r.mpn_alt.clone(),
             r.datasheet.clone(),
             r.aecq.clone(),
             r.rohs.clone(),
@@ -851,5 +870,42 @@ mod tests {
         let mapping = resolve_mapping(&comps);
         let (rows, _) = build_enriched(&comps, &mapping);
         assert_eq!(rows[0].mpn, "REAL");
+        // …and the alternate is captured rather than dropped: a part with a documented
+        // second source must not read as single-sourced downstream.
+        assert_eq!(rows[0].mpn_alt, "ALT");
+    }
+
+    #[test]
+    fn kicad_alternate_part_becomes_the_alternate_mpn_column() {
+        // The property names KiCad designs actually use (seen on MC-02-CONTROL, where
+        // 62 of 394 components carry a documented second source that never reached the
+        // review BOM). The companion "… Manufacturer" column must NOT land in mpn_alt.
+        let comps = vec![comp(
+            "C1",
+            "22uF",
+            "C_1210",
+            "cap",
+            &[
+                ("MPN", "CL32Y226KAVVPJE"),
+                ("Manufacturer", "Samsung"),
+                ("Alternate part 1", "TMK325B7226MMHP"),
+                ("Alternate part 1 Manufacturer", "Taiyo Yuden"),
+            ],
+        )];
+        let mapping = resolve_mapping(&comps);
+        let (rows, _) = build_enriched(&comps, &mapping);
+        assert_eq!(rows[0].mpn, "CL32Y226KAVVPJE");
+        assert_eq!(rows[0].mpn_alt, "TMK325B7226MMHP");
+        assert_eq!(rows[0].manufacturer, "Samsung");
+
+        // The header name is the contract with the rule pack: bom-rules maps
+        // "Alternate MPN" to its `mpn_alt` field, which three sourcing rules read.
+        let csv = enriched_csv(&rows, &[]);
+        let header = csv.lines().next().unwrap();
+        assert!(header.contains("Alternate MPN"), "header was: {header}");
+        let cols: Vec<&str> = header.split(',').collect();
+        let idx = cols.iter().position(|c| *c == "Alternate MPN").unwrap();
+        let row: Vec<&str> = csv.lines().nth(1).unwrap().split(',').collect();
+        assert_eq!(row[idx], "TMK325B7226MMHP");
     }
 }

@@ -131,7 +131,14 @@ pub fn defaults() -> Value {
         "bom.missing_msl":                  { "enabled": true,  "severity": "INFO",
                                               "params": { "applies_to_all": false,
                                                           "applies_to_prefixes": ["U", "Q", "D", "M", "IC", "Y", "X"] } },
-        "bom.missing_aecq":                 { "enabled": false, "severity": "CRITICAL" },
+        // Declared-negative and blank-cell AEC-Q stay SEPARATE findings (they are
+        // different claims and the wording differs), but they share one severity
+        // category: both are Major. Neither is a Critical that should stop a build on
+        // its own — "NO" is a sourcing decision to revisit and a blank cell is a
+        // traceability gap the datasheet usually clears — and splitting the severity
+        // as well as the finding only made the report harder to triage.
+        "bom.missing_aecq":                 { "enabled": false, "severity": "MAJOR",
+                                              "params": { "missing_severity": "MAJOR" } },
         "bom.missing_compliance":           { "enabled": true,  "severity": "INFO",
                                               "params": { "required": ["rohs"],
                                                           "missing_severity": "MINOR" } },
@@ -190,7 +197,11 @@ fn automotive() -> Value {
         "bom.missing_msl": { "severity": "MAJOR",
                              "params": { "applies_to_all": true, "applies_to_prefixes": [] } },
         "bom.lifecycle_status": { "severity": "CRITICAL" },
-        "bom.missing_aecq": { "enabled": true, "severity": "CRITICAL" },
+        // Both AEC-Q findings ride at MAJOR here too — the profile turns the rule ON,
+        // it does not re-rank it. A CRITICAL on either would send someone re-sourcing
+        // silicon that an IATF traceability gap, not a failed part, is behind.
+        "bom.missing_aecq": { "enabled": true, "severity": "MAJOR",
+                              "params": { "missing_severity": "MAJOR" } },
         "bom.missing_compliance": { "severity": "CRITICAL",
                                     "params": { "required": ["rohs", "reach"] } }
       }
@@ -207,7 +218,7 @@ mod tests {
         let rules = &auto["rules"];
         // Overridden by the profile …
         assert_eq!(rules["bom.missing_aecq"]["enabled"], json!(true));
-        assert_eq!(rules["bom.missing_aecq"]["severity"], json!("CRITICAL"));
+        assert_eq!(rules["bom.missing_aecq"]["severity"], json!("MAJOR"));
         // … while params the profile doesn't mention survive from defaults.
         assert_eq!(
             rules["bom.lifecycle_status"]["params"]["missing_severity"],

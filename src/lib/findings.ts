@@ -44,6 +44,16 @@ export interface AuditEntry {
   ref?: string;
 }
 
+/** One stage of a review that did not fully run. Only non-clean stages appear, so a
+ *  non-empty `run_health` means "this result is incomplete" — and says why. */
+export interface RunHealthEntry {
+  /** Producer stage id ("fp_validation", "judgment_pass"). */
+  stage: string;
+  /** "degraded" = it ran but covered less than it should; "failed" = it produced nothing. */
+  status: "degraded" | "failed";
+  detail?: string;
+}
+
 export interface FindingsDoc {
   schema_version: string;
   engine_version: string;
@@ -54,6 +64,9 @@ export interface FindingsDoc {
   findings: Finding[];
   bom_audit: AuditEntry[];
   stats: { item_count: number; finding_count: number; duration_ms: number };
+  /** Stages that degraded or failed. Absent on a clean run (and on the free tier,
+   *  which is deterministic and has nothing to degrade). */
+  run_health?: RunHealthEntry[];
 }
 
 /** What `run_bom_check` returns: the document plus what ingestion did with it. */

@@ -25,7 +25,12 @@
     "generated_ts": { "type": "string", "format": "date-time" },
     "findings": { "type": "array", "items": { "$ref": "#/$defs/finding" } },
     "bom_audit": { "type": "array", "items": { "$ref": "#/$defs/auditEntry" } },
-    "stats": { "$ref": "#/$defs/stats" }
+    "stats": { "$ref": "#/$defs/stats" },
+    "run_health": {
+      "type": "array",
+      "description": "Stages that did not fully run. Only non-clean stages appear, so a non-empty array means the result is incomplete and says why. Consumers should SHOW this: a validation stage killed by a provider error otherwise reaches the engineer as unexplained low-confidence findings.",
+      "items": { "$ref": "#/$defs/runHealthEntry" }
+    }
   },
   "$defs": {
     "severity": { "enum": ["Critical", "Major", "Medium", "Low", "Question"] },
@@ -79,6 +84,23 @@
         "result": { "enum": ["OK", "GAP", "TRUNCATED"] },
         "note": { "type": "string" },
         "ref": { "type": "string", "description": "Cross-link to a finding id." }
+      }
+    },
+    "runHealthEntry": {
+      "type": "object",
+      "required": ["stage", "status"],
+      "additionalProperties": false,
+      "properties": {
+        "stage": {
+          "type": "string",
+          "description": "Stage id, as used in the producer's progress events.",
+          "examples": ["fp_validation", "judgment_pass"]
+        },
+        "status": {
+          "enum": ["degraded", "failed"],
+          "description": "'degraded' = the stage ran but covered less than it should; 'failed' = it produced nothing."
+        },
+        "detail": { "type": "string", "description": "One sentence naming the real cause — a provider error, a cost cap, a timeout." }
       }
     },
     "stats": {

@@ -385,6 +385,11 @@ fn crunch_kicad(app: &AppHandle, design_file: &Path, tmp: &Path) -> Result<(), C
     run_extract_stage(app, "bom-csv", |emit| {
         run_bom(design_file, &bom_dir, "grouped-csv", emit)
     })?;
+    // The enriched BOM is what `reviewbundle::build` uploads for a detailed review;
+    // it must be written by the normal crunch or the paid tier is unreachable.
+    run_extract_stage(app, "bom-enriched", |emit| {
+        run_bom(design_file, &bom_dir, "enriched-csv", emit)
+    })?;
     Ok(())
 }
 

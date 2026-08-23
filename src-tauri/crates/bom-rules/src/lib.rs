@@ -168,6 +168,20 @@ pub struct Stats {
     pub duration_ms: u64,
 }
 
+/// One stage of a review that did not fully run (schema: `run_health`). The free
+/// tier never emits these — it is deterministic and has nothing to degrade — but the
+/// paid engine does, and the app shows them so an incomplete review cannot read as
+/// a clean one.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RunHealthEntry {
+    /// Producer stage id ("fp_validation", "judgment_pass").
+    pub stage: String,
+    /// `degraded` (ran, covered less than it should) | `failed` (produced nothing).
+    pub status: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub detail: String,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct FindingsDoc {
     pub schema_version: String,
@@ -184,6 +198,8 @@ pub struct FindingsDoc {
     pub bom_audit: Vec<AuditEntry>,
     #[serde(default)]
     pub stats: Stats,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub run_health: Vec<RunHealthEntry>,
 }
 
 /// blake3(rule_id | anchor set | normalized predicate), truncated to 16 hex chars —
@@ -223,6 +239,7 @@ pub fn run(items: &[BomItem], profile: &str, mapping: &load::MappingReport) -> F
             findings: Vec::new(),
             bom_audit: Vec::new(),
             stats: Stats::default(),
+            run_health: Vec::new(),
         };
     }
     let populated: Vec<&BomItem> = items.iter().filter(|i| !i.dnp).collect();
@@ -314,6 +331,7 @@ pub fn run(items: &[BomItem], profile: &str, mapping: &load::MappingReport) -> F
         profile: profile.to_string(),
         generated_ts: String::new(),
         bom_audit: audit(items, &findings, mapping),
+        run_health: Vec::new(),
         stats: Stats {
             item_count: items.len(),
             finding_count: findings.len(),
@@ -432,6 +450,51 @@ mod tests {
         assert!(ranks.windows(2).all(|w| w[0] <= w[1]), "not severity-sorted");
         // Duplicate designator is the most severe thing in this BOM.
         assert_eq!(doc.findings[0].rule_id.as_deref(), Some("bom.duplicate_refdes"));
+    }
+
+    #[test]
+    fn declared_non_aecq_and_unrecorded_aecq_are_separate_findings() {
+        // The split exists so L1 — whose datasheet says "Qualified to AEC-Q200." but
+        // whose BOM cell is empty — is not reported as "declared not qualified"
+        // alongside D1's explicit NO. Both ride at Major: same severity category,
+        // different claims, different wording, different fix.
+        let csv = "Reference,Value,Footprint,Quantity,Manufacturer,MPN,AEC-Q,MSL,RoHS,REACH,Lifecycle\n\
+                   D1,SS2150,D_SMA,1,MCC,SS2150-LTP,NO,1,Yes,Yes,Active\n\
+                   L1,220uH,L_1210,1,Sumida,CDRH127L125NP-221MC,,1,Yes,Yes,Active\n\
+                   R1,10k,R_0402,1,Yageo,RC0402FR-0710KL,YES,1,Yes,Yes,Active\n";
+        let doc = doc_for(csv, "automotive");
+        let aecq: Vec<&Finding> = doc
+            .findings
+            .iter()
+            .filter(|f| f.rule_id.as_deref() == Some("bom.missing_aecq"))
+            .collect();
+        assert_eq!(aecq.len(), 2, "expected a declared-negative and a not-recorded finding: {aecq:?}");
+
+        let declared = aecq
+            .iter()
+            .find(|f| f.title.contains("declared"))
+            .expect("a declared-not-qualified finding");
+        assert_eq!(declared.severity, "Major");
+        assert!(declared.anchors.iter().any(|a| a.refdes.iter().any(|r| r == "D1")));
+        assert!(
+            !declared.anchors.iter().any(|a| a.refdes.iter().any(|r| r == "L1")),
+            "the blank-column part must not be listed as declared-unqualified"
+        );
+
+        let unrecorded = aecq
+            .iter()
+            .find(|f| f.title.contains("no AEC-Q status recorded"))
+            .expect("an unrecorded-status finding");
+        assert_eq!(unrecorded.severity, "Major", "a blank cell is a data gap, not a failed part");
+        assert_eq!(
+            declared.severity, unrecorded.severity,
+            "both AEC-Q findings share one severity category"
+        );
+        assert!(unrecorded.anchors.iter().any(|a| a.refdes.iter().any(|r| r == "L1")));
+        // The qualified part appears in neither.
+        for f in &aecq {
+            assert!(!f.anchors.iter().any(|a| a.refdes.iter().any(|r| r == "R1")));
+        }
     }
 
     #[test]
