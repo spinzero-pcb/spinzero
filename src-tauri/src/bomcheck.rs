@@ -117,16 +117,53 @@ fn rows_from_bom_lines(lines: &[BomLine], profile: &str) -> Vec<load::Row> {
 }
 
 /// Run the deterministic checks over the crunched BOM. Pure: no project writes.
-pub fn run_rules(lines: &[BomLine], profile: &str) -> (FindingsDoc, load::MappingReport) {
+///
+/// `overrides` is the user's approved column mapping (see `project::BomMapping`).
+/// It is applied here rather than left to the aliases because a mis-mapped column is
+/// indistinguishable from missing data in every finding downstream.
+pub fn run_rules(
+    lines: &[BomLine],
+    profile: &str,
+    overrides: &BTreeMap<String, String>,
+) -> (FindingsDoc, load::MappingReport) {
     let started = std::time::Instant::now();
     let rows = rows_from_bom_lines(lines, profile);
-    let (items, mapping) = load::items_from_rows(&rows, &config::config_for(profile));
+    let (items, mapping) =
+        load::items_from_rows_mapped(&rows, &config::config_for(profile), overrides);
     let mut doc = bom_rules::run(&items, profile, &mapping);
     doc.generated_ts = OffsetDateTime::now_utc()
         .format(&Rfc3339)
         .unwrap_or_default();
     doc.stats.duration_ms = started.elapsed().as_millis() as u64;
     (doc, mapping)
+}
+
+/// The column mapping as the approval dialog shows it, plus whether the user has
+/// been through it yet. `approved` is what gates the dialog opening on its own — the
+/// preview itself is available any time from the BOM tab.
+#[derive(Serialize)]
+pub struct MappingView {
+    #[serde(flatten)]
+    pub preview: load::MappingPreview,
+    pub approved: bool,
+}
+
+/// Build the approval dialog's view of the mapping for the crunched BOM. Pure.
+pub fn mapping_view(
+    lines: &[BomLine],
+    profile: &str,
+    saved: Option<&BTreeMap<String, String>>,
+) -> MappingView {
+    let rows = rows_from_bom_lines(lines, profile);
+    let empty = BTreeMap::new();
+    MappingView {
+        preview: load::mapping_preview(
+            &rows,
+            &config::config_for(profile),
+            saved.unwrap_or(&empty),
+        ),
+        approved: saved.is_some(),
+    }
 }
 
 /// Which tier a session belongs to. It leads the title because the two producers
@@ -461,7 +498,7 @@ mod tests {
             line(1, &["R1"], "10k", "RC0402FR-0710KL"),
             line(2, &["R1"], "4k7", "RC0402FR-074K7L"),
         ];
-        let (doc, mapping) = run_rules(&broken, "default");
+        let (doc, mapping) = run_rules(&broken, "default", &BTreeMap::new());
         assert!(doc
             .findings
             .iter()
@@ -480,7 +517,7 @@ mod tests {
         assert!(dup.fingerprint.is_some());
 
         // Re-running an unchanged BOM must not duplicate anything.
-        let (doc, mapping) = run_rules(&broken, "default");
+        let (doc, mapping) = run_rules(&broken, "default", &BTreeMap::new());
         let again = ingest(&pcb, "alice", Some("r1".into()), doc, &mapping).expect("re-ingest");
         assert_eq!(again.filed, 0, "a re-run must not re-file findings");
         assert_eq!(again.unchanged, filed_first);
@@ -490,7 +527,7 @@ mod tests {
             line(1, &["R1"], "10k", "RC0402FR-0710KL"),
             line(2, &["R2"], "4k7", "RC0402FR-074K7L"),
         ];
-        let (doc, mapping) = run_rules(&fixed, "default");
+        let (doc, mapping) = run_rules(&fixed, "default", &BTreeMap::new());
         let out = ingest(&pcb, "alice", Some("r2".into()), doc, &mapping).expect("ingest fixed");
         assert!(out.auto_resolved > 0);
         let dup = out
@@ -502,7 +539,7 @@ mod tests {
         assert_eq!(dup.reason.as_deref(), Some(AUTO_RESOLVED_REASON));
 
         // Break it again: our own auto-resolve reopens.
-        let (doc, mapping) = run_rules(&broken, "default");
+        let (doc, mapping) = run_rules(&broken, "default", &BTreeMap::new());
         let out = ingest(&pcb, "alice", Some("r3".into()), doc, &mapping).expect("ingest broken");
         assert!(out.reopened > 0);
         assert_eq!(out.filed, 0, "reopen, never re-file");
@@ -534,7 +571,7 @@ mod tests {
             line(1, &["R1"], "10k", "RC0402FR-0710KL"),
             line(2, &["R1"], "4k7", "RC0402FR-074K7L"),
         ];
-        let (doc, mapping) = run_rules(&broken, "default");
+        let (doc, mapping) = run_rules(&broken, "default", &BTreeMap::new());
         let out = ingest(&pcb, "alice", None, doc, &mapping).expect("ingest");
         assert_eq!(out.session_id, yesterday, "the open BOM check session is reused");
         assert_eq!(
@@ -555,7 +592,7 @@ mod tests {
             },
         )
         .expect("complete");
-        let (doc, mapping) = run_rules(&broken, "default");
+        let (doc, mapping) = run_rules(&broken, "default", &BTreeMap::new());
         let out = ingest(&pcb, "alice", None, doc, &mapping).expect("ingest after completing");
         assert_ne!(out.session_id, yesterday, "a completed session is not reused");
         let _ = std::fs::remove_dir_all(&root);
@@ -596,7 +633,7 @@ mod tests {
         ];
 
         // Free tier files its findings.
-        let (free, mapping) = run_rules(&broken, "default");
+        let (free, mapping) = run_rules(&broken, "default", &BTreeMap::new());
         let free_count = free.findings.len();
         let out = ingest(&pcb, "alice", None, free.clone(), &mapping).expect("free ingest");
         assert_eq!(out.filed, free_count);
@@ -622,7 +659,7 @@ mod tests {
 
         // A later FREE run must not close the judgment finding: the rules cannot
         // produce it, so "no longer detected" would be a lie.
-        let (free_again, mapping) = run_rules(&broken, "default");
+        let (free_again, mapping) = run_rules(&broken, "default", &BTreeMap::new());
         let out = ingest(&pcb, "alice", None, free_again, &mapping).expect("free re-ingest");
         assert_eq!(out.auto_resolved, 0);
         let judgment = out
@@ -642,7 +679,7 @@ mod tests {
             line(1, &["R1"], "10k", "RC0402FR-0710KL"),
             line(2, &["R1"], "4k7", "RC0402FR-074K7L"),
         ];
-        let (doc, mapping) = run_rules(&broken, "default");
+        let (doc, mapping) = run_rules(&broken, "default", &BTreeMap::new());
         let out = ingest(&pcb, "alice", None, doc, &mapping).expect("ingest");
         let id = out.comments[0].id.clone();
 
@@ -652,7 +689,7 @@ mod tests {
         action.reason = Some("intentional, variant build".into());
         reviews::apply_action(&pcb, "alice", action).expect("dismiss");
 
-        let (doc, mapping) = run_rules(&broken, "default");
+        let (doc, mapping) = run_rules(&broken, "default", &BTreeMap::new());
         let out = ingest(&pcb, "alice", None, doc, &mapping).expect("re-ingest");
         let c = out.comments.iter().find(|c| c.id == id).expect("still there");
         assert_eq!(c.status, "dismissed", "a person's judgment is not overruled");

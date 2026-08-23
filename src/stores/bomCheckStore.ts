@@ -7,6 +7,7 @@ import {
   type CheckOutcome,
   type FindingsDoc,
 } from "../lib/findings";
+import { useBomMappingStore } from "./bomMappingStore";
 import { useProjectStore } from "./projectStore";
 import { useReviewStore } from "./reviewStore";
 import { useSettingsStore } from "./settingsStore";
@@ -88,8 +89,20 @@ export const useBomCheckStore = create<BomCheckState>((set, get) => ({
 
   run: async () => {
     if (get().running) return;
-    const dir = useProjectStore.getState().project?.project_dir ?? null;
+    // Claim the run before the first await: the mapping gate below is asynchronous,
+    // and without this a second click would sail past the guard while it is pending
+    // and file the whole check twice.
     set({ running: true, error: null });
+    // A review is only as good as the column mapping it read. If this project has
+    // never had one approved, the dialog takes over and re-enters here once it has.
+    const approved = await useBomMappingStore
+      .getState()
+      .ensureApproved(get().profile, () => void get().run());
+    if (!approved) {
+      set({ running: false });
+      return;
+    }
+    const dir = useProjectStore.getState().project?.project_dir ?? null;
     try {
       const out = await ipc.runBomCheck(get().profile);
       set({

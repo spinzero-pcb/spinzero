@@ -3849,7 +3849,7 @@ button {
 }
 
 .review-file-list li { display: flex; justify-content: space-between; gap: var(--sp-2); }
-.review-file-name { color: var(--fg-1); font-family: var(--font-mono, monospace); }
+.review-file-name { color: var(--fg-1); font-family: var(--font-mono); }
 .review-file-size { color: var(--fg-2); }
 
 /* The retention promise is the one paragraph in this dialog the user is being asked
@@ -3877,4 +3877,59 @@ button {
   flex: 1 1 180px;
   font-size: var(--fs-0);
   color: var(--fg-2);
+}
+
+/* BOM column mapping approval — a wider wizard card, because every row has to show
+   a field name, a column picker and a real sample cell side by side; stacking them
+   would hide the sample, which is the only part that settles an ambiguous header. */
+.bom-mapping { width: 720px; }
+
+.bom-map-table {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 46vh;
+  overflow-y: auto;
+  padding: var(--sp-1);
+  background: var(--bg-1);
+  border: 1px solid var(--border-1);
+  border-radius: var(--radius-1);
+}
+
+.bom-map-row {
+  display: grid;
+  grid-template-columns: 180px 200px 1fr 48px;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: 2px var(--sp-1);
+  border-radius: var(--radius-1);
+}
+
+/* A field nothing feeds is the case this dialog exists to make visible. */
+.bom-map-row.unread .bom-map-field { color: var(--fg-3); }
+.bom-map-row.edited { background: var(--bg-2); }
+
+.bom-map-field {
+  color: var(--fg-1);
+  font-size: var(--fs-0);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bom-map-pick { max-width: 200px; width: 100%; }
+
+.bom-map-sample {
+  color: var(--fg-2);
+  font-size: var(--fs-0);
+  font-family: var(--font-mono);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bom-map-reset {
+  display: inline-block;
+  min-width: 48px;
+  font-size: var(--fs-0);
 }

@@ -24,7 +24,7 @@ import type {
   TelemetryInfo,
   UiSettings,
 } from "./types";
-import type { CheckOutcome, FindingsDoc } from "./findings";
+import type { CheckOutcome, FindingsDoc, MappingView } from "./findings";
 import type { ReviewBundle } from "./reviewService";
 import type { DesignIndexes } from "./design";
 import type { DiffHandle } from "./diff";
@@ -116,6 +116,13 @@ export const ipc = {
    *  comments (dedupe/auto-resolve by fingerprint). Returns the findings document
    *  plus the refreshed comment list, so one round-trip refreshes the whole UI. */
   runBomCheck: (profile: string) => invoke<CheckOutcome>("run_bom_check", { profile }),
+  /** The BOM column mapping for the approval dialog — what each rule input reads
+   *  today, what else it could read, and whether the user has approved it. Pure. */
+  getBomMapping: (profile: string) => invoke<MappingView>("get_bom_mapping", { profile }),
+  /** Record the approved mapping (logical field → source column; "" = not in this
+   *  BOM). Writing it at all is what stops the dialog interrupting the next review. */
+  setBomMapping: (overrides: Record<string, string>) =>
+    invoke<void>("set_bom_mapping", { overrides }),
   /** Paid tier, step 1: exactly what a detailed review would upload — shown in the
    *  pre-flight dialog before anything leaves the machine (plan §4.2). */
   buildReviewBundle: (profile: string) =>

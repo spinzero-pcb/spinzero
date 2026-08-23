@@ -17,7 +17,7 @@ mod telemetry;
 mod util;
 mod watcher;
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
@@ -1073,7 +1073,8 @@ fn run_bom_check(
     let handle = current_project(&state)?;
     let lines = design::bom_lines(opt_active_extraction(&state))?;
     let profile = profile.unwrap_or_else(|| "default".to_string());
-    let (doc, mapping) = bomcheck::run_rules(&lines, &profile);
+    let overrides = saved_bom_mapping(&handle.project_dir).unwrap_or_default();
+    let (doc, mapping) = bomcheck::run_rules(&lines, &profile, &overrides);
     telemetry::bump("bom_checks");
     bomcheck::ingest(
         &handle.project_dir,
@@ -1082,6 +1083,45 @@ fn run_bom_check(
         doc,
         &mapping,
     )
+}
+
+/// The approved column mapping from project.json, or None when the user has never
+/// been through the dialog. A project file that will not parse is not worth failing a
+/// review over — the aliases still work.
+fn saved_bom_mapping(project_dir: &Path) -> Option<BTreeMap<String, String>> {
+    project::read_project_file(project_dir)
+        .ok()?
+        .bom_mapping
+        .map(|m| m.overrides)
+}
+
+/// The BOM column mapping for the approval dialog: what each logical field reads
+/// today, the columns to choose between, and whether the user has approved it yet.
+/// Pure — nothing is written.
+#[tauri::command]
+fn get_bom_mapping(
+    state: State<AppState>,
+    profile: Option<String>,
+) -> Result<bomcheck::MappingView, String> {
+    let handle = current_project(&state)?;
+    let lines = design::bom_lines(opt_active_extraction(&state))?;
+    let profile = profile.unwrap_or_else(|| "default".to_string());
+    let saved = saved_bom_mapping(&handle.project_dir);
+    Ok(bomcheck::mapping_view(&lines, &profile, saved.as_ref()))
+}
+
+/// Record the mapping the user approved. Skipping the dialog saves an empty map —
+/// the point of the write is the record that they were asked, so the app stops
+/// interrupting reviews to ask again.
+#[tauri::command]
+fn set_bom_mapping(
+    state: State<AppState>,
+    overrides: BTreeMap<String, String>,
+) -> Result<(), String> {
+    let handle = current_project(&state)?;
+    let read = overrides.values().filter(|c| !c.is_empty()).count();
+    log::info!("BOM column mapping approved: {read}/{} fields read", overrides.len());
+    project::set_bom_mapping(&handle.project_dir, overrides)
 }
 
 // ------------------------------------------- detailed review (paid tier, Phase 1)
@@ -1463,6 +1503,8 @@ pub fn run() {
             get_bom_lines,
             get_bom_presets,
             run_bom_check,
+            get_bom_mapping,
+            set_bom_mapping,
             build_review_bundle,
             ingest_findings,
             get_review_author,

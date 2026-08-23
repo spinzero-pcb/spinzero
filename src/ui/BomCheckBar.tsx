@@ -1,5 +1,6 @@
 import { useEffect } from "react";
 import { useBomCheckStore } from "../stores/bomCheckStore";
+import { useBomMappingStore } from "../stores/bomMappingStore";
 import { useDetailedReviewStore } from "../stores/detailedReviewStore";
 import { useReviewStore } from "../stores/reviewStore";
 import { BOM_PROFILES, isBomProfile, severityCounts } from "../lib/findings";
@@ -121,6 +122,15 @@ export function BomCheckBar() {
           </option>
         ))}
       </select>
+
+      <button
+        className="btn-ghost bom-check-mapping"
+        disabled={running}
+        title="Show which BOM column each check reads, and correct it"
+        onClick={() => void useBomMappingStore.getState().openDialog(profile)}
+      >
+        Mapping
+      </button>
 
       <button
         className="btn-ghost bom-check-detailed"

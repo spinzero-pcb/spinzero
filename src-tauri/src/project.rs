@@ -77,6 +77,23 @@ pub struct ProjectFile {
     /// The extraction the viewer currently shows (null = latest).
     #[serde(default)]
     pub active_extraction: Option<String>,
+    /// The BOM column mapping the user has been through. Absent = never shown, which
+    /// is what makes the app ask before the first review rather than reviewing on a
+    /// guess nobody checked.
+    #[serde(default)]
+    pub bom_mapping: Option<BomMapping>,
+}
+
+/// A BOM column mapping the user has seen. Its *presence* is the record that they
+/// were asked — skipping the dialog is a decision too, and re-asking on every run
+/// would turn the safeguard into a nag.
+#[derive(Clone, Serialize, Deserialize, Default)]
+pub struct BomMapping {
+    /// logical field → source column. An empty string means "this field is genuinely
+    /// not in this BOM", which must beat the alias guess. Fields absent here keep
+    /// whatever the aliases picked.
+    #[serde(default)]
+    pub overrides: BTreeMap<String, String>,
 }
 
 fn project_json_path(project_dir: &Path) -> PathBuf {
@@ -718,6 +735,7 @@ pub fn create_project(
         class: class.clone(),
         created_at,
         active_extraction: None,
+        bom_mapping: None,
     };
     write_project_file(project_dir, &pf)?;
     write_gitignore(project_dir);
@@ -776,6 +794,16 @@ pub fn open_project(project_dir: &Path) -> Result<ProjectHandle, String> {
 /// preserves the rest of the file).
 pub fn set_active_extraction(project_dir: &Path, id: Option<&str>) -> Result<(), String> {
     update_project_file(project_dir, |pf| pf.active_extraction = id.map(|s| s.to_string()))
+}
+
+/// Persist the approved BOM column mapping to project.json. It rides in the synced
+/// project file, not in local settings, because a mapping correction is a fact about
+/// this BOM that the whole team's reviews should agree on.
+pub fn set_bom_mapping(
+    project_dir: &Path,
+    overrides: BTreeMap<String, String>,
+) -> Result<(), String> {
+    update_project_file(project_dir, |pf| pf.bom_mapping = Some(BomMapping { overrides }))
 }
 
 /// Persist a new design path + tool to project.json (used by re-link).

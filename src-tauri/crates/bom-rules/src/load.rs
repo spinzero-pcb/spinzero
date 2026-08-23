@@ -72,6 +72,25 @@ impl MappingReport {
 /// Rows that carry no mapped data at all are dropped (blank trailing CSV lines,
 /// separator rows) — they would otherwise show up as unannotated phantom parts.
 pub fn items_from_rows(rows: &[Row], config: &Value) -> (Vec<BomItem>, MappingReport) {
+    items_from_rows_mapped(rows, config, &BTreeMap::new())
+}
+
+/// As `items_from_rows`, but with the user's approved corrections applied on top of
+/// the alias guesses.
+///
+/// The aliases are a guess about someone else's column names, and a wrong guess is
+/// invisible in the result: a field read from the wrong column, or from none, reads
+/// downstream as "the data is missing" and quietly weakens every rule that needs it.
+/// `overrides` is logical field → source column, as approved in the app; an empty
+/// string means "this field is genuinely not in this BOM", which is a different
+/// statement from "we could not find it" and must beat any alias that would have
+/// claimed it. An override naming a column the BOM does not have is ignored — the
+/// mapping was approved against an older extraction.
+pub fn items_from_rows_mapped(
+    rows: &[Row],
+    config: &Value,
+    overrides: &BTreeMap<String, String>,
+) -> (Vec<BomItem>, MappingReport) {
     let headers: Vec<String> = rows
         .first()
         .map(|r| r.iter().map(|(h, _)| h.clone()).collect())
@@ -101,6 +120,19 @@ pub fn items_from_rows(rows: &[Row], config: &Value) -> (Vec<BomItem>, MappingRe
         }
     }
 
+    // The approved mapping wins over the guess, for every field it has an opinion on.
+    // Columns are matched canonically like every other header here, so a mapping
+    // approved against `Manufacturer_Part-Number.` still finds `Manufacturer Part Number`.
+    let mut claimed_canon: BTreeSet<String> = BTreeSet::new();
+    for (logical, col) in overrides {
+        if col.is_empty() {
+            field_map.remove(logical);
+        } else if let Some(actual) = by_canon.get(&canon_header(col)) {
+            claimed_canon.insert(canon_header(actual));
+            field_map.insert(logical.clone(), actual.clone());
+        }
+    }
+
     let mut supplier_map: BTreeMap<String, Vec<String>> = BTreeMap::new();
     if let Some(obj) = config.get("supplier_pn_columns").and_then(|f| f.as_object()) {
         for (supplier, aliases) in obj {
@@ -125,7 +157,7 @@ pub fn items_from_rows(rows: &[Row], config: &Value) -> (Vec<BomItem>, MappingRe
     // symbol's `Value` and the extractor's canonical `value`), and a field has several
     // aliases (`MPN` and `Manufacturer Part Number`) of which only one can win. Either
     // would otherwise be reported as a blind spot the checker doesn't actually have.
-    let mut known_canon: BTreeSet<String> = BTreeSet::new();
+    let mut known_canon: BTreeSet<String> = claimed_canon;
     for block in ["field_aliases", "supplier_pn_columns"] {
         if let Some(obj) = config.get(block).and_then(|f| f.as_object()) {
             for aliases in obj.values() {
@@ -209,6 +241,128 @@ pub fn items_from_rows(rows: &[Row], config: &Value) -> (Vec<BomItem>, MappingRe
     )
 }
 
+/// The mapping as the approval dialog shows it: every logical field the rules read,
+/// what feeds it today, and the source columns to choose between.
+///
+/// This exists because the alias table is a guess and a wrong guess is silent. The
+/// dialog is the one place the guess is stated out loud before a review is run on it.
+#[derive(Clone, Debug, Serialize, Default)]
+pub struct MappingPreview {
+    /// One entry per logical field the profile knows about, name-sorted. The dialog
+    /// re-orders them for reading; this stays stable so two previews compare.
+    pub fields: Vec<FieldMapping>,
+    /// Every column the BOM actually has, so the dialog can offer them.
+    pub columns: Vec<SourceColumn>,
+    /// Columns no field claims — the ones whose data the rules cannot see at all.
+    pub unmapped_columns: Vec<UnmappedColumn>,
+    pub row_count: usize,
+}
+
+/// Where one logical field's data comes from, and whether that was our guess or the
+/// user's decision.
+#[derive(Clone, Debug, Serialize)]
+pub struct FieldMapping {
+    pub logical: String,
+    /// Source column feeding this field right now; empty = nothing feeds it.
+    pub column: String,
+    /// What the aliases alone would have picked, so the dialog can offer "back to auto".
+    pub auto: String,
+    /// `column` differs from what the aliases alone would have picked — i.e. someone
+    /// decided this, whether just now or in a mapping approved long ago.
+    pub overridden: bool,
+}
+
+/// One real BOM column, with just enough context to recognise it in a dropdown.
+#[derive(Clone, Debug, Serialize)]
+pub struct SourceColumn {
+    pub name: String,
+    /// 0..1 — how many rows carry a value. A column filled on 3% of rows is rarely
+    /// the one you meant to map.
+    pub fill_rate: f64,
+    /// First non-empty cell, truncated. "Value → 100nF" settles the question that
+    /// the column name alone often does not.
+    pub sample: String,
+}
+
+/// Longest sample cell shown in the dialog — a description column would otherwise
+/// push the dropdown off the screen.
+const SAMPLE_MAX: usize = 48;
+
+/// Build the approval dialog's view of the mapping: the alias guess, the approved
+/// mapping applied on top, and the raw columns both were chosen from.
+pub fn mapping_preview(
+    rows: &[Row],
+    config: &Value,
+    overrides: &BTreeMap<String, String>,
+) -> MappingPreview {
+    // Two passes over the same rows: what the aliases alone say, and what the user's
+    // approved mapping makes of it. The difference is exactly what the dialog marks
+    // as edited — deriving it here keeps the "is this overridden?" answer in one place.
+    let (_, auto) = items_from_rows(rows, config);
+    let (_, effective) = items_from_rows_mapped(rows, config, overrides);
+
+    let mut logicals: Vec<String> = config
+        .get("field_aliases")
+        .and_then(|f| f.as_object())
+        .map(|o| o.keys().cloned().collect())
+        .unwrap_or_default();
+    logicals.sort();
+
+    let fields = logicals
+        .into_iter()
+        .map(|logical| {
+            let column = effective.fields.get(&logical).cloned().unwrap_or_default();
+            let auto_col = auto.fields.get(&logical).cloned().unwrap_or_default();
+            FieldMapping {
+                overridden: column != auto_col,
+                logical,
+                column,
+                auto: auto_col,
+            }
+        })
+        .collect();
+
+    let headers: Vec<String> = rows
+        .first()
+        .map(|r| r.iter().map(|(h, _)| h.clone()).collect())
+        .unwrap_or_default();
+    let row_count = rows.len();
+    let columns = headers
+        .into_iter()
+        .map(|name| {
+            let mut filled = 0usize;
+            let mut sample = String::new();
+            for row in rows {
+                if let Some((_, v)) = row.iter().find(|(h, _)| *h == name) {
+                    let v = v.trim();
+                    if !v.is_empty() {
+                        filled += 1;
+                        if sample.is_empty() {
+                            sample = v.chars().take(SAMPLE_MAX).collect();
+                        }
+                    }
+                }
+            }
+            SourceColumn {
+                fill_rate: if row_count == 0 {
+                    0.0
+                } else {
+                    (filled as f64 / row_count as f64 * 1000.0).round() / 1000.0
+                },
+                name,
+                sample,
+            }
+        })
+        .collect();
+
+    MappingPreview {
+        fields,
+        columns,
+        unmapped_columns: effective.unmapped_columns,
+        row_count,
+    }
+}
+
 /// Minimal RFC 4180 CSV reader (quoted fields, doubled quotes, CRLF, BOM) — enough
 /// for BOM fixtures and the dev/CLI path, without pulling a dependency into the app.
 /// Returns one `Row` per data line, each carrying the header names.
@@ -283,6 +437,68 @@ mod tests {
         assert_eq!(items[0].supplier_pns, vec![("LCSC".into(), "C25744".into())]);
         assert_eq!(report.fields.get("mpn").map(String::as_str), Some("MANUFACTURER_PART_NUMBER"));
         assert!(report.unmapped_columns.is_empty());
+    }
+
+    #[test]
+    fn an_approved_mapping_beats_the_alias_guess() {
+        // "Status" is a lifecycle alias, so the guess claims it. Here it is the
+        // purchasing state, and the real lifecycle lives in a column no alias knows.
+        let csv = "Reference,MPN,Status,Part Lifecycle\nR1,RC0402,Approved,Active\n";
+        let rows = parse_csv(csv);
+        let (auto, _) = items_from_rows(&rows, &config::defaults());
+        assert_eq!(auto[0].lifecycle(), "Approved");
+
+        let overrides = BTreeMap::from([("lifecycle".to_string(), "Part Lifecycle".to_string())]);
+        let (items, report) = items_from_rows_mapped(&rows, &config::defaults(), &overrides);
+        assert_eq!(items[0].lifecycle(), "Active");
+        assert_eq!(report.fields.get("lifecycle").map(String::as_str), Some("Part Lifecycle"));
+        // A column the user assigned by hand is understood, not a blind spot.
+        assert!(!report.unmapped_columns.iter().any(|u| u.column == "Part Lifecycle"));
+    }
+
+    #[test]
+    fn an_empty_override_means_the_field_is_absent_not_unguessed() {
+        // The user said this BOM has no lifecycle column, so the alias hit on
+        // "Status" must not sneak back in as one.
+        let csv = "Reference,MPN,Status\nR1,RC0402,Approved\n";
+        let rows = parse_csv(csv);
+        let overrides = BTreeMap::from([("lifecycle".to_string(), String::new())]);
+        let (items, report) = items_from_rows_mapped(&rows, &config::defaults(), &overrides);
+        assert_eq!(items[0].lifecycle(), "");
+        assert!(!report.fields.contains_key("lifecycle"));
+    }
+
+    #[test]
+    fn an_override_naming_a_missing_column_falls_back_to_the_guess() {
+        // The mapping was approved against an older extraction that had the column.
+        let csv = "Reference,MPN,Status\nR1,RC0402,Active\n";
+        let rows = parse_csv(csv);
+        let overrides = BTreeMap::from([("lifecycle".to_string(), "Part Lifecycle".to_string())]);
+        let (items, _) = items_from_rows_mapped(&rows, &config::defaults(), &overrides);
+        assert_eq!(items[0].lifecycle(), "Active");
+    }
+
+    #[test]
+    fn the_preview_states_the_guess_the_override_and_the_columns() {
+        let csv = "Reference,MPN,Status,House Code\nR1,RC0402,Active,H-1\n";
+        let rows = parse_csv(csv);
+        let overrides = BTreeMap::from([("mpn".to_string(), String::new())]);
+        let p = mapping_preview(&rows, &config::defaults(), &overrides);
+
+        let mpn = p.fields.iter().find(|f| f.logical == "mpn").expect("mpn field");
+        assert_eq!(mpn.column, "");
+        assert_eq!(mpn.auto, "MPN"); // the guess is still reported, so "reset" has a target
+        assert!(mpn.overridden);
+
+        let lifecycle = p.fields.iter().find(|f| f.logical == "lifecycle").expect("lifecycle");
+        assert!(!lifecycle.overridden);
+
+        // Every real column is offered, with a sample that identifies it.
+        let status = p.columns.iter().find(|c| c.name == "Status").expect("Status column");
+        assert_eq!(status.sample, "Active");
+        assert_eq!(status.fill_rate, 1.0);
+        assert_eq!(p.row_count, 1);
+        assert!(p.unmapped_columns.iter().any(|u| u.column == "House Code"));
     }
 
     #[test]

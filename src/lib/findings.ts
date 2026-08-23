@@ -69,6 +69,38 @@ export interface CheckOutcome {
   comments: Comment[];
 }
 
+/** Where one logical field's data comes from. Mirrors `bom_rules::load::FieldMapping`. */
+export interface FieldMapping {
+  /** Logical field the rules read, e.g. "mpn", "lifecycle". */
+  logical: string;
+  /** Source column feeding it right now; "" = nothing feeds it. */
+  column: string;
+  /** What the alias table alone would have picked, so the dialog can offer "auto". */
+  auto: string;
+  /** `column` came from the approved mapping rather than the aliases. */
+  overridden: boolean;
+}
+
+/** One real BOM column, with enough context to recognise it in a dropdown. */
+export interface SourceColumn {
+  name: string;
+  /** 0..1 — share of rows carrying a value. */
+  fill_rate: number;
+  /** First non-empty cell, truncated backend-side. */
+  sample: string;
+}
+
+/** What `get_bom_mapping` returns: the mapping to approve, and whether it ever was.
+ *  Mirrors `bomcheck::MappingView` (which flattens `MappingPreview` into it). */
+export interface MappingView {
+  fields: FieldMapping[];
+  columns: SourceColumn[];
+  unmapped_columns: { column: string; fill_rate: number }[];
+  row_count: number;
+  /** False = the user has never been through the dialog, so a review should ask first. */
+  approved: boolean;
+}
+
 /** End-application profiles, in the order the picker offers them. Mirrors
  *  `bom_rules::config::PROFILES`; the label is what the user sees. */
 export const BOM_PROFILES = [

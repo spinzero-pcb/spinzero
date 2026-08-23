@@ -15,6 +15,7 @@ import {
   type ReviewServiceConfig,
 } from "../lib/reviewService";
 import { useBomCheckStore } from "./bomCheckStore";
+import { useBomMappingStore } from "./bomMappingStore";
 import { useReviewStore } from "./reviewStore";
 import { useSettingsStore } from "./settingsStore";
 import { useToastStore } from "./toastStore";
@@ -87,6 +88,12 @@ export const useDetailedReviewStore = create<DetailedReviewState>((set, get) => 
 
   openPreflight: async () => {
     const profile = useBomCheckStore.getState().profile;
+    // Same gate as the free check: never spend a paid review on a mapping nobody
+    // has looked at. The dialog re-enters here once the user has approved one.
+    const approved = await useBomMappingStore
+      .getState()
+      .ensureApproved(profile, () => void get().openPreflight());
+    if (!approved) return;
     set({ phase: "preflight", bundle: null, bundleError: null, error: null, doc: null });
     try {
       const bundle = await ipc.buildReviewBundle(profile);

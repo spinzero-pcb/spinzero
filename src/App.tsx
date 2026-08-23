@@ -15,6 +15,7 @@ import { BomTab } from "./ui/BomTab";
 import { Palette } from "./ui/Palette";
 import { PropertiesCard } from "./ui/PropertiesCard";
 import { CheckoutConfirm } from "./ui/CheckoutConfirm";
+import { BomMappingDialog } from "./ui/BomMappingDialog";
 import { DetailedReviewDialog } from "./ui/DetailedReviewDialog";
 import { HistoryGraph } from "./ui/history/HistoryGraph";
 import { Toaster } from "./ui/Toaster";
@@ -459,6 +460,7 @@ export default function App() {
       )}
       <CheckoutConfirm />
       <DetailedReviewDialog />
+      <BomMappingDialog />
       <HistoryGraph />
       <Toaster />
       <KeyboardShortcuts />
