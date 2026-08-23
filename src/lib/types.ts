@@ -281,7 +281,10 @@ export interface CrunchStatus {
 
 /** Source-agnostic from day one (phase2-workflow.md §0.1): Phase 3 AI lands as a
  *  new producer into this same record. Humans are always `human`. */
-export type CommentSource = "human" | "rule" | "ai";
+// "rule" = the deterministic checks, "agent" = the detailed LLM review — the two
+// values `bomcheck::source_for` writes. This said "ai", which the backend has
+// never emitted, so every detailed-review comment was outside the union.
+export type CommentSource = "human" | "rule" | "agent";
 /** Persisted lifecycle. ⟳ re-check is DERIVED on the frontend (object_hash vs the
  *  live design) and never stored — see deriveDisplayStatus in reviewStore. */
 export type CommentStatus = "open" | "addressed" | "resolved" | "dismissed";

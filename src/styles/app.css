@@ -3933,3 +3933,141 @@ button {
   min-width: 48px;
   font-size: var(--fs-0);
 }
+
+/* Reviews rail — where checks are launched. Sized for the 280px side panel: every
+   row stacks, and the premium case is a couple of lines rather than a table, because
+   a comparison table cannot be read at this width. */
+.reviews-panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  padding: var(--sp-2);
+  overflow-y: auto;
+  min-height: 0;
+  flex: 1;
+}
+
+.reviews-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+}
+
+.reviews-title {
+  color: var(--fg-1);
+  font-weight: 600;
+}
+
+.reviews-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  padding: var(--sp-2);
+  background: var(--bg-1);
+  border: 1px solid var(--border-1);
+  border-radius: var(--radius-1);
+}
+
+/* An announced-but-absent check must not look clickable. */
+.reviews-card.soon { opacity: 0.55; }
+
+.reviews-card-head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+}
+
+.reviews-card-title {
+  color: var(--fg-1);
+  font-weight: 600;
+}
+
+.reviews-card-foot {
+  padding-top: var(--sp-1);
+  border-top: 1px solid var(--border-0);
+}
+
+.reviews-tier {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  padding-top: var(--sp-1);
+  border-top: 1px solid var(--border-0);
+}
+
+.reviews-tier-head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+}
+
+.reviews-tier-name { color: var(--fg-1); }
+
+.reviews-tier-tag {
+  padding: 0 6px;
+  border: 1px solid var(--border-1);
+  border-radius: 999px;
+  color: var(--fg-2);
+  font-size: var(--fs-0);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.reviews-tier-tag.premium {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.reviews-tier-what {
+  margin: 0;
+  color: var(--fg-2);
+  font-size: var(--fs-0);
+  line-height: 1.45;
+}
+
+.reviews-tier-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+}
+
+.reviews-run { flex: none; }
+
+/* The premium case, computed from this project's runs. Tinted so it reads as a
+   result rather than as more description. */
+.reviews-delta {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  margin: 0;
+  padding: var(--sp-1) var(--sp-2);
+  background: var(--bg-2);
+  border-left: 2px solid var(--accent);
+  border-radius: var(--radius-1);
+  font-size: var(--fs-0);
+}
+
+.reviews-delta.empty {
+  border-left-color: var(--border-1);
+  color: var(--fg-2);
+  line-height: 1.45;
+}
+
+.reviews-delta-n {
+  color: var(--fg-1);
+  font-weight: 600;
+}
+
+.reviews-delta-mix { color: var(--fg-2); }
+
+.reviews-progress {
+  margin: 0;
+  color: var(--fg-2);
+  font-size: var(--fs-0);
+}
+
+/* The strip's link into the Reviews rail — a launcher, not a run button. */
+.bom-check-reviews { color: var(--accent); }

@@ -1,6 +1,7 @@
 import { useReviewStore } from "../../stores/reviewStore";
 import { useDiffStore } from "../../stores/diffStore";
 import { ReviewPanel } from "../review/ReviewPanel";
+import { ReviewsPanel } from "../review/ReviewsPanel";
 import { ChangesPanel } from "../diff/ChangesPanel";
 import { UpdateBanner } from "./UpdateBanner";
 import { IconChecklist, IconHistory } from "../icons";
@@ -17,6 +18,17 @@ export function LeftPanel() {
 
   // "changes" is only meaningful while a diff is active; outside it the rail is Review.
   const showingChanges = diffActive && tab === "changes";
+
+  // The Reviews surface is chosen from the activity bar, not from these tabs: it is a
+  // different rail entry, not a third view of the same comments.
+  if (tab === "reviews") {
+    return (
+      <>
+        <ReviewsPanel />
+        <UpdateBanner />
+      </>
+    );
+  }
 
   return (
     <>

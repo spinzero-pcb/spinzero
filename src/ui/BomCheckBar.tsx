@@ -1,7 +1,5 @@
 import { useEffect } from "react";
 import { useBomCheckStore } from "../stores/bomCheckStore";
-import { useBomMappingStore } from "../stores/bomMappingStore";
-import { useDetailedReviewStore } from "../stores/detailedReviewStore";
 import { useReviewStore } from "../stores/reviewStore";
 import { BOM_PROFILES, isBomProfile, severityCounts } from "../lib/findings";
 import type { FindingSeverity } from "../lib/findings";
@@ -15,10 +13,10 @@ import { IconChecklist } from "./icons";
 // human's comment. This strip is the *run* surface — pick the end application, run it,
 // and read what the run did.
 //
-// The paid "Detailed review" sits beside the free check deliberately: the two emit the
-// same findings document and land through the same ingestion path, differing only in
-// what validated the findings. One strip, one severity summary — not two panels
-// competing to be the review.
+// The strip runs the free check and summarizes it, and nothing else. The paid tier,
+// the column mapping and the checks still to come are launched from the Reviews rail
+// (`ReviewsPanel`), because none of them belong to the BOM table specifically — and
+// because one control offered in two places is how two names for one thing start.
 
 /** Findings-schema severity → the review UI's four-level severity vocabulary, so a
  *  finding chip is the same colour here as its comment is in the rail. */
@@ -52,13 +50,6 @@ export function BomCheckBar() {
   const profile = useBomCheckStore((s) => s.profile);
   const setProfile = useBomCheckStore((s) => s.setProfile);
   const run = useBomCheckStore((s) => s.run);
-  // Paid tier. `phase` drives the button: idle → open the pre-flight dialog; running
-  // → show the live stage and offer a cancel.
-  const detailedPhase = useDetailedReviewStore((s) => s.phase);
-  const detailedProgress = useDetailedReviewStore((s) => s.progress);
-  const detailedError = useDetailedReviewStore((s) => s.error);
-  const liveFindings = useDetailedReviewStore((s) => s.liveFindings);
-  const detailedBusy = detailedPhase === "submitting" || detailedPhase === "running" || detailedPhase === "ingesting";
 
   // Mod+Shift+B runs the check while the BOM tab is mounted. Scoped to this component
   // so it can never fire from the schematic/PCB canvases, where it would mean nothing.
@@ -124,38 +115,12 @@ export function BomCheckBar() {
       </select>
 
       <button
-        className="btn-ghost bom-check-mapping"
-        disabled={running}
-        title="Show which BOM column each check reads, and correct it"
-        onClick={() => void useBomMappingStore.getState().openDialog(profile)}
+        className="btn-ghost bom-check-reviews"
+        title="Reviews — the detailed review, the column mapping, and the checks still to come"
+        onClick={() => useReviewStore.getState().setLeftTab("reviews")}
       >
-        Mapping
+        Reviews →
       </button>
-
-      <button
-        className="btn-ghost bom-check-detailed"
-        disabled={running || detailedBusy}
-        title="Send the BOM to the review service for an LLM-validated review — you see the exact file list before anything is uploaded"
-        onClick={() => void useDetailedReviewStore.getState().openPreflight()}
-      >
-        {detailedBusy ? "Reviewing…" : "Detailed review"}
-      </button>
-
-      {detailedBusy && (
-        <>
-          <span className="bom-check-count">
-            {detailedProgress}
-            {liveFindings > 0 ? ` · ${liveFindings} so far` : ""}
-          </span>
-          <button
-            className="btn-ghost bom-check-open"
-            title="Cancel the detailed review"
-            onClick={() => void useDetailedReviewStore.getState().cancel()}
-          >
-            Cancel
-          </button>
-        </>
-      )}
 
       {doc && (
         <>
@@ -201,10 +166,6 @@ export function BomCheckBar() {
         </span>
       )}
       {error && <span className="bom-check-warn">Check failed: {error}</span>}
-      {/* The detailed review is optional by design: when the service is unreachable
-          the free results above stay exactly as they were, and the reason sits here
-          rather than replacing them. */}
-      {detailedError && <span className="bom-check-warn">Detailed review: {detailedError}</span>}
     </div>
   );
 }
