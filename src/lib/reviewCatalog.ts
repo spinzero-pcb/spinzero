@@ -43,7 +43,7 @@ export const REVIEW_KINDS: ReviewKind[] = [
   },
   {
     id: "datasheets",
-    label: "Datasheets",
+    label: "Datasheet checker",
     blurb: "Checks each part against the document that describes it — ratings, qualification, lifecycle.",
     tier: "premium",
     ready: false,
@@ -51,7 +51,7 @@ export const REVIEW_KINDS: ReviewKind[] = [
   },
   {
     id: "schematic",
-    label: "Schematic",
+    label: "Schematic Review",
     blurb: "Connectivity, power and reference-designator checks over the extracted schematic.",
     tier: "premium",
     ready: false,
@@ -67,7 +67,7 @@ export const REVIEW_KINDS: ReviewKind[] = [
   },
   {
     id: "layout",
-    label: "Layout",
+    label: "Layout Review",
     blurb: "Placement, clearance and return-path checks over the board geometry.",
     tier: "premium",
     ready: false,

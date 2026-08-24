@@ -7,7 +7,7 @@ import { useRunLauncherStore } from "../../stores/runLauncherStore";
 import { formatRelative } from "../../lib/time";
 import type { CommentSeverity } from "../../lib/types";
 import type { ReviewKindId } from "../../lib/reviewCatalog";
-import { IconPremium, IconSparkle } from "../icons";
+import { IconSparkle } from "../icons";
 import { ReviewProgress } from "./ReviewProgress";
 
 // "Run a review" — the single launcher, in the status bar.
@@ -26,20 +26,29 @@ import { ReviewProgress } from "./ReviewProgress";
 
 const SEV_RANK: Record<CommentSeverity, number> = { info: 0, minor: 1, major: 2, critical: 3 };
 
-/** Open findings filed by a review, for the row's count. The worst severity among
+/** Which review filed this comment, from the pipeline the backend stamps into every
+ *  machine-filed comment's predicate (`bomcheck::ingest`). Pipelines are named
+ *  `<kind>-<tier>` — "bom-rules" and "bom-detailed" are both the BOM review — so the
+ *  kind is the part before the dash and a second review type needs nothing here.
+ *  Human comments and anything unattributable belong to no review. */
+function filedBy(c: { source: string; predicate: unknown }): string | null {
+  if (c.source === "human") return null;
+  const pipeline = (c.predicate as { pipeline?: unknown } | null)?.pipeline;
+  if (typeof pipeline !== "string" || !pipeline) return null;
+  return pipeline.split("-")[0];
+}
+
+/** Open findings this review filed, for the row's count. The worst severity among
  *  them rides along so the count can be coloured: "3 open" is a different fact
- *  depending on whether the worst of the three is info or critical.
- *  Today every producer files against the BOM; when a review type lands that files
- *  elsewhere it gains a discriminator here rather than in the row. */
+ *  depending on whether the worst of the three is info or critical. */
 function openFindings(
   id: ReviewKindId,
-  comments: { status: string; source: string; severity: CommentSeverity | null }[],
+  comments: { status: string; source: string; severity: CommentSeverity | null; predicate: unknown }[],
 ): { count: number; worst: CommentSeverity } {
-  if (id !== "bom") return { count: 0, worst: "info" };
   let count = 0;
   let worst: CommentSeverity = "info";
   for (const c of comments) {
-    if (c.status !== "open" || c.source === "human") continue;
+    if (c.status !== "open" || filedBy(c) !== id) continue;
     count++;
     const sev = c.severity ?? "info";
     if (SEV_RANK[sev] > SEV_RANK[worst]) worst = sev;
@@ -129,11 +138,6 @@ export function RunReviewMenu() {
                 onClick={() => openSetup(kind.id)}
               >
                 <span className="run-review-name">{kind.label}</span>
-                {kind.tier === "premium" && (
-                  <span className="badge-premium" title="Premium review" aria-label="Premium review">
-                    <IconPremium size={13} />
-                  </span>
-                )}
                 <span className="run-review-meta">
                   {!kind.ready ? (
                     // Right-hand column, with the other rows' status: "coming soon" IS

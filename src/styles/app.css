@@ -1035,16 +1035,6 @@ button {
   border-radius: var(--radius-1);
 }
 .statusbar-btn:hover { background: var(--bg-3); color: var(--fg-0); }
-/* Same shape as the button, without the affordance: the readout the chip becomes
-   when the comments panel is already open. */
-.statusbar-chip {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  padding: 2px var(--sp-2);
-  font-size: var(--fs-0);
-  color: var(--fg-2);
-}
 .statusbar-btn.viewing-old { color: var(--warn); }
 
 /* clickable revision history in the footer (item 21) */
@@ -2626,13 +2616,17 @@ button {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  padding: 1px var(--sp-2);
+  padding: 3px var(--sp-3);
   border-radius: var(--radius-1);
   background: var(--accent);
   color: var(--accent-fg);
-  font-size: var(--fs-0);
+  font-size: var(--fs-1);
+  font-weight: 600;
+  /* Lifted off the bar: the one thing in the footer the user is meant to press
+     should not sit at the same visual depth as the readouts beside it. */
+  box-shadow: 0 0 0 1px var(--accent), 0 2px 10px rgb(0 0 0 / 0.45);
 }
-.run-review-btn:hover { filter: brightness(1.1); }
+.run-review-btn:hover { filter: brightness(1.12); }
 .run-review-btn.on { filter: brightness(1.15); }
 .run-review-caret { opacity: 0.8; }
 

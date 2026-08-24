@@ -177,29 +177,26 @@ function CrunchStatus() {
   return null;
 }
 
-/** Open comments, beside the launcher. It sits in the bar in both states so the
- *  count is next to the button that produces it — but it is only a control when the
- *  panel is collapsed and there is somewhere to go; with the panel already open it
- *  is a readout, not a button that does nothing. */
+/** Open comments, beside the launcher — and the way to them. It is a control in both
+ *  states, because the count is only half of what the user wants: clicking reveals the
+ *  panel if it is collapsed and switches it to All, so the chip always lands you on
+ *  the whole list rather than on whatever tab was last left showing. */
 function CommentsChip() {
-  const fullscreen = useViewStore((s) => s.fullscreen);
   const setFullscreen = useViewStore((s) => s.setFullscreen);
   const comments = useReviewStore((s) => s.comments);
+  const setFilterStatus = useReviewStore((s) => s.setFilterStatus);
   const open = comments.filter((c) => c.status === "open").length;
-  const label = (
-    <>
-      <IconComment size={12} />
-      {open} open comment{open === 1 ? "" : "s"}
-    </>
-  );
-  if (!fullscreen) return <span className="statusbar-chip">{label}</span>;
   return (
     <button
       className="statusbar-btn"
-      title="Show the comments panel (F11)"
-      onClick={() => setFullscreen(false)}
+      title="Show every comment in the panel"
+      onClick={() => {
+        setFullscreen(false);
+        setFilterStatus("all");
+      }}
     >
-      {label}
+      <IconComment size={12} />
+      {open} open comment{open === 1 ? "" : "s"}
     </button>
   );
 }
