@@ -1,12 +1,16 @@
 import { useEffect } from "react";
 import { useBomCheckStore } from "../stores/bomCheckStore";
+import { isRunning, useDetailedReviewStore } from "../stores/detailedReviewStore";
+import { useProjectStore } from "../stores/projectStore";
 import { useRunLauncherStore } from "../stores/runLauncherStore";
 import { useReviewStore } from "../stores/reviewStore";
-import { BOM_PROFILES, isBomProfile, severityCounts } from "../lib/findings";
+import { severityCounts } from "../lib/findings";
+import { isProjectClass, PROJECT_CLASSES } from "../lib/projectClass";
 import { runHealthSummary } from "../lib/reviewService";
 import type { FindingSeverity } from "../lib/findings";
 import type { CommentSeverity } from "../lib/types";
 import { IconChecklist } from "./icons";
+import { ReviewProgress } from "./review/ReviewProgress";
 
 // BOM check strip — the free deterministic review, run from the BOM tab.
 //
@@ -49,9 +53,12 @@ export function BomCheckBar() {
   const unmapped = useBomCheckStore((s) => s.unmappedColumns);
   const sessionId = useBomCheckStore((s) => s.sessionId);
   const error = useBomCheckStore((s) => s.error);
-  const profile = useBomCheckStore((s) => s.profile);
-  const setProfile = useBomCheckStore((s) => s.setProfile);
   const run = useBomCheckStore((s) => s.run);
+  const cls = useProjectStore((s) => s.project?.class) ?? "general";
+  const setClass = useProjectStore((s) => s.setClass);
+  // The detailed run is the one that takes minutes, so the tab it belongs to says so
+  // rather than leaving the footer as the only place it is visible.
+  const detailedPhase = useDetailedReviewStore((s) => s.phase);
 
   // Mod+Shift+B runs the check while the BOM tab is mounted. Scoped to this component
   // so it can never fire from the schematic/PCB canvases, where it would mean nothing.
@@ -108,17 +115,19 @@ export function BomCheckBar() {
       </button>
       <select
         className="bom-select"
-        value={profile}
+        value={cls}
         disabled={running}
         title="End application — decides which rules apply and how severe a gap is"
-        onChange={(e) => isBomProfile(e.target.value) && setProfile(e.target.value)}
+        onChange={(e) => isProjectClass(e.target.value) && void setClass(e.target.value)}
       >
-        {BOM_PROFILES.map((p) => (
-          <option key={p.id} value={p.id}>
-            {p.label}
+        {PROJECT_CLASSES.map((c) => (
+          <option key={c.value} value={c.value}>
+            {c.label}
           </option>
         ))}
       </select>
+
+      {isRunning(detailedPhase) && <ReviewProgress />}
 
       {doc && (
         <>

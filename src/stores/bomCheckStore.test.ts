@@ -1,5 +1,5 @@
 import { mockIPC } from "@tauri-apps/api/mocks";
-import { useBomCheckStore, runMessage, runTitle } from "./bomCheckStore";
+import { currentBomProfile, useBomCheckStore, runMessage, runTitle } from "./bomCheckStore";
 import { useProjectStore } from "./projectStore";
 import { useSettingsStore } from "./settingsStore";
 import { useToastStore } from "./toastStore";
@@ -66,7 +66,7 @@ describe("bomCheckStore", () => {
       return undefined;
     });
 
-    useBomCheckStore.setState({ profile: "automotive" });
+    useProjectStore.setState({ project: { project_dir: "C:/p", class: "automotive" } as never });
     await useBomCheckStore.getState().run();
 
     expect(calls).toContainEqual({
@@ -118,36 +118,19 @@ describe("bomCheckStore", () => {
     expect(runs).toBe(1);
   });
 
-  it("remembers the profile per project and rejects a junk stored value", async () => {
-    const calls: Array<{ cmd: string; args: unknown }> = [];
-    mockIPC((cmd, args) => {
-      calls.push({ cmd, args });
-      if (cmd === "get_settings") return {};
-      return undefined;
-    });
-    useProjectStore.setState({ project: { project_dir: "C:/p" } as never });
+  it("derives the rule profile from the project's end application", () => {
+    // The end application is asked once, at import, and stored once, in project.json.
+    // Nothing here holds a second copy that could disagree with it.
+    useProjectStore.setState({ project: { project_dir: "C:/p", class: "medical" } as never });
+    expect(currentBomProfile()).toBe("medical");
 
-    useBomCheckStore.setState({ projectDir: "C:/p" });
-    useBomCheckStore.getState().setProfile("medical");
-    expect(useBomCheckStore.getState().profile).toBe("medical");
-    // The picker updates optimistically; the settings write lands a tick later.
-    await new Promise((r) => setTimeout(r, 0));
-    expect(calls.some((c) => c.cmd === "set_settings")).toBe(true);
+    // Classes with no rule set of their own fold onto the nearest one that exists.
+    useProjectStore.setState({ project: { project_dir: "C:/p", class: "space" } as never });
+    expect(currentBomProfile()).toBe("industrial");
 
-    // A hand-edited settings file must not put an unknown profile into the picker.
-    useSettingsStore.setState({
-      loaded: true,
-      projectUi: { "C:/p": { bom_check_profile: "nonsense" } },
-    });
-    await useBomCheckStore.getState().hydrate("C:/p");
-    expect(useBomCheckStore.getState().profile).toBe("default");
-
-    useSettingsStore.setState({
-      loaded: true,
-      projectUi: { "C:/p": { bom_check_profile: "industrial" } },
-    });
-    await useBomCheckStore.getState().hydrate("C:/p");
-    expect(useBomCheckStore.getState().profile).toBe("industrial");
+    // A hand-edited project.json must not put an unknown profile in front of the rules.
+    useProjectStore.setState({ project: { project_dir: "C:/p", class: "nonsense" } as never });
+    expect(currentBomProfile()).toBe("default");
   });
 
   it("summarizes a run for the toast", () => {

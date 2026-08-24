@@ -2,15 +2,17 @@ import { mockIPC } from "@tauri-apps/api/mocks";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useDetailedReviewStore } from "./detailedReviewStore";
 import { useBomCheckStore } from "./bomCheckStore";
+import { useProjectStore } from "./projectStore";
 import { useReviewStore } from "./reviewStore";
 import { useSettingsStore } from "./settingsStore";
 import { useToastStore } from "./toastStore";
 import type { CheckOutcome, FindingsDoc } from "../lib/findings";
 
-// What is worth pinning here is the *sequence* the user is promised: nothing is
-// uploaded before the pre-flight bundle exists, the findings land through the free
-// tier's ingestion path (so comments reconcile), the service is told to delete its
-// copy afterwards, and a failure leaves the free results untouched.
+// What is worth pinning here is the *sequence* the user is promised: the readiness
+// checks (configured, reachable, a bundle to send) all run before a byte is posted,
+// the findings land through the free tier's ingestion path (so comments reconcile),
+// the service is told to delete its copy afterwards, and a failure leaves the free
+// results untouched — and says why, in words with no stage ids in them.
 
 const SERVICE = { base_url: "http://localhost:8787", token: "tok" };
 
@@ -107,24 +109,14 @@ beforeEach(() => {
 afterEach(() => vi.unstubAllGlobals());
 
 describe("detailedReviewStore", () => {
-  it("shows the bundle before anything is uploaded", async () => {
-    await useDetailedReviewStore.getState().openPreflight();
-    const s = useDetailedReviewStore.getState();
-    expect(s.phase).toBe("preflight");
-    expect(Object.keys(s.bundle?.files ?? {})).toEqual(["bom_enriched.csv", "design_meta.json"]);
-    // The critical assertion: opening the dialog must not have posted anything.
-    expect(fetchMock.mock.calls.some(([u]) => String(u).endsWith("/v1/reviews"))).toBe(false);
-  });
-
-  it("refuses to start without a pre-flight bundle", async () => {
+  it("posts only what build_review_bundle produced", async () => {
     await useDetailedReviewStore.getState().start();
-    expect(fetchMock).not.toHaveBeenCalled();
-    expect(useDetailedReviewStore.getState().phase).toBe("idle");
+    const s = useDetailedReviewStore.getState();
+    expect(Object.keys(s.bundle?.files ?? {})).toEqual(["bom_enriched.csv", "design_meta.json"]);
   });
 
   it("runs the whole flow: submit → progress → ingest → ack", async () => {
-    useBomCheckStore.setState({ profile: "industrial" });
-    await useDetailedReviewStore.getState().openPreflight();
+    useProjectStore.setState({ project: { project_dir: "C:/p", class: "industrial" } as never });
     await useDetailedReviewStore.getState().start();
 
     const s = useDetailedReviewStore.getState();
@@ -155,7 +147,6 @@ describe("detailedReviewStore", () => {
         : Promise.resolve(route(String(url))),
     );
 
-    await useDetailedReviewStore.getState().openPreflight();
     await useDetailedReviewStore.getState().start();
 
     expect(useDetailedReviewStore.getState().phase).toBe("idle");
@@ -172,7 +163,6 @@ describe("detailedReviewStore", () => {
         ? Promise.reject(new TypeError("socket closed"))
         : Promise.resolve(route(String(url))),
     );
-    await useDetailedReviewStore.getState().openPreflight();
     await useDetailedReviewStore.getState().start();
     // Losing progress is not losing the review — the job had already been submitted.
     expect(useDetailedReviewStore.getState().phase).toBe("done");
@@ -181,9 +171,31 @@ describe("detailedReviewStore", () => {
 
   it("explains an unconfigured service instead of posting nowhere", async () => {
     useSettingsStore.setState({ reviewService: null });
-    await useDetailedReviewStore.getState().openPreflight();
     await useDetailedReviewStore.getState().start();
     expect(fetchMock.mock.calls.some(([u]) => String(u).endsWith("/v1/reviews"))).toBe(false);
-    expect(useDetailedReviewStore.getState().phase).toBe("preflight");
+    expect(useDetailedReviewStore.getState().phase).toBe("idle");
+    expect(useDetailedReviewStore.getState().error).toContain("not set up");
+  });
+
+  it("refuses to post to a service that is not answering", async () => {
+    fetchMock.mockImplementation((url: string) =>
+      String(url).endsWith("/healthz")
+        ? Promise.reject(new TypeError("connection refused"))
+        : Promise.resolve(route(String(url))),
+    );
+    await useDetailedReviewStore.getState().start();
+    expect(fetchMock.mock.calls.some(([u]) => String(u).endsWith("/v1/reviews"))).toBe(false);
+    expect(useDetailedReviewStore.getState().error).toContain("not reachable");
+  });
+
+  it("reports progress in plain steps, never a stage id", async () => {
+    const seen: string[] = [];
+    const unsub = useDetailedReviewStore.subscribe((s) => {
+      if (s.progress) seen.push(s.progress);
+    });
+    await useDetailedReviewStore.getState().start();
+    unsub();
+    expect(seen.length).toBeGreaterThan(0);
+    expect(seen.some((t) => /_/.test(t))).toBe(false);
   });
 });

@@ -1,12 +1,13 @@
 import { useEffect, useRef } from "react";
 import { useBomCheckStore } from "../../stores/bomCheckStore";
-import { useDetailedReviewStore } from "../../stores/detailedReviewStore";
+import { isRunning, useDetailedReviewStore } from "../../stores/detailedReviewStore";
 import { reviewRows, useReviewRunsStore } from "../../stores/reviewRunsStore";
 import { useReviewStore } from "../../stores/reviewStore";
 import { useRunLauncherStore } from "../../stores/runLauncherStore";
 import { formatRelative } from "../../lib/time";
 import type { ReviewKindId } from "../../lib/reviewCatalog";
 import { IconPremium, IconSparkle } from "../icons";
+import { ReviewProgress } from "./ReviewProgress";
 
 // "Run a review" — the single launcher, in the status bar.
 //
@@ -45,9 +46,7 @@ export function RunReviewMenu() {
   // are allowed (decision 2026-08-24).
   const bomRunning = useBomCheckStore((s) => s.running);
   const detailedPhase = useDetailedReviewStore((s) => s.phase);
-  const detailedProgress = useDetailedReviewStore((s) => s.progress);
-  const detailedBusy =
-    detailedPhase === "submitting" || detailedPhase === "running" || detailedPhase === "ingesting";
+  const detailedBusy = isRunning(detailedPhase);
 
   const wrapRef = useRef<HTMLDivElement | null>(null);
 
@@ -73,17 +72,16 @@ export function RunReviewMenu() {
   }, [menuOpen, closeMenu]);
 
   const rows = reviewRows(runs, current);
-  const running = [
-    bomRunning ? "BOM checks" : null,
-    detailedBusy ? `Detailed review${detailedProgress ? ` · ${detailedProgress}` : ""}` : null,
-  ].filter(Boolean) as string[];
 
   return (
     <div className="run-review" ref={wrapRef}>
-      {running.length > 0 && (
-        <span className="run-review-active" title={running.join(" · ")}>
+      {/* The detailed run takes minutes, so it gets the bar; the instant check only ever
+          needs to say that it is going. */}
+      {detailedBusy && <ReviewProgress />}
+      {bomRunning && (
+        <span className="run-review-active">
           <span className="status-dot running" />
-          {running.length === 1 ? running[0] : `${running.length} reviews running`}
+          Instant check
         </span>
       )}
       <button

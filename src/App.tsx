@@ -15,7 +15,6 @@ import { Palette } from "./ui/Palette";
 import { PropertiesCard } from "./ui/PropertiesCard";
 import { CheckoutConfirm } from "./ui/CheckoutConfirm";
 import { BomMappingDialog } from "./ui/BomMappingDialog";
-import { DetailedReviewDialog } from "./ui/DetailedReviewDialog";
 import { BomReviewSetup } from "./ui/review/BomReviewSetup";
 import { HistoryGraph } from "./ui/history/HistoryGraph";
 import { Toaster } from "./ui/Toaster";
@@ -465,7 +464,6 @@ export default function App() {
       )}
       <CheckoutConfirm />
       <BomReviewSetup />
-      <DetailedReviewDialog />
       <BomMappingDialog />
       <HistoryGraph />
       <Toaster />

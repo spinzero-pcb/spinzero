@@ -459,7 +459,9 @@ pub struct CrunchStatus {
 pub struct ProjectHandle {
     pub project_dir: PathBuf,
     pub name: String,
-    pub class: Option<String>,
+    /// End application / market class. Behind a lock because it is editable while the
+    /// project is open (the BOM review's setup sheet is the second door onto it).
+    pub class: Mutex<Option<String>>,
     /// Absolute design folder, or None when it does not exist on this machine
     /// (read-only mode until re-linked).
     pub design_path: Mutex<Option<PathBuf>>,
@@ -629,7 +631,7 @@ impl ProjectHandle {
             design_path: design_path.as_ref().map(|p| p.to_string_lossy().into_owned()),
             design_path_exists: design_path.as_ref().map(|p| p.is_dir()).unwrap_or(false),
             design_tool: Some(design_tool),
-            class: self.class.clone(),
+            class: self.class.lock_safe().clone(),
             active_extraction,
             extraction_count,
         }
@@ -777,7 +779,7 @@ pub fn open_project(project_dir: &Path) -> Result<ProjectHandle, String> {
     Ok(ProjectHandle {
         project_dir: project_dir.to_path_buf(),
         name: pf.name,
-        class: pf.class,
+        class: Mutex::new(pf.class),
         design_path: Mutex::new(if exists { Some(design_path) } else { None }),
         design_tool: Mutex::new(tool),
         active_extraction: Mutex::new(pf.active_extraction),
@@ -794,6 +796,14 @@ pub fn open_project(project_dir: &Path) -> Result<ProjectHandle, String> {
 /// preserves the rest of the file).
 pub fn set_active_extraction(project_dir: &Path, id: Option<&str>) -> Result<(), String> {
     update_project_file(project_dir, |pf| pf.active_extraction = id.map(|s| s.to_string()))
+}
+
+/// Persist the project's end-application class to project.json. It lives here, next
+/// to the name, rather than in local settings: the end application is a fact about the
+/// board that every teammate's review must agree on, and it is the ONE place the app
+/// stores it — the import wizard and the BOM review's setup sheet both write here.
+pub fn set_class(project_dir: &Path, class: Option<&str>) -> Result<(), String> {
+    update_project_file(project_dir, |pf| pf.class = class.map(|s| s.to_string()))
 }
 
 /// Persist the approved BOM column mapping to project.json. It rides in the synced

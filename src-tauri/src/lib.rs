@@ -365,6 +365,18 @@ async fn create_project(
     Ok(handle.info())
 }
 
+/// Set the project's end application (market class). project.json is the single home
+/// for it — the New Project wizard writes it once, and the BOM review's setup sheet
+/// edits it later, so the review can never run against a class the project doesn't
+/// claim. Returns the refreshed info so the UI reflects what was actually written.
+#[tauri::command]
+fn set_project_class(state: State<AppState>, class: Option<String>) -> Result<ProjectInfo, String> {
+    let handle = current_project(&state)?;
+    project::set_class(&handle.project_dir, class.as_deref())?;
+    *handle.class.lock_safe() = class;
+    Ok(handle.info())
+}
+
 #[tauri::command]
 fn get_project(state: State<AppState>) -> Option<ProjectInfo> {
     state.project.lock_safe().as_ref().map(|p| p.info())
@@ -1487,6 +1499,7 @@ pub fn run() {
             detect_design_folder,
             relink_design_path,
             set_active_extraction,
+            set_project_class,
             update_design_files,
             list_extractions,
             get_design_head,

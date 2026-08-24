@@ -41,6 +41,9 @@ export const ipc = {
     class?: string | null;
   }) => invoke<ProjectInfo>("create_project", args),
   getProject: () => invoke<ProjectInfo | null>("get_project"),
+  /** Change the project's end application. project.json is the only home for it. */
+  setProjectClass: (cls: string | null) =>
+    invoke<ProjectInfo>("set_project_class", { class: cls }),
   getRecentProjects: () => invoke<string[]>("get_recent_projects"),
   /** Classify a picked folder: "project" | "design" | "unknown"
    *  ("design" = a raw KiCad folder that isn't a SpinZero project yet). */

@@ -1,20 +1,19 @@
 import { create } from "zustand";
 import { ipc } from "../lib/ipc";
-import type { BomProfile, FindingsDoc } from "../lib/findings";
+import type { FindingsDoc } from "../lib/findings";
 import {
   ackReview,
   cancelReview,
   DEFAULT_BASE_URL,
   fetchFindings,
   health,
-  stageLabel,
   streamProgress,
   submitReview,
   type ReviewBundle,
   type ReviewProgress,
   type ReviewServiceConfig,
 } from "../lib/reviewService";
-import { useBomCheckStore } from "./bomCheckStore";
+import { currentBomProfile, useBomCheckStore } from "./bomCheckStore";
 import { useBomMappingStore } from "./bomMappingStore";
 import { useReviewRunsStore } from "./reviewRunsStore";
 import { useReviewStore } from "./reviewStore";
@@ -25,11 +24,18 @@ import { useToastStore } from "./toastStore";
 //
 // The flow, and why it is shaped this way:
 //
-//   preflight → submit → stream progress → fetch findings → ingest → ack
+//   prepare → submit → stream progress → fetch findings → ingest → ack
 //
-// * **Pre-flight is not optional.** The user sees the exact file list before
-//   anything is uploaded (plan §4.2), and the bundle shown is the bundle sent —
-//   both come from one `build_review_bundle` call.
+// * **One button, not two dialogs.** Preparation (the mapping gate, the bundle, the
+//   reachability check) used to be a pre-flight dialog listing every file by name and
+//   size. It now happens inside `start()`, because the file list answered a question
+//   nobody was asking and the promise it existed to make — schematic and layout are
+//   never sent, and the bundle is deleted when the review finishes — is a sentence,
+//   not an inventory. Anything that goes wrong there surfaces as `error` on the
+//   review's own setup sheet, next to the button that caused it.
+// * **Progress is reported in the user's terms.** The service's stage ids name
+//   pipeline internals; what the user needs is that something is happening and roughly
+//   how far along it is, so stages fold onto three plain steps and a fraction.
 // * **Ingestion is the free tier's path.** The findings document goes to
 //   `ingest_findings`, which is `bomcheck::ingest` — so a paid finding updates the
 //   comment a free finding already created instead of filing a second one.
@@ -39,17 +45,33 @@ import { useToastStore } from "./toastStore";
 // * **Nothing here is persisted.** A job id is worthless after ingestion, and the
 //   findings live as review comments — the same reasoning as bomCheckStore.
 
-export type ReviewPhase = "idle" | "preflight" | "submitting" | "running" | "ingesting" | "done";
+/** The pipeline's stages folded onto what a customer actually wants to know. The
+ *  service can add or rename a stage without this list changing; an unknown stage
+ *  simply keeps the step the run is already showing. */
+const STEP_OF_STAGE: Record<string, 1 | 2 | 3> = {
+  validate_bundle: 1,
+  deterministic_rules: 2,
+  fp_validation: 2,
+  judgment_pass: 2,
+  assemble: 3,
+};
+const STEP_LABEL: Record<1 | 2 | 3, string> = {
+  1: "Preparing your BOM",
+  2: "Reviewing against datasheets",
+  3: "Finishing up",
+};
+
+export type ReviewPhase = "idle" | "preparing" | "submitting" | "running" | "ingesting" | "done";
 
 interface DetailedReviewState {
   phase: ReviewPhase;
-  /** The bundle the dialog renders; null until pre-flight has been opened. */
+  /** The bundle actually posted. Internal — the UI no longer itemises it. */
   bundle: ReviewBundle | null;
-  bundleError: string | null;
   jobId: string | null;
-  /** Latest progress line, already humanized for display. */
+  /** Latest progress line, in the user's terms (never a stage id). */
   progress: string;
-  stage: string | null;
+  /** 1..3 while a run is in flight — the same three steps `progress` names, for a bar. */
+  step: 1 | 2 | 3 | null;
   /** Findings emitted so far, from stage_progress — a ticking count while it runs. */
   liveFindings: number;
   doc: FindingsDoc | null;
@@ -57,11 +79,12 @@ interface DetailedReviewState {
   /** Service reachability from the last check; null = not checked yet. */
   serviceOk: boolean | null;
 
-  openPreflight: () => Promise<void>;
-  closePreflight: () => void;
+  /** Run the whole thing: gate the mapping, build the bundle, check the service, submit,
+   *  stream, ingest, ack. Every failure lands in `error` rather than in a dialog. */
   start: () => Promise<void>;
   cancel: () => Promise<void>;
   checkService: () => Promise<void>;
+  clearError: () => void;
   reset: () => void;
 }
 
@@ -75,41 +98,22 @@ export function serviceConfig(): ReviewServiceConfig | null {
 
 export const DEFAULT_SERVICE_URL = DEFAULT_BASE_URL;
 
+/** Is a run in flight? The one predicate the UI should ask — every surface that
+ *  disables a button or shows a spinner reads this rather than listing phases. */
+export function isRunning(phase: ReviewPhase): boolean {
+  return phase === "preparing" || phase === "submitting" || phase === "running" || phase === "ingesting";
+}
+
 export const useDetailedReviewStore = create<DetailedReviewState>((set, get) => ({
   phase: "idle",
   bundle: null,
-  bundleError: null,
   jobId: null,
   progress: "",
-  stage: null,
+  step: null,
   liveFindings: 0,
   doc: null,
   error: null,
   serviceOk: null,
-
-  openPreflight: async () => {
-    const profile = useBomCheckStore.getState().profile;
-    // Same gate as the free check: never spend a paid review on a mapping nobody
-    // has looked at. The dialog re-enters here once the user has approved one.
-    const approved = await useBomMappingStore
-      .getState()
-      .ensureApproved(profile, () => void get().openPreflight());
-    if (!approved) return;
-    set({ phase: "preflight", bundle: null, bundleError: null, error: null, doc: null });
-    try {
-      const bundle = await ipc.buildReviewBundle(profile);
-      set({ bundle });
-    } catch (e) {
-      // No enriched BOM yet is the common case (project never extracted) — say so
-      // in the dialog rather than as a toast the user has to correlate.
-      set({ bundleError: String(e) });
-    }
-    void get().checkService();
-  },
-
-  closePreflight: () => {
-    if (get().phase === "preflight") set({ phase: "idle", bundle: null, bundleError: null });
-  },
 
   checkService: async () => {
     const config = serviceConfig();
@@ -122,12 +126,46 @@ export const useDetailedReviewStore = create<DetailedReviewState>((set, get) => 
   },
 
   start: async () => {
-    const config = serviceConfig();
-    const bundle = get().bundle;
-    if (!config || !bundle || get().phase === "running" || get().phase === "submitting") return;
-    const profile = useBomCheckStore.getState().profile as BomProfile;
+    if (isRunning(get().phase)) return;
+    const profile = currentBomProfile();
 
-    set({ phase: "submitting", error: null, progress: "Uploading the bundle…", liveFindings: 0, stage: null });
+    // Everything the old pre-flight dialog did, in order, before a byte is posted.
+    set({ phase: "preparing", error: null, progress: "Preparing your BOM", step: 1, liveFindings: 0 });
+
+    const config = serviceConfig();
+    if (!config) {
+      fail(set, "the review service is not set up yet — add its address below.");
+      return;
+    }
+
+    // Same gate as the free check: never spend a paid review on a mapping nobody has
+    // looked at. The dialog takes over and re-enters here once one is approved.
+    const approved = await useBomMappingStore.getState().ensureApproved(profile, () => void get().start());
+    if (!approved) {
+      set({ phase: "idle", progress: "", step: null });
+      return;
+    }
+
+    let bundle: ReviewBundle;
+    try {
+      bundle = await ipc.buildReviewBundle(profile);
+      set({ bundle });
+    } catch (e) {
+      // No enriched BOM yet is the common case (project never extracted).
+      fail(set, `there is nothing to review yet: ${e instanceof Error ? e.message : String(e)}`);
+      return;
+    }
+
+    // Reachability is checked HERE, not while a sheet sits open: a service that was up
+    // a minute ago proves nothing, and this is the moment the user asked to send.
+    const { ok } = await health(config);
+    set({ serviceOk: ok });
+    if (!ok) {
+      fail(set, "the review service is not reachable. Check your connection and try again.");
+      return;
+    }
+
+    set({ phase: "submitting", progress: "Preparing your BOM", step: 1 });
     let jobId: string;
     try {
       ({ job_id: jobId } = await submitReview(config, { profile, files: bundle.files }));
@@ -135,7 +173,7 @@ export const useDetailedReviewStore = create<DetailedReviewState>((set, get) => 
       fail(set, `${e instanceof Error ? e.message : String(e)}`);
       return;
     }
-    set({ phase: "running", jobId, progress: "Queued…" });
+    set({ phase: "running", jobId, progress: "Waiting for a reviewer", step: 1 });
 
     try {
       const terminal = await streamProgress(config, jobId, (event) => onProgress(set, get, event));
@@ -146,15 +184,16 @@ export const useDetailedReviewStore = create<DetailedReviewState>((set, get) => 
       }
     } catch (e) {
       // Losing the progress stream does not mean losing the review: the job may well
-      // have finished, so fall through and try to collect the findings anyway.
-      set({ progress: `Progress stream lost (${String(e)}); collecting the result…` });
+      // have finished, so fall through and try to collect the findings anyway — and
+      // say nothing alarming about it while doing so.
+      set({ progress: "Finishing up", step: 3 });
     }
 
-    set({ phase: "ingesting", progress: "Filing the findings…" });
+    set({ phase: "ingesting", progress: "Finishing up", step: 3 });
     try {
       const doc = await fetchFindings(config, jobId);
       const outcome = await ipc.ingestFindings(doc);
-      set({ phase: "done", doc, progress: "" });
+      set({ phase: "done", doc, progress: "", step: null });
       // The BOM tab's summary strip renders whatever ran last, free or paid.
       useBomCheckStore.setState({
         doc,
@@ -200,17 +239,18 @@ export const useDetailedReviewStore = create<DetailedReviewState>((set, get) => 
     const config = serviceConfig();
     const jobId = get().jobId;
     if (config && jobId) await cancelReview(config, jobId);
-    set({ phase: "idle", jobId: null, progress: "", stage: null, liveFindings: 0 });
+    set({ phase: "idle", jobId: null, progress: "", step: null, liveFindings: 0 });
   },
+
+  clearError: () => set({ error: null }),
 
   reset: () =>
     set({
       phase: "idle",
       bundle: null,
-      bundleError: null,
       jobId: null,
       progress: "",
-      stage: null,
+      step: null,
       liveFindings: 0,
       doc: null,
       error: null,
@@ -220,23 +260,24 @@ export const useDetailedReviewStore = create<DetailedReviewState>((set, get) => 
 type Setter = (partial: Partial<DetailedReviewState>) => void;
 
 function onProgress(set: Setter, get: () => DetailedReviewState, event: ReviewProgress): void {
+  // The stage's own message is deliberately dropped: it narrates the pipeline, and a
+  // customer reading "fp_validation: 12/40 kept" learns nothing they can act on. What
+  // travels is the step it belongs to and how many findings exist so far.
   switch (event.type) {
     case "stage_started":
-      set({ stage: event.stage ?? null, progress: `${stageLabel(event.stage)}…` });
-      break;
+    case "stage_done":
     case "stage_progress": {
+      const step = STEP_OF_STAGE[event.stage ?? ""] ?? get().step ?? 1;
       const findings = (event.data as { findings?: number } | undefined)?.findings;
       set({
-        progress: event.message ? `${stageLabel(event.stage)}: ${event.message}` : get().progress,
+        step,
+        progress: STEP_LABEL[step],
         ...(typeof findings === "number" ? { liveFindings: findings } : {}),
       });
       break;
     }
-    case "stage_done":
-      set({ progress: `${stageLabel(event.stage)} — done` });
-      break;
     case "queued":
-      set({ progress: "Queued…" });
+      set({ progress: "Waiting for a reviewer", step: 1 });
       break;
     default:
       // `log` lines are diagnostics, not user-facing narration; the completed/failed
@@ -246,7 +287,7 @@ function onProgress(set: Setter, get: () => DetailedReviewState, event: ReviewPr
 }
 
 function fail(set: Setter, message: string): void {
-  set({ phase: "idle", error: message, progress: "", stage: null });
+  set({ phase: "idle", error: message, progress: "", step: null });
   useToastStore.getState().push({
     kind: "error",
     title: "Detailed review failed",

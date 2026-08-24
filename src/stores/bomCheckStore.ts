@@ -1,12 +1,7 @@
 import { create } from "zustand";
 import { ipc } from "../lib/ipc";
-import {
-  isBomProfile,
-  severityCounts,
-  type BomProfile,
-  type CheckOutcome,
-  type FindingsDoc,
-} from "../lib/findings";
+import { severityCounts, type BomProfile, type CheckOutcome, type FindingsDoc } from "../lib/findings";
+import { bomProfileForClass } from "../lib/projectClass";
 import { useBomMappingStore } from "./bomMappingStore";
 import { useProjectStore } from "./projectStore";
 import { useReviewRunsStore } from "./reviewRunsStore";
@@ -34,22 +29,19 @@ interface BomCheckState {
   /** Review session the last run filed into, so the summary can jump to it. */
   sessionId: string | null;
   error: string | null;
-  profile: BomProfile;
-  /** Depth the BOM review's setup sheet is set to. Scope, like `profile` — it belongs
-   *  to the board and is remembered per project so a re-run is one click. */
+  /** Depth the BOM review's setup sheet is set to. Remembered per project so a re-run
+   *  is one click. (The end application, the sheet's other scope control, is NOT here:
+   *  it lives in project.json — see `currentBomProfile`.) */
   depth: BomDepth;
   /** Project the above belongs to, so a stale result can never render for another. */
   projectDir: string | null;
 
   hydrate: (projectDir: string | null) => Promise<void>;
-  setProfile: (profile: BomProfile) => void;
   setDepth: (depth: BomDepth) => void;
   run: () => Promise<void>;
   clearForSession: (id: string) => void;
   clear: () => void;
 }
-
-const DEFAULT_PROFILE: BomProfile = "default";
 
 /** "quick" = the included deterministic rules; "detailed" = the paid service run. */
 export type BomDepth = "quick" | "detailed";
@@ -58,13 +50,19 @@ function isBomDepth(v: unknown): v is BomDepth {
   return v === "quick" || v === "detailed";
 }
 
+/** The rule profile the open project's end application resolves to. Derived, never
+ *  stored: project.json's `class` is the single home for the end application, so
+ *  there is no second copy of it here to fall out of step. */
+export function currentBomProfile(): BomProfile {
+  return bomProfileForClass(useProjectStore.getState().project?.class);
+}
+
 export const useBomCheckStore = create<BomCheckState>((set, get) => ({
   running: false,
   doc: null,
   summary: null,
   unmappedColumns: [],
   error: null,
-  profile: DEFAULT_PROFILE,
   depth: DEFAULT_DEPTH,
   projectDir: null,
   sessionId: null,
@@ -80,10 +78,8 @@ export const useBomCheckStore = create<BomCheckState>((set, get) => ({
       }
     }
     const ui = projectDir ? useSettingsStore.getState().projectUi[projectDir] : undefined;
-    const remembered = ui?.bom_check_profile;
     set({
       projectDir,
-      profile: isBomProfile(remembered) ? remembered : DEFAULT_PROFILE,
       depth: isBomDepth(ui?.bom_review_depth) ? ui.bom_review_depth : DEFAULT_DEPTH,
       doc: null,
       summary: null,
@@ -91,13 +87,6 @@ export const useBomCheckStore = create<BomCheckState>((set, get) => ({
       sessionId: null,
       error: null,
     });
-  },
-
-  setProfile: (profile) => {
-    set({ profile });
-    const dir = get().projectDir ?? useProjectStore.getState().project?.project_dir;
-    // The end application is a property of the board, so it is remembered per project.
-    if (dir) void useSettingsStore.getState().setProjectUi(dir, { bom_check_profile: profile });
   },
 
   setDepth: (depth) => {
@@ -116,14 +105,14 @@ export const useBomCheckStore = create<BomCheckState>((set, get) => ({
     // never had one approved, the dialog takes over and re-enters here once it has.
     const approved = await useBomMappingStore
       .getState()
-      .ensureApproved(get().profile, () => void get().run());
+      .ensureApproved(currentBomProfile(), () => void get().run());
     if (!approved) {
       set({ running: false });
       return;
     }
     const dir = useProjectStore.getState().project?.project_dir ?? null;
     try {
-      const out = await ipc.runBomCheck(get().profile);
+      const out = await ipc.runBomCheck(currentBomProfile());
       set({
         running: false,
         projectDir: dir,
@@ -182,7 +171,6 @@ export const useBomCheckStore = create<BomCheckState>((set, get) => ({
       sessionId: null,
       error: null,
       projectDir: null,
-      profile: DEFAULT_PROFILE,
       depth: DEFAULT_DEPTH,
     }),
 }));

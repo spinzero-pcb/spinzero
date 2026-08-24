@@ -2675,6 +2675,38 @@ button {
 }
 .run-review-stale { color: var(--warn); }
 
+/* The detailed review's progress, in the footer and on the BOM tab. A determinate bar
+   over three named steps: enough to show it is moving, and nothing it cannot back up. */
+.review-progress {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex: none;
+  max-width: 26rem;
+  color: var(--fg-1);
+  font-size: var(--fs-0);
+}
+.review-progress-bar {
+  flex: none;
+  width: 64px;
+  height: 4px;
+  border-radius: 999px;
+  background: var(--bg-3);
+  overflow: hidden;
+}
+.review-progress-fill {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: var(--accent);
+  transition: width 0.4s ease;
+}
+.review-progress-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .tag-premium,
 .tag-soon {
   padding: 0 5px;
@@ -2706,15 +2738,72 @@ button {
   letter-spacing: 0.08em;
   text-transform: uppercase;
 }
-.review-setup .setup-row {
+.review-setup .setup-section {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+}
+/* "Edit…" rides in the section header rather than sitting in the content as a
+   button of its own: the mapping is now on screen, so editing it is a footnote. */
+.review-setup .setup-section-act {
+  margin-left: auto;
+  padding: 0 var(--sp-1);
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+/* End application: a labelled control on one line. It is scope, not a section — the
+   sheet has exactly one of these and a full uppercase heading over a single dropdown
+   was three lines saying what one says. */
+.review-setup .setup-app {
   display: flex;
   align-items: center;
   gap: var(--sp-2);
 }
-.review-setup .setup-fact {
-  flex: 1;
+.review-setup .setup-app-label {
   color: var(--fg-1);
   font-size: var(--fs-1);
+}
+.review-setup .setup-app-select { flex: 1; min-width: 0; }
+
+/* The mapping itself, read-only. Showing it beats counting it: "14 of 19 inputs read"
+   is a number the user cannot act on, while the rows say which ones. An unread field
+   is coloured rather than annotated — the gap IS the message. */
+.setup-map {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  max-height: 34vh;
+  overflow-y: auto;
+  overflow-x: hidden;
+  margin: 0;
+  padding: var(--sp-1);
+  list-style: none;
+  background: var(--bg-1);
+  border: 1px solid var(--border-1);
+  border-radius: var(--radius-1);
+}
+.setup-map-row {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+  padding: 2px var(--sp-1);
+  font-size: var(--fs-0);
+}
+.setup-map-field { color: var(--fg-1); flex: none; }
+.setup-map-col {
+  margin-left: auto;
+  min-width: 0;
+  color: var(--fg-0);
+  font-family: var(--font-mono);
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+.setup-map-row.unmapped .setup-map-field { color: var(--warn); }
+.setup-map-row.unmapped .setup-map-col {
+  color: var(--warn);
+  font-family: inherit;
+  font-style: italic;
 }
 
 /* Depth is a choice INSIDE the sheet, not a second entry in the picker: two tiers
@@ -2734,15 +2823,33 @@ button {
   border-color: var(--accent);
   background: var(--accent-dim);
 }
-.setup-depth-name { color: var(--fg-0); font-size: var(--fs-1); }
-.setup-depth-meta { color: var(--fg-2); font-size: var(--fs-0); }
+.setup-depth-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--fg-0);
+  font-size: var(--fs-1);
+}
 .setup-depth-what {
   grid-column: 2 / -1;
+  display: flex;
+  align-items: center;
+  gap: 6px;
   color: var(--fg-1);
   font-size: var(--fs-0);
   line-height: 1.45;
 }
-.review-setup .setup-memory { margin-top: var(--sp-3); }
+/* The privacy promise is one hover away, not one paragraph down: what is sent and how
+   long it is kept matters, but spelling it out in the sheet buries the choice. */
+.setup-info {
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  color: var(--fg-2);
+  cursor: help;
+}
+.setup-info:hover { color: var(--fg-0); }
+.review-setup .setup-error { color: var(--err); }
 
 /* ---------- review stream ---------- */
 
@@ -4014,36 +4121,10 @@ button {
 }
 .bom-check-detailed:disabled { color: var(--fg-2); cursor: progress; }
 
-.review-preflight { width: 560px; }
-
-.review-file-list {
-  display: flex;
-  flex-direction: column;
-  gap: var(--sp-1);
-  margin: 0;
-  padding: var(--sp-2);
-  list-style: none;
-  background: var(--bg-1);
-  border: 1px solid var(--border-1);
-  border-radius: var(--radius-1);
-  font-size: var(--fs-0);
-}
-
-.review-file-list li { display: flex; justify-content: space-between; gap: var(--sp-2); }
-.review-file-name { color: var(--fg-1); font-family: var(--font-mono); }
-.review-file-size { color: var(--fg-2); }
-
-/* The retention promise is the one paragraph in this dialog the user is being asked
-   to rely on, so it reads as a quote, not as body text. */
-.review-retention {
-  border-left: 2px solid var(--border-1);
-  padding-left: var(--sp-2);
-}
-
 .review-preflight-error { color: var(--err); }
-.review-ok { color: var(--ok); }
-.review-change { padding: 0 var(--sp-1); }
 
+/* What is left of the retired pre-flight dialog: the service address, which still has
+   to be reachable when nothing is configured yet. */
 .review-service-config {
   display: flex;
   align-items: flex-end;

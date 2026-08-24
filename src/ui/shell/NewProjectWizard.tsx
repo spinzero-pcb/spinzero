@@ -5,6 +5,7 @@ import { useProjectStore } from "../../stores/projectStore";
 import { useSettingsStore } from "../../stores/settingsStore";
 import type { DetectedDesign, ProjectClass } from "../../lib/types";
 import { ipc } from "../../lib/ipc";
+import { PROJECT_CLASSES } from "../../lib/projectClass";
 import { IconBoard, IconFolder } from "../icons";
 
 function basename(p: string): string {
@@ -22,14 +23,6 @@ function slugify(s: string): string {
   );
 }
 
-const CLASSES: { value: ProjectClass; label: string; hint: string }[] = [
-  { value: "general", label: "General", hint: "Hobby / prototype / no specific standard" },
-  { value: "automotive", label: "Automotive", hint: "ISO 26262 / AEC-Q — functional safety" },
-  { value: "commercial", label: "Commercial", hint: "Consumer / IPC Class 2" },
-  { value: "medical", label: "Medical", hint: "IEC 60601 / ISO 13485" },
-  { value: "industrial", label: "Industrial", hint: "Ruggedized / IPC Class 2–3" },
-  { value: "space", label: "Space", hint: "IPC Class 3 / hi-rel" },
-];
 
 export function NewProjectWizard({
   onClose,
@@ -223,7 +216,7 @@ export function NewProjectWizard({
             <label className="wizard-label">Project class</label>
             
             <div className="wizard-class">
-              {CLASSES.map((c) => (
+              {PROJECT_CLASSES.map((c) => (
                 <button
                   key={c.value}
                   className={`class-chip ${cls === c.value ? "on" : ""}`}

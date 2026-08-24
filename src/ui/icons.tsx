@@ -99,6 +99,16 @@ export function IconPremium(p: IconProps) {
   );
 }
 
+/** Info — a hover/press target for a short explanation the page should not spell out. */
+export function IconInfo(p: IconProps) {
+  return (
+    <Svg {...p}>
+      <circle cx="8" cy="8" r="6.2" />
+      <path d="M8 7.2v4M8 4.9v.9" />
+    </Svg>
+  );
+}
+
 /** Settings gear */
 export function IconGear(p: IconProps) {
   return (

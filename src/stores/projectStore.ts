@@ -52,6 +52,8 @@ interface ProjectState {
    *  caller like the diff enter can detect a silent no-op instead of proceeding on the
    *  wrong revision. */
   setActiveExtraction: (id: string | null) => Promise<boolean>;
+  /** Change the project's end application (project.json is its only home). */
+  setClass: (cls: string) => Promise<void>;
   updateDesignFiles: (id: string) => Promise<void>;
   labelExtraction: (id: string, label: string | null) => Promise<void>;
   setTag: (id: string, name: string, message?: string | null) => Promise<void>;
@@ -245,6 +247,23 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       set({ errorMsg: String(e) });
     } finally {
       set({ busy: false });
+    }
+  },
+
+  // The end application, edited after import. It is asked for once in the wizard and
+  // stored once, in project.json — this is the same field, not a second copy of it.
+  setClass: async (cls) => {
+    const before = get().project;
+    if (!before || before.class === cls) return;
+    try {
+      const info = await ipc.setProjectClass(cls);
+      set({ project: info });
+    } catch (e) {
+      useToastStore.getState().push({
+        kind: "error",
+        title: "Couldn’t change the end application",
+        message: String(e),
+      });
     }
   },
 

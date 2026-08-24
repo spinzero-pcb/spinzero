@@ -260,9 +260,10 @@ export interface ProjectUi {
   bom_sort?: { key: string; dir: number } | null;
   /** BOM tab: preset name ("" for Default) → column id → dragged pixel width. */
   bom_widths?: Record<string, Record<string, number>>;
-  /** BOM check: end-application profile the rules run with ("default" | "industrial" |
-   *  "medical" | "automotive"). Per-project because the end application is a property
-   *  of the board, not of the user. */
+  /** Retired 2026-08-24: the end application lives in project.json's `class`, which
+   *  the import wizard already wrote — see lib/projectClass. Kept in the type only so
+   *  an existing settings file round-trips instead of losing the key on the next save;
+   *  nothing reads it. */
   bom_check_profile?: string;
   /** BOM review setup: the depth last chosen ("quick" | "detailed"). Remembered so a
    *  re-run is one click; the setup sheet says it is remembering, because a scope that

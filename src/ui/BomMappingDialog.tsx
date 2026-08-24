@@ -50,11 +50,11 @@ const FIELD_LABEL: Record<string, string> = {
   package: "Package / case",
 };
 
-function label(logical: string): string {
+export function bomFieldLabel(logical: string): string {
   return FIELD_LABEL[logical] ?? logical;
 }
 
-function rank(logical: string): number {
+export function bomFieldRank(logical: string): number {
   const i = FIELD_ORDER.indexOf(logical);
   return i === -1 ? FIELD_ORDER.length : i;
 }
@@ -75,7 +75,7 @@ export function BomMappingDialog() {
   if (!open) return null;
 
   const fields = [...(view?.fields ?? [])].sort(
-    (a, b) => rank(a.logical) - rank(b.logical) || a.logical.localeCompare(b.logical),
+    (a, b) => bomFieldRank(a.logical) - bomFieldRank(b.logical) || a.logical.localeCompare(b.logical),
   );
   const samples = new Map((view?.columns ?? []).map((c) => [c.name, c]));
   const readCount = fields.filter((f) => effectiveColumn(view!, draft, f.logical)).length;
@@ -127,11 +127,11 @@ export function BomMappingDialog() {
                       key={f.logical}
                       role="row"
                     >
-                      <span className="bom-map-field">{label(f.logical)}</span>
+                      <span className="bom-map-field">{bomFieldLabel(f.logical)}</span>
                       <select
                         className="bom-select bom-map-pick"
                         value={col}
-                        aria-label={`Column for ${label(f.logical)}`}
+                        aria-label={`Column for ${bomFieldLabel(f.logical)}`}
                         onChange={(e) => setField(f.logical, e.target.value)}
                       >
                         <option value="">— not in this BOM —</option>

@@ -435,7 +435,7 @@ mod tests {
         ProjectHandle {
             project_dir: dir.to_path_buf(),
             name: "t".into(),
-            class: None,
+            class: Mutex::new(None),
             design_path: Mutex::new(None),
             design_tool: Mutex::new("kicad".into()),
             active_extraction: Mutex::new(None),
