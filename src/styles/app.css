@@ -2685,6 +2685,16 @@ button {
   white-space: nowrap;
 }
 .tag-premium { color: var(--brand); }
+
+/* The premium marker in a picker row: the gem alone. A bordered "premium" pill next
+   to the review's name reads as a second label competing with it, where the glyph is
+   read as a rank at a glance and costs no width. */
+.badge-premium {
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  color: var(--brand);
+}
 .tag-soon { color: var(--fg-2); border-style: dashed; }
 
 /* ---------- review setup sheet ---------- */

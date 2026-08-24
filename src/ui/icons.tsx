@@ -87,6 +87,18 @@ export function IconSparkle(p: IconProps) {
   );
 }
 
+/** Gem — marks a review as the premium tier. A cut stone, not a word: the badge
+ *  sits inline in a one-line row where any label competes with the review's name,
+ *  and "superior" is exactly what the glyph says without being read. */
+export function IconPremium(p: IconProps) {
+  return (
+    <Svg {...p}>
+      <path d="M4.2 2.5h7.6l2.2 3.3L8 13.8 1.9 5.8z" />
+      <path d="M1.9 5.8h12.1M4.2 2.5L6 5.8 8 13.8M11.8 2.5L10 5.8" />
+    </Svg>
+  );
+}
+
 /** Settings gear */
 export function IconGear(p: IconProps) {
   return (

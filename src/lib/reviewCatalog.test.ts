@@ -113,7 +113,7 @@ describe("sanitizeRuns", () => {
 
 describe("reviewKind", () => {
   it("resolves known ids and nothing else", () => {
-    expect(reviewKind("bom")?.label).toBe("Bill of materials");
+    expect(reviewKind("bom")?.label).toBe("BOM Review");
     expect(reviewKind("nope" as ReviewKind["id"])).toBeUndefined();
   });
 });

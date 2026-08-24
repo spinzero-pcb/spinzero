@@ -34,7 +34,7 @@ export interface ReviewKind {
 export const REVIEW_KINDS: ReviewKind[] = [
   {
     id: "bom",
-    label: "Bill of materials",
+    label: "BOM Review",
     blurb:
       "Deterministic rules over the BOM columns; a detailed run also reads the datasheets behind the part numbers.",
     tier: "included",

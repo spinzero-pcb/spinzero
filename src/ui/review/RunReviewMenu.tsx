@@ -6,7 +6,7 @@ import { useReviewStore } from "../../stores/reviewStore";
 import { useRunLauncherStore } from "../../stores/runLauncherStore";
 import { formatRelative } from "../../lib/time";
 import type { ReviewKindId } from "../../lib/reviewCatalog";
-import { IconSparkle } from "../icons";
+import { IconPremium, IconSparkle } from "../icons";
 
 // "Run a review" — the single launcher, in the status bar.
 //
@@ -113,7 +113,11 @@ export function RunReviewMenu() {
                 onClick={() => openSetup(kind.id)}
               >
                 <span className="run-review-name">{kind.label}</span>
-                {kind.tier === "premium" && <span className="tag-premium">premium</span>}
+                {kind.tier === "premium" && (
+                  <span className="badge-premium" title="Premium review" aria-label="Premium review">
+                    <IconPremium size={12} />
+                  </span>
+                )}
                 {!kind.ready && <span className="tag-soon">coming soon</span>}
                 <span className="run-review-meta">
                   {!kind.ready ? (
@@ -131,7 +135,7 @@ export function RunReviewMenu() {
               </button>
             );
           })}
-          <div className="run-review-pop-foot">Ctrl+R · each review opens its own setup</div>
+          <div className="run-review-pop-foot">Each review opens its own setup</div>
         </div>
       )}
     </div>
