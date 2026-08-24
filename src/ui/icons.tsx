@@ -116,6 +116,15 @@ export function IconChevron(p: IconProps) {
   );
 }
 
+/** Chevron pointing left — the panel-collapse affordance. */
+export function IconChevronLeft(p: IconProps) {
+  return (
+    <Svg {...p}>
+      <path d="M10.25 3.5L5.75 8l4.5 4.5" />
+    </Svg>
+  );
+}
+
 /** Schematic sheet */
 export function IconSheet(p: IconProps) {
   return (

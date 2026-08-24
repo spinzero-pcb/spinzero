@@ -19,6 +19,14 @@ describe("resolveKey", () => {
     expect(R("m", { ctrlKey: true, shiftKey: true })).toBe("measure");
   });
 
+  it("opens the review launcher on Mod+R, shadowing the webview reload", () => {
+    expect(R("r", { ctrlKey: true })).toBe("runReview");
+    expect(R("r", { metaKey: true })).toBe("runReview");
+    // Shift/Alt variants stay unbound so they can be given a meaning later.
+    expect(R("r", { ctrlKey: true, shiftKey: true })).toBeNull();
+    expect(R("r")).toBeNull();
+  });
+
   it("wires the zoom keys the toolbar advertises (PgUp/PgDn and +/-)", () => {
     expect(R("PageUp")).toBe("zoomIn");
     expect(R("+")).toBe("zoomIn");

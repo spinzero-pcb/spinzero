@@ -12,6 +12,7 @@ export type KeyAction =
   | "zoomOut"
   | "measure"
   | "fullscreen"
+  | "runReview"
   | "shortcuts";
 
 /** True when the event targets a text-entry surface — keymaps must stay out. */
@@ -37,6 +38,9 @@ export function resolveKey(e: KeyboardEvent, preset: KeymapPreset): KeyAction | 
   // Ctrl+Shift+M toggles the measure tool (KiCad parity). Matched before the
   // modifier bail-out below, which otherwise swallows every modifier chord.
   if ((e.ctrlKey || e.metaKey) && e.shiftKey && !e.altKey && k === "m") return "measure";
+  // Ctrl+R opens the "Run a review" launcher. It shadows the webview's reload, which
+  // is only a dev-build affordance and is not something a desktop app should offer.
+  if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && k === "r") return "runReview";
   if (e.ctrlKey || e.metaKey || e.altKey) return null;
 
   // Full screen (F11) + the shortcuts cheat-sheet (?) are modifier-free single keys.
@@ -73,6 +77,7 @@ export interface ShortcutDef {
 export const SHORTCUTS: ShortcutDef[] = [
   { combos: [["Mod", "F"]], action: "Search nets & components", scope: "Global" },
   { combos: [["Mod", "P"]], action: "Command palette", scope: "Global" },
+  { combos: [["Mod", "R"]], action: "Run a review", scope: "Global" },
   { combos: [["X"]], action: "Cross-probe schematic ↔ PCB", scope: "Global" },
   { combos: [["Home"]], action: "Fit to screen", scope: "Global" },
   { combos: [["PgUp"], ["+"]], action: "Zoom in", scope: "Global" },

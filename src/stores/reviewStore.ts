@@ -17,11 +17,11 @@ import type {
 import type { DesignIndexes } from "../lib/design";
 
 /** Which surface the left rail shows. "changes" is only reachable while a visual diff
- *  is active (the Changes tab appears then); diff enter/exit drive it. "reviews" is
- *  where checks are launched, as opposed to "review" where their findings are read.
- *  This is the one source of truth — ActivityBar, LeftPanel, and diffStore all
- *  read/write it. */
-export type LeftTab = "review" | "changes" | "reviews";
+ *  is active (the Changes tab appears then); diff enter/exit drive it. The old
+ *  "reviews" member — a second panel where checks were launched — is gone: launching
+ *  moved to the footer's "Run a review" (2026-08-24), which is what retired the
+ *  Review/Reviews name collision. LeftPanel and diffStore share this one value. */
+export type LeftTab = "review" | "changes";
 
 /** Derived display state. ⟳ re-check is never persisted — it is computed from the
  *  anchored object's live hash vs the hash stored when the comment was filed. */

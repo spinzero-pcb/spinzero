@@ -37,7 +37,7 @@ button {
 
 .app {
   display: grid;
-  grid-template-columns: var(--activitybar-w) var(--sidepanel-w) 1fr var(--rightpanel-w);
+  grid-template-columns: var(--sidepanel-w) 1fr var(--rightpanel-w);
   grid-template-rows: var(--menubar-h) 1fr var(--statusbar-h);
   height: 100%;
 }
@@ -45,19 +45,19 @@ button {
 /* BOM view has no right-side panel (item 10): drop the 4th column so the table fills
    the freed width (the <aside> itself is also not rendered on BOM, see App.tsx). */
 .app--bom {
-  grid-template-columns: var(--activitybar-w) var(--sidepanel-w) 1fr 0;
+  grid-template-columns: var(--sidepanel-w) 1fr 0;
 }
 
-/* Full-screen mode collapses the left rail (activity bar + review/changes panel)
-   so the canvas takes the freed width. The elements stay mounted (their state
-   survives the toggle) but are clipped to zero width. The right panel is kept. */
+/* Full-screen mode collapses the comments panel so the canvas takes the freed width.
+   It stays mounted (its state survives the toggle) but is clipped to zero width. The
+   right panel is kept. Toggled by the panel header's own chevron, by F11, and by the
+   footer's comments chip — one state, three ways in, no second control for it. */
 .app--fullscreen {
-  grid-template-columns: 0 0 1fr var(--rightpanel-w);
+  grid-template-columns: 0 1fr var(--rightpanel-w);
 }
 .app--fullscreen.app--bom {
-  grid-template-columns: 0 0 1fr 0;
+  grid-template-columns: 0 1fr 0;
 }
-.app--fullscreen .activity-bar,
 .app--fullscreen .side-panel {
   overflow: hidden;
   border-right: none;
@@ -89,6 +89,22 @@ button {
 .titlebar-drag {
   flex: 1;
   align-self: stretch;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+}
+
+/* The one place the project is named (2026-08-24). The strip is a title bar; this is
+   its title. `pointer-events: none` keeps the whole width draggable. */
+.titlebar-project {
+  pointer-events: none;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--fg-1);
+  font-size: var(--fs-1);
 }
 
 /* Custom window controls (decorations:false). */
@@ -201,48 +217,6 @@ button {
   padding: var(--sp-1) var(--sp-2);
   color: var(--fg-2);
   font-size: var(--fs-0);
-}
-
-.activity-bar {
-  grid-row: 2;
-  background: var(--bg-1);
-  border-right: 1px solid var(--border-0);
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  padding: var(--sp-2) 0;
-  gap: var(--sp-1);
-}
-
-.activity-bar .spacer {
-  flex: 1;
-}
-
-.activity-btn {
-  width: 36px;
-  height: 36px;
-  border-radius: var(--radius-2);
-  color: var(--fg-2);
-  font-size: var(--fs-4);
-  display: grid;
-  place-items: center;
-  transition: background var(--dur-1) var(--ease-out), color var(--dur-1) var(--ease-out);
-}
-
-.activity-btn:hover {
-  color: var(--fg-0);
-  background: var(--bg-3);
-}
-
-.activity-btn.active {
-  color: var(--fg-0);
-  background: var(--accent-dim);
-  box-shadow: inset 2px 0 0 var(--accent);
-}
-
-.activity-btn:disabled {
-  opacity: 0.35;
-  cursor: default;
 }
 
 .side-panel {
@@ -820,6 +794,13 @@ button {
 .status-bar .mono {
   color: var(--fg-1);
 }
+
+.statusbar-crunch {
+  display: inline-flex;
+  align-items: center;
+  color: var(--fg-1);
+}
+.statusbar-btn.crunch-failed { color: var(--err); }
 
 .status-dot {
   display: inline-block;
@@ -2500,11 +2481,11 @@ button {
    Phase 2 — review surface (docs/phase2-ui-plan.md)
    ============================================================ */
 
-/* ---------- right per-view panel (grid column 4) ---------- */
+/* ---------- right per-view panel (last grid column) ---------- */
 
 .right-panel {
   grid-row: 2;
-  grid-column: 4;
+  grid-column: 3;
   background: var(--bg-1);
   border-left: 1px solid var(--border-0);
   display: flex;
@@ -2562,6 +2543,196 @@ button {
 }
 .left-tab:hover { color: var(--fg-0); }
 .left-tab.active { color: var(--fg-0); border-bottom-color: var(--accent); }
+
+/* Panel title, outside diff mode: the panel is "Comments" (human notes, rule findings
+   and agent findings are one stream, and only that word is true of all three). */
+.left-title {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  font-size: var(--fs-1);
+  color: var(--fg-0);
+}
+.left-title-n {
+  color: var(--fg-2);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Collapse the panel. Same state as F11 — the control moved here from the view-tab
+   row because this is the thing being hidden; the footer's comments chip brings it
+   back. Two ways in, one boolean. */
+.left-collapse {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  flex: none;
+  color: var(--fg-2);
+}
+.left-collapse:hover { color: var(--fg-0); background: var(--bg-3); }
+
+/* The reverse of `.left-collapse`: shown in the view-tab strip only while the panel is
+   hidden, so the collapse always has a visible undo. Same 26px square and the same
+   chevron glyph, pointing the other way — it reads as the panel's edge folded out. */
+.left-expand {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  flex: none;
+  margin-right: var(--sp-1);
+  color: var(--fg-2);
+  border-radius: var(--radius-1);
+}
+.left-expand:hover { color: var(--fg-0); background: var(--bg-3); }
+
+/* ---------- "Run a review" launcher (status bar) ---------- */
+
+.run-review {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex: none;
+}
+
+/* Concurrent runs are allowed, so this reports how many are in flight rather than
+   pretending there is only ever one. */
+.run-review-active {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  max-width: 22rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--fg-1);
+  font-size: var(--fs-0);
+}
+
+/* An accent button, not grey status text: a status bar is where software puts what it
+   does not want you to notice, and this is the entry point to the reviews. */
+.run-review-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 1px var(--sp-2);
+  border-radius: var(--radius-1);
+  background: var(--accent);
+  color: var(--accent-fg);
+  font-size: var(--fs-0);
+}
+.run-review-btn:hover { filter: brightness(1.1); }
+.run-review-btn.on { filter: brightness(1.15); }
+.run-review-caret { opacity: 0.8; }
+
+.run-review-pop {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 6px);
+  z-index: 80;
+  width: 320px;
+  background: var(--bg-2);
+  border: 1px solid var(--border-1);
+  border-radius: var(--radius-2);
+  box-shadow: 0 -12px 40px rgba(0, 0, 0, 0.55);
+  overflow: hidden;
+}
+.run-review-pop-hd,
+.run-review-pop-foot {
+  padding: var(--sp-1) var(--sp-2);
+  color: var(--fg-2);
+  font-size: var(--fs-0);
+}
+.run-review-pop-hd {
+  background: var(--bg-1);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.run-review-pop-foot { border-top: 1px solid var(--border-0); }
+
+/* One line per review — scope lives in the review's own setup sheet, so this list
+   stays readable as the catalogue grows and doubles as the coverage readout. */
+.run-review-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: var(--sp-1) var(--sp-2);
+  border-top: 1px solid var(--border-0);
+  font-size: var(--fs-1);
+  text-align: left;
+}
+.run-review-row:hover:not(:disabled) { background: var(--bg-3); }
+.run-review-row:disabled { cursor: default; }
+.run-review-row.soon .run-review-name { color: var(--fg-2); }
+.run-review-name { color: var(--fg-0); }
+.run-review-meta {
+  margin-left: auto;
+  color: var(--fg-2);
+  font-size: var(--fs-0);
+  white-space: nowrap;
+}
+.run-review-stale { color: var(--warn); }
+
+.tag-premium,
+.tag-soon {
+  padding: 0 5px;
+  border: 1px solid currentcolor;
+  border-radius: var(--radius-1);
+  font-size: var(--fs-0);
+  line-height: 1.5;
+  white-space: nowrap;
+}
+.tag-premium { color: var(--brand); }
+.tag-soon { color: var(--fg-2); border-style: dashed; }
+
+/* ---------- review setup sheet ---------- */
+
+.review-setup .setup-section {
+  margin: var(--sp-3) 0 var(--sp-1);
+  color: var(--fg-2);
+  font-size: var(--fs-0);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.review-setup .setup-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+.review-setup .setup-fact {
+  flex: 1;
+  color: var(--fg-1);
+  font-size: var(--fs-1);
+}
+
+/* Depth is a choice INSIDE the sheet, not a second entry in the picker: two tiers
+   across six reviews would be twelve tiles, and one radio is not. */
+.setup-depth {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 2px var(--sp-2);
+  align-items: center;
+  padding: var(--sp-2);
+  margin-bottom: var(--sp-1);
+  border: 1px solid var(--border-0);
+  border-radius: var(--radius-2);
+  cursor: pointer;
+}
+.setup-depth.on {
+  border-color: var(--accent);
+  background: var(--accent-dim);
+}
+.setup-depth-name { color: var(--fg-0); font-size: var(--fs-1); }
+.setup-depth-meta { color: var(--fg-2); font-size: var(--fs-0); }
+.setup-depth-what {
+  grid-column: 2 / -1;
+  color: var(--fg-1);
+  font-size: var(--fs-0);
+  line-height: 1.45;
+}
+.review-setup .setup-memory { margin-top: var(--sp-3); }
 
 /* ---------- review stream ---------- */
 

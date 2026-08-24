@@ -2,6 +2,7 @@ import { create } from "zustand";
 import { ipc } from "../lib/ipc";
 import { useDesignStore } from "./designStore";
 import { useBomCheckStore } from "./bomCheckStore";
+import { useReviewRunsStore } from "./reviewRunsStore";
 import { useReviewStore } from "./reviewStore";
 import { useSelectionStore } from "./selectionStore";
 import { useNetClassStore } from "./netClassStore";
@@ -62,6 +63,20 @@ interface ProjectState {
   refreshIndex: () => Promise<void>;
 }
 
+/** Machine-local, per-project UI that has to be re-read whenever a project becomes
+ *  the open one — on open, on create, and on a restart that restores it (init).
+ *  All four stores validate what they read; settings are hand-editable. */
+function hydrateProjectUi(projectDir: string) {
+  // Net-class/net colour picks are remembered per project.
+  void useNetClassStore.getState().hydrate(projectDir);
+  // Same tier for the BOM preset / hidden columns / sort (project-defined ids).
+  void useViewStore.getState().hydrateBom(projectDir);
+  // BOM check profile + review depth: scope belongs to the board, not the user.
+  void useBomCheckStore.getState().hydrate(projectDir);
+  // What each review was last run against, for the "Run a review" launcher.
+  void useReviewRunsStore.getState().hydrate(projectDir);
+}
+
 /** Clean-load: drop the previous project's design, selection and in-memory index
  *  rows so the new project loads from a blank slate (avoids the stale-`loaded`
  *  bug where the first crunch event for the new project is swallowed). */
@@ -76,6 +91,8 @@ function resetForNewProject() {
   useReviewStore.getState().clear();
   // …and the last BOM check's summary, which describes the outgoing project's BOM.
   useBomCheckStore.getState().clear();
+  // …and the run records behind the launcher's "ran 23 Aug · stale" lines.
+  useReviewRunsStore.getState().clear();
   const sel = useSelectionStore.getState();
   sel.setHighlights([], "sch");
   sel.setSelection(null, "sch");
@@ -138,6 +155,12 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     set({ recents });
     if (project) {
       set(adopt(project));
+      // Restart with a project already open takes this path instead of openProject, so
+      // the per-project UI stores have to be hydrated here too. Without it every
+      // machine-local remembered choice — BOM profile, BOM columns, net-class colours,
+      // and what each review was last run against — silently reset to defaults on every
+      // launch, and only came back if the user re-opened the project by hand.
+      hydrateProjectUi(project.project_dir);
       await get().refreshIndex();
     } else if (recents.length > 0) {
       // Like VS Code: reopen the last project instead of the start page.
@@ -169,11 +192,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       void useDesignStore.getState().load();
       void useReviewStore.getState().load();
       // Net-class/net colour picks are remembered per project (machine-local settings).
-      void useNetClassStore.getState().hydrate(project.project_dir);
-      // Same tier for the BOM preset / hidden columns / sort (project-defined ids).
-      void useViewStore.getState().hydrateBom(project.project_dir);
-      // BOM check profile: the end application belongs to the board, not the user.
-      void useBomCheckStore.getState().hydrate(project.project_dir);
+      hydrateProjectUi(project.project_dir);
     } catch (e) {
       set({ errorMsg: String(e) });
       // Surface it everywhere (the Home error card is invisible once a project is
@@ -207,10 +226,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       // "succeeded" event. refreshIndex retries until rows appear.
       void get().refreshIndex();
       void useReviewStore.getState().load();
-      void useNetClassStore.getState().hydrate(project.project_dir);
-      void useViewStore.getState().hydrateBom(project.project_dir);
-      // BOM check profile: the end application belongs to the board, not the user.
-      void useBomCheckStore.getState().hydrate(project.project_dir);
+      hydrateProjectUi(project.project_dir);
     } catch (e) {
       set({ errorMsg: String(e) });
       throw e;

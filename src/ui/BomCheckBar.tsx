@@ -1,5 +1,6 @@
 import { useEffect } from "react";
 import { useBomCheckStore } from "../stores/bomCheckStore";
+import { useRunLauncherStore } from "../stores/runLauncherStore";
 import { useReviewStore } from "../stores/reviewStore";
 import { BOM_PROFILES, isBomProfile, severityCounts } from "../lib/findings";
 import { runHealthSummary } from "../lib/reviewService";
@@ -14,10 +15,10 @@ import { IconChecklist } from "./icons";
 // human's comment. This strip is the *run* surface — pick the end application, run it,
 // and read what the run did.
 //
-// The strip runs the free check and summarizes it, and nothing else. The paid tier,
-// the column mapping and the checks still to come are launched from the Reviews rail
-// (`ReviewsPanel`), because none of them belong to the BOM table specifically — and
-// because one control offered in two places is how two names for one thing start.
+// "Review BOM" is the visible door into the SAME setup sheet the footer's "Run a
+// review" opens, pre-picked to this review — so the paid tier, the column mapping and
+// the end application are all one dialog away from the table they describe. It is two
+// entrances to one action, not two actions: nothing here runs a check by itself.
 
 /** Findings-schema severity → the review UI's four-level severity vocabulary, so a
  *  finding chip is the same colour here as its comment is in the rail. */
@@ -99,11 +100,11 @@ export function BomCheckBar() {
       <button
         className="btn-ghost bom-check-run"
         disabled={running}
-        title="Run the deterministic BOM checks (Ctrl/⌘+Shift+B) — findings are filed as review comments"
-        onClick={() => void run()}
+        title="Set up and run a BOM review — depth, end application and column mapping"
+        onClick={() => useRunLauncherStore.getState().openSetup("bom")}
       >
         <IconChecklist size={14} />
-        {running ? "Checking…" : "Check BOM"}
+        {running ? "Checking…" : "Review BOM"}
       </button>
       <select
         className="bom-select"
@@ -118,14 +119,6 @@ export function BomCheckBar() {
           </option>
         ))}
       </select>
-
-      <button
-        className="btn-ghost bom-check-reviews"
-        title="Reviews — the detailed review, the column mapping, and the checks still to come"
-        onClick={() => useReviewStore.getState().setLeftTab("reviews")}
-      >
-        Reviews →
-      </button>
 
       {doc && (
         <>

@@ -9,6 +9,7 @@ import {
 } from "../lib/findings";
 import { useBomMappingStore } from "./bomMappingStore";
 import { useProjectStore } from "./projectStore";
+import { useReviewRunsStore } from "./reviewRunsStore";
 import { useReviewStore } from "./reviewStore";
 import { useSettingsStore } from "./settingsStore";
 import { useToastStore } from "./toastStore";
@@ -34,17 +35,28 @@ interface BomCheckState {
   sessionId: string | null;
   error: string | null;
   profile: BomProfile;
+  /** Depth the BOM review's setup sheet is set to. Scope, like `profile` — it belongs
+   *  to the board and is remembered per project so a re-run is one click. */
+  depth: BomDepth;
   /** Project the above belongs to, so a stale result can never render for another. */
   projectDir: string | null;
 
   hydrate: (projectDir: string | null) => Promise<void>;
   setProfile: (profile: BomProfile) => void;
+  setDepth: (depth: BomDepth) => void;
   run: () => Promise<void>;
   clearForSession: (id: string) => void;
   clear: () => void;
 }
 
 const DEFAULT_PROFILE: BomProfile = "default";
+
+/** "quick" = the included deterministic rules; "detailed" = the paid service run. */
+export type BomDepth = "quick" | "detailed";
+const DEFAULT_DEPTH: BomDepth = "quick";
+function isBomDepth(v: unknown): v is BomDepth {
+  return v === "quick" || v === "detailed";
+}
 
 export const useBomCheckStore = create<BomCheckState>((set, get) => ({
   running: false,
@@ -53,6 +65,7 @@ export const useBomCheckStore = create<BomCheckState>((set, get) => ({
   unmappedColumns: [],
   error: null,
   profile: DEFAULT_PROFILE,
+  depth: DEFAULT_DEPTH,
   projectDir: null,
   sessionId: null,
 
@@ -66,12 +79,12 @@ export const useBomCheckStore = create<BomCheckState>((set, get) => ({
         /* fall back to the default profile below */
       }
     }
-    const remembered = projectDir
-      ? useSettingsStore.getState().projectUi[projectDir]?.bom_check_profile
-      : undefined;
+    const ui = projectDir ? useSettingsStore.getState().projectUi[projectDir] : undefined;
+    const remembered = ui?.bom_check_profile;
     set({
       projectDir,
       profile: isBomProfile(remembered) ? remembered : DEFAULT_PROFILE,
+      depth: isBomDepth(ui?.bom_review_depth) ? ui.bom_review_depth : DEFAULT_DEPTH,
       doc: null,
       summary: null,
       unmappedColumns: [],
@@ -85,6 +98,12 @@ export const useBomCheckStore = create<BomCheckState>((set, get) => ({
     const dir = get().projectDir ?? useProjectStore.getState().project?.project_dir;
     // The end application is a property of the board, so it is remembered per project.
     if (dir) void useSettingsStore.getState().setProjectUi(dir, { bom_check_profile: profile });
+  },
+
+  setDepth: (depth) => {
+    set({ depth });
+    const dir = get().projectDir ?? useProjectStore.getState().project?.project_dir;
+    if (dir) void useSettingsStore.getState().setProjectUi(dir, { bom_review_depth: depth });
   },
 
   run: async () => {
@@ -124,6 +143,12 @@ export const useBomCheckStore = create<BomCheckState>((set, get) => ({
       // session the active one — the run's findings are what the user asked to see.
       await useReviewStore.getState().load();
       if (out.session_id) useReviewStore.getState().setActiveSession(out.session_id);
+      // Stamp what this run read, so the launcher can say "ran 23 Aug" and go stale
+      // only when the BOM itself moves. Cosmetic — never let it fail the run.
+      void useReviewRunsStore
+        .getState()
+        .record("bom")
+        .catch(() => {});
       useToastStore.getState().push({
         kind: out.findings.findings.length === 0 ? "success" : "info",
         title: runTitle(out),
@@ -158,6 +183,7 @@ export const useBomCheckStore = create<BomCheckState>((set, get) => ({
       error: null,
       projectDir: null,
       profile: DEFAULT_PROFILE,
+      depth: DEFAULT_DEPTH,
     }),
 }));
 

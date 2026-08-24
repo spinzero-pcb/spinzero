@@ -4,11 +4,24 @@ import { useCrunchStore } from "../../stores/crunchStore";
 import { useDesignStore } from "../../stores/designStore";
 import { useHistoryStore } from "../../stores/historyStore";
 import { useProjectStore } from "../../stores/projectStore";
+import { useReviewStore } from "../../stores/reviewStore";
 import { useSelectionStore } from "../../stores/selectionStore";
+import { useToastStore } from "../../stores/toastStore";
 import { useDiffStore } from "../../stores/diffStore";
+import { useViewStore } from "../../stores/viewStore";
+import { RunReviewMenu } from "../review/RunReviewMenu";
 import { ipc } from "../../lib/ipc";
 import { formatLocalTime, formatRelative } from "../../lib/time";
-import { IconHistory, IconLocate, IconRefresh } from "../icons";
+import { IconComment, IconHistory, IconLocate } from "../icons";
+
+// The status bar says only what is true right now.
+//
+// Removed deliberately (2026-08-24): the project name (it lives in the title bar, once),
+// "Extract Now" (extraction is automatic; the manual re-run moved to File ▸ Re-extract
+// design, and the failure state below is itself the retry), and the idle crunch status
+// — "up to date", "extracted · 1.2s" and the rest were near-constants, and the version
+// chip beside them already carries the timestamp. What survives is state that changes
+// what the window means: which revision you are on, an extraction in flight, a failure.
 
 /** Status-bar selection mirror (spec §3): `/CANH · Isolated · 6 pins · 2 sheets`. */
 function SelectionMirror() {
@@ -120,52 +133,84 @@ function MissingDesignBanner() {
   );
 }
 
-const PHASE_TEXT: Record<string, string> = {
-  idle: "idle",
-  running: "extracting…",
-  succeeded: "extracted",
-  failed: "extraction failed",
-  skipped: "up to date",
-};
+/** Ask the backend to re-extract. The crunch-event listener in App reports a failed
+ *  extraction, but a rejected call never produces an event — so say so here rather than
+ *  leaving a deliberate click with no answer at all. */
+export async function reExtract(): Promise<void> {
+  try {
+    await ipc.crunchNow();
+  } catch (e) {
+    useToastStore.getState().push({
+      kind: "error",
+      key: "crunch-now",
+      title: "Couldn’t start extraction",
+      message: String(e),
+    });
+  }
+}
+
+/** Extraction state, only while it is worth saying. Idle and "succeeded" are silent:
+ *  extraction is automatic and up-to-date is the normal condition, so announcing it
+ *  permanently teaches the user to ignore the one line that matters when it fails. */
+function CrunchStatus() {
+  const { phase } = useCrunchStore();
+  if (phase === "running") {
+    return (
+      <span className="statusbar-crunch">
+        <span className="status-dot running" />
+        extracting…
+      </span>
+    );
+  }
+  if (phase === "failed") {
+    return (
+      <button
+        className="statusbar-btn crunch-failed"
+        title="The last extraction failed — click to try again"
+        onClick={() => void reExtract()}
+      >
+        <span className="status-dot failed" />
+        extraction failed · retry
+      </button>
+    );
+  }
+  return null;
+}
+
+/** The way back when the comments panel is collapsed. It is only rendered in that
+ *  state on purpose: with the panel open the count is already in its header, and a
+ *  second copy would be one more near-constant in a bar we just emptied. */
+function CommentsChip() {
+  const fullscreen = useViewStore((s) => s.fullscreen);
+  const setFullscreen = useViewStore((s) => s.setFullscreen);
+  const comments = useReviewStore((s) => s.comments);
+  if (!fullscreen) return null;
+  const open = comments.filter((c) => c.status === "open").length;
+  return (
+    <button
+      className="statusbar-btn"
+      title="Show the comments panel (F11)"
+      onClick={() => setFullscreen(false)}
+    >
+      <IconComment size={12} />
+      {open} comment{open === 1 ? "" : "s"}
+    </button>
+  );
+}
 
 export function StatusBar() {
-  const summary = useProjectStore((s) => s.summary);
   const project = useProjectStore((s) => s.project);
   const designPathMissing = useProjectStore((s) => s.designPathMissing);
-  const { phase, lastCrunchMs, lastFinishedTs } = useCrunchStore();
-
-  const finished = lastFinishedTs
-    ? new Date(lastFinishedTs).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
-    : null;
 
   return (
     <footer className="status-bar">
-      <span>{summary?.name ?? project?.name ?? "no project open"}</span>
       {project && <VersionChip />}
       {project && <PresenceBanner />}
-      {designPathMissing ? (
-        <MissingDesignBanner />
-      ) : (
-        <span>
-          <span className={`status-dot ${phase}`} />
-          {PHASE_TEXT[phase] ?? phase}
-          {phase === "succeeded" && lastCrunchMs != null && ` · ${(lastCrunchMs / 1000).toFixed(1)}s`}
-          {finished && ` · ${finished}`}
-        </span>
-      )}
-      {project && !designPathMissing && (
-        <button
-          className="btn-ghost statusbar-btn"
-          onClick={() => void ipc.crunchNow().catch(() => {})}
-          disabled={phase === "running"}
-          title="Re-extract the design from source files"
-        >
-          <IconRefresh size={12} />
-          Extract Now
-        </button>
-      )}
+      {designPathMissing ? <MissingDesignBanner /> : <CrunchStatus />}
       <span style={{ flex: 1 }} />
       <SelectionMirror />
+      {project && <CommentsChip />}
+      {project && <RunReviewMenu />}
     </footer>
   );
 }

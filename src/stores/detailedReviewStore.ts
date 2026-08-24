@@ -16,6 +16,7 @@ import {
 } from "../lib/reviewService";
 import { useBomCheckStore } from "./bomCheckStore";
 import { useBomMappingStore } from "./bomMappingStore";
+import { useReviewRunsStore } from "./reviewRunsStore";
 import { useReviewStore } from "./reviewStore";
 import { useSettingsStore } from "./settingsStore";
 import { useToastStore } from "./toastStore";
@@ -170,6 +171,12 @@ export const useDetailedReviewStore = create<DetailedReviewState>((set, get) => 
       // Land on the run's own session, exactly as the free check does — the findings
       // the user just paid to wait for are what the rail should be showing.
       if (outcome.session_id) useReviewStore.getState().setActiveSession(outcome.session_id);
+      // Same stamp the free check writes — the launcher's BOM row reflects whichever
+      // depth ran last. Cosmetic, so a failure here never touches the result.
+      void useReviewRunsStore
+        .getState()
+        .record("bom")
+        .catch(() => {});
       useToastStore.getState().push({
         kind: doc.findings.length ? "info" : "success",
         title: `Detailed review: ${doc.findings.length || "no"} finding${doc.findings.length === 1 ? "" : "s"}`,

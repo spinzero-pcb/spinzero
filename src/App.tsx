@@ -1,5 +1,4 @@
 import { useEffect, useState } from "react";
-import { ActivityBar } from "./ui/shell/ActivityBar";
 import { LeftPanel } from "./ui/shell/LeftPanel";
 import { RightPanel } from "./ui/shell/RightPanel";
 import { Home } from "./ui/shell/Home";
@@ -17,6 +16,7 @@ import { PropertiesCard } from "./ui/PropertiesCard";
 import { CheckoutConfirm } from "./ui/CheckoutConfirm";
 import { BomMappingDialog } from "./ui/BomMappingDialog";
 import { DetailedReviewDialog } from "./ui/DetailedReviewDialog";
+import { BomReviewSetup } from "./ui/review/BomReviewSetup";
 import { HistoryGraph } from "./ui/history/HistoryGraph";
 import { Toaster } from "./ui/Toaster";
 import { KeyboardShortcuts, useShortcutsDialog } from "./ui/shell/KeyboardShortcuts";
@@ -30,15 +30,16 @@ import { useNetClassStore } from "./stores/netClassStore";
 import { useSettingsStore } from "./stores/settingsStore";
 import { useViewStore, type MainView } from "./stores/viewStore";
 import { useReviewStore } from "./stores/reviewStore";
+import { useRunLauncherStore } from "./stores/runLauncherStore";
 import { useMeasureStore } from "./stores/measureStore";
 import { useHistoryStore } from "./stores/historyStore";
 import { useDiffStore } from "./stores/diffStore";
 import { canvasRestore, measureNav, nav, pcbNav } from "./ui/canvas/navigator";
 import { isTypingTarget, resolveKey } from "./lib/keymap";
+import { IconChevron } from "./ui/icons";
 import type { Selection } from "./lib/design";
 import { ipc, onCrunchEvent } from "./lib/ipc";
 import { checkForUpdates } from "./lib/updater";
-import { IconFullscreen, IconFullscreenExit } from "./ui/icons";
 
 /** Cross-probing into the PCB activates the copper layer that carries the
  *  selection (net: most routed length; component/pin: its board side). */
@@ -84,7 +85,6 @@ export default function App() {
   const view = useViewStore((s) => s.view);
   const setView = useViewStore((s) => s.setView);
   const fullscreen = useViewStore((s) => s.fullscreen);
-  const toggleFullscreen = useViewStore((s) => s.toggleFullscreen);
   const loadReviews = useReviewStore((s) => s.load);
   const diffActive = useDiffStore((s) => s.active);
   const [palette, setPalette] = useState<null | "search" | "commands">(null);
@@ -238,6 +238,9 @@ export default function App() {
         case "fullscreen":
           useViewStore.getState().toggleFullscreen();
           break;
+        case "runReview":
+          useRunLauncherStore.getState().toggleMenu();
+          break;
         case "shortcuts":
           useShortcutsDialog.getState().setOpen(true);
           break;
@@ -329,8 +332,7 @@ export default function App() {
     return (
       <div className="app">
         <MenuBar />
-        <ActivityBar />
-        <div style={{ gridColumn: "2 / -1", gridRow: 2 }}>
+        <div style={{ gridColumn: "1 / -1", gridRow: 2 }}>
           <Home />
         </div>
         <StatusBar />
@@ -347,12 +349,24 @@ export default function App() {
       }`}
     >
       <MenuBar />
-      <ActivityBar />
       <aside className="side-panel">
         <LeftPanel />
       </aside>
       <main className="main-area">
         <div className="view-tabs">
+          {/* The mirror of the panel's own collapse chevron: while the comments panel is
+              hidden it is the only thing on screen pointing back at it, so it takes the
+              slot the panel's left edge used to occupy. */}
+          {fullscreen && (
+            <button
+              className="left-expand"
+              title="Show comments (F11)"
+              aria-label="Show comments"
+              onClick={() => useViewStore.getState().setFullscreen(false)}
+            >
+              <IconChevron size={13} />
+            </button>
+          )}
           {VIEWS.map((v) => (
             <button
               key={v.id}
@@ -395,15 +409,6 @@ export default function App() {
               {v.label}
             </button>
           ))}
-          <button
-            className={`view-fullscreen-btn ${fullscreen ? "on" : ""}`}
-            title={fullscreen ? "Exit full screen (Esc)" : "Full screen"}
-            aria-label={fullscreen ? "Exit full screen" : "Full screen"}
-            aria-pressed={fullscreen}
-            onClick={() => toggleFullscreen()}
-          >
-            {fullscreen ? <IconFullscreenExit size={16} /> : <IconFullscreen size={16} />}
-          </button>
         </div>
         <div className={`canvas-area ${view === "pcb" ? "pcb" : ""} ${diffActive ? "diffing" : ""}`}>
           {/* Diff-mode banner (visual-diff §3): view-global — sits above whichever
@@ -459,6 +464,7 @@ export default function App() {
         />
       )}
       <CheckoutConfirm />
+      <BomReviewSetup />
       <DetailedReviewDialog />
       <BomMappingDialog />
       <HistoryGraph />

@@ -10,8 +10,8 @@ import { IconChevron, IconSheet } from "../icons";
 
 // The RIGHT panel is the per-view navigator/tools (docs/phase2-ui-plan.md §1):
 // `Sheets` on the schematic (moved off the old left Explorer), `Appearance` on the
-// PCB, a filters placeholder on the BOM. The LEFT rail owns Review/AI; revisions
-// moved to the clickable footer picker (item 21). Layers and review never collide.
+// PCB, nothing on the BOM. The LEFT panel owns comments; revisions moved to the
+// clickable footer chip (item 21). Layers and comments never collide.
 
 function Section({
   title,
@@ -44,7 +44,6 @@ function Section({
 
 export function RightPanel() {
   const project = useProjectStore((s) => s.project);
-  const summary = useProjectStore((s) => s.summary);
   const sheets = useProjectStore((s) => s.sheets);
   const view = useViewStore((s) => s.view);
   const indexes = useDesignStore((s) => s.indexes);
@@ -52,13 +51,10 @@ export function RightPanel() {
 
   if (!project) return null;
 
-  const projectName = summary?.name ?? project.name ?? "Project";
-
+  // No header: it only ever held the project name, which now lives in the title bar
+  // (2026-08-24). The panel opens straight onto its actual content.
   return (
     <>
-      <div className="side-panel-header explorer-header">
-        <span className="tree-name">{projectName}</span>
-      </div>
       <div className="right-panel-scroll">
         {view === "schematic" && (
           <Section title="Sheets" icon={<IconSheet size={13} />} count={sheets.length}>

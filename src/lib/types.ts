@@ -264,6 +264,15 @@ export interface ProjectUi {
    *  "medical" | "automotive"). Per-project because the end application is a property
    *  of the board, not of the user. */
   bom_check_profile?: string;
+  /** BOM review setup: the depth last chosen ("quick" | "detailed"). Remembered so a
+   *  re-run is one click; the setup sheet says it is remembering, because a scope that
+   *  persists silently is how someone reviews less than they think they did. */
+  bom_review_depth?: string;
+  /** Run launcher: what each review kind was last run against, keyed by review id
+   *  (see lib/reviewCatalog). Machine-local on purpose — the findings themselves are
+   *  comments in the project folder; this is only the "ran 23 Aug · stale" line.
+   *  Validated on hydrate by `sanitizeRuns`; the shape is `ReviewRun`. */
+  review_runs?: unknown;
   /** ISO timestamp of the last write for this project — the LRU key that bounds
    *  `project_ui` growth (see pruneProjectUi). */
   last_seen?: string;

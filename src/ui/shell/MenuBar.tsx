@@ -8,6 +8,7 @@ import { useViewStore } from "../../stores/viewStore";
 import { useShortcutsDialog } from "./KeyboardShortcuts";
 import { ipc } from "../../lib/ipc";
 import { ShellDialogs } from "./ShellDialogs";
+import { reExtract } from "./StatusBar";
 import { IconSpinZero } from "../icons";
 
 function basename(p: string): string {
@@ -36,6 +37,8 @@ type OpenMenu = "file" | "view" | "help" | null;
  *  controls on the right. No "SpinZero" text; the project name shows in the status bar. */
 export function MenuBar() {
   const openProject = useProjectStore((s) => s.openProject);
+  const project = useProjectStore((s) => s.project);
+  const summary = useProjectStore((s) => s.summary);
   const recents = useProjectStore((s) => s.recents);
   const busy = useProjectStore((s) => s.busy);
   const openWizard = useShellStore((s) => s.openWizard);
@@ -58,6 +61,10 @@ export function MenuBar() {
   // Telemetry consent for the Data Privacy dialog. `null` until loaded; defaults ON.
   const [shareDiagnostics, setShareDiagnostics] = useState<boolean | null>(null);
   const [maximized, setMaximized] = useState(false);
+  // The one place the project is named. `summary` is the extracted design's own name
+  // and wins when present; `project.name` covers a project whose first extraction has
+  // not landed yet.
+  const projectName = summary?.name ?? project?.name ?? null;
   const [version, setVersion] = useState<string | null>(null);
   // The OS-derived identity slug — shown as the placeholder / fallback for the name field.
   const [reviewAuthorSlug, setReviewAuthorSlug] = useState<string | null>(null);
@@ -178,6 +185,21 @@ export function MenuBar() {
                   </div>
                 )}
               </div>
+              <div className="menu-sep" />
+              {/* The manual re-extract. It used to be a permanent footer button, which
+                  was a no-op whenever nothing had changed; extraction is automatic, so
+                  the escape hatch belongs in a menu — for a missed file-watch event or
+                  after a failure. */}
+              <button
+                className="menu-entry"
+                disabled={!project || busy}
+                onClick={() => {
+                  setOpenMenu(null);
+                  void reExtract();
+                }}
+              >
+                Re-extract Design
+              </button>
             </div>
           )}
         </div>
@@ -271,8 +293,18 @@ export function MenuBar() {
         </div>
       </div>
 
-      {/* Draggable middle — pointer events that fall here move the window. */}
-      <div className="titlebar-drag" data-tauri-drag-region />
+      {/* Draggable middle — pointer events that fall here move the window. It also
+          carries the project name: this strip is the window's title bar and the name is
+          the document's title, so it belongs here rather than repeated in the footer and
+          the right panel (2026-08-24). Reverses the earlier "no text in the title bar"
+          call, which is what left the name duplicated in two panels. */}
+      <div className="titlebar-drag" data-tauri-drag-region>
+        {projectName && (
+          <span className="titlebar-project" data-tauri-drag-region title={projectName}>
+            {projectName}
+          </span>
+        )}
+      </div>
 
       <div className="window-controls">
         <button
