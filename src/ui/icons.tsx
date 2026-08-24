@@ -93,8 +93,8 @@ export function IconSparkle(p: IconProps) {
 export function IconPremium(p: IconProps) {
   return (
     <Svg {...p}>
-      <path d="M4.2 2.5h7.6l2.2 3.3L8 13.8 1.9 5.8z" />
-      <path d="M1.9 5.8h12.1M4.2 2.5L6 5.8 8 13.8M11.8 2.5L10 5.8" />
+      <path d="M5 2.4h6l3 3.2-6 8-6-8z" />
+      <path d="M2 5.6h12M5 2.4l1.6 3.2L8 13.6l1.4-8L11 2.4" />
     </Svg>
   );
 }

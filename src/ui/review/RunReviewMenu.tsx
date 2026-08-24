@@ -5,6 +5,7 @@ import { reviewRows, useReviewRunsStore } from "../../stores/reviewRunsStore";
 import { useReviewStore } from "../../stores/reviewStore";
 import { useRunLauncherStore } from "../../stores/runLauncherStore";
 import { formatRelative } from "../../lib/time";
+import type { CommentSeverity } from "../../lib/types";
 import type { ReviewKindId } from "../../lib/reviewCatalog";
 import { IconPremium, IconSparkle } from "../icons";
 import { ReviewProgress } from "./ReviewProgress";
@@ -23,12 +24,27 @@ import { ReviewProgress } from "./ReviewProgress";
 // answer to "what has this board been through", and a hidden review reads like one
 // that passed.
 
-/** Open findings filed by a review, for the row's "N open" count. Today every
- *  producer files against the BOM; when a review type lands that files elsewhere it
- *  gains a discriminator here rather than in the row. */
-function openCountFor(id: ReviewKindId, comments: { status: string; source: string }[]): number {
-  if (id !== "bom") return 0;
-  return comments.filter((c) => c.status === "open" && c.source !== "human").length;
+const SEV_RANK: Record<CommentSeverity, number> = { info: 0, minor: 1, major: 2, critical: 3 };
+
+/** Open findings filed by a review, for the row's count. The worst severity among
+ *  them rides along so the count can be coloured: "3 open" is a different fact
+ *  depending on whether the worst of the three is info or critical.
+ *  Today every producer files against the BOM; when a review type lands that files
+ *  elsewhere it gains a discriminator here rather than in the row. */
+function openFindings(
+  id: ReviewKindId,
+  comments: { status: string; source: string; severity: CommentSeverity | null }[],
+): { count: number; worst: CommentSeverity } {
+  if (id !== "bom") return { count: 0, worst: "info" };
+  let count = 0;
+  let worst: CommentSeverity = "info";
+  for (const c of comments) {
+    if (c.status !== "open" || c.source === "human") continue;
+    count++;
+    const sev = c.severity ?? "info";
+    if (SEV_RANK[sev] > SEV_RANK[worst]) worst = sev;
+  }
+  return { count, worst };
 }
 
 export function RunReviewMenu() {
@@ -100,40 +116,44 @@ export function RunReviewMenu() {
         <div className="run-review-pop" role="menu">
           <div className="run-review-pop-hd">Run a review</div>
           {rows.map(({ kind, run, stale }) => {
-            const open = openCountFor(kind.id, comments);
+            const { count, worst } = openFindings(kind.id, comments);
             return (
               <button
                 key={kind.id}
                 role="menuitem"
                 className={`run-review-row ${kind.ready ? "" : "soon"}`}
                 disabled={!kind.ready}
-                title={kind.blurb}
+                // Unbuilt reviews carry no tooltip: describing what a row cannot do yet
+                // is an explanation nobody asked for.
+                title={kind.ready ? kind.blurb : undefined}
                 onClick={() => openSetup(kind.id)}
               >
                 <span className="run-review-name">{kind.label}</span>
                 {kind.tier === "premium" && (
                   <span className="badge-premium" title="Premium review" aria-label="Premium review">
-                    <IconPremium size={12} />
+                    <IconPremium size={13} />
                   </span>
                 )}
-                {!kind.ready && <span className="tag-soon">coming soon</span>}
                 <span className="run-review-meta">
                   {!kind.ready ? (
-                    ""
+                    // Right-hand column, with the other rows' status: "coming soon" IS
+                    // this row's status, and beside the name it left the column ragged.
+                    <span className="tag-soon">coming soon</span>
                   ) : !run ? (
                     "never run"
                   ) : (
                     <>
-                      {open > 0 && `${open} open · `}
-                      {`ran ${formatRelative(run.ts)}`}
-                      {stale && <span className="run-review-stale"> · stale</span>}
+                      {count > 0 && (
+                        <span className={`run-review-open sev-${worst}`}>{count} open</span>
+                      )}
+                      <span>{`ran ${formatRelative(run.ts)}`}</span>
+                      {stale && <span className="run-review-stale">stale</span>}
                     </>
                   )}
                 </span>
               </button>
             );
           })}
-          <div className="run-review-pop-foot">Each review opens its own setup</div>
         </div>
       )}
     </div>

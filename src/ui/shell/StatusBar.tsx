@@ -177,23 +177,29 @@ function CrunchStatus() {
   return null;
 }
 
-/** The way back when the comments panel is collapsed. It is only rendered in that
- *  state on purpose: with the panel open the count is already in its header, and a
- *  second copy would be one more near-constant in a bar we just emptied. */
+/** Open comments, beside the launcher. It sits in the bar in both states so the
+ *  count is next to the button that produces it — but it is only a control when the
+ *  panel is collapsed and there is somewhere to go; with the panel already open it
+ *  is a readout, not a button that does nothing. */
 function CommentsChip() {
   const fullscreen = useViewStore((s) => s.fullscreen);
   const setFullscreen = useViewStore((s) => s.setFullscreen);
   const comments = useReviewStore((s) => s.comments);
-  if (!fullscreen) return null;
   const open = comments.filter((c) => c.status === "open").length;
+  const label = (
+    <>
+      <IconComment size={12} />
+      {open} open comment{open === 1 ? "" : "s"}
+    </>
+  );
+  if (!fullscreen) return <span className="statusbar-chip">{label}</span>;
   return (
     <button
       className="statusbar-btn"
       title="Show the comments panel (F11)"
       onClick={() => setFullscreen(false)}
     >
-      <IconComment size={12} />
-      {open} comment{open === 1 ? "" : "s"}
+      {label}
     </button>
   );
 }

@@ -1035,6 +1035,16 @@ button {
   border-radius: var(--radius-1);
 }
 .statusbar-btn:hover { background: var(--bg-3); color: var(--fg-0); }
+/* Same shape as the button, without the affordance: the readout the chip becomes
+   when the comments panel is already open. */
+.statusbar-chip {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px var(--sp-2);
+  font-size: var(--fs-0);
+  color: var(--fg-2);
+}
 .statusbar-btn.viewing-old { color: var(--warn); }
 
 /* clickable revision history in the footer (item 21) */
@@ -2629,36 +2639,32 @@ button {
 .run-review-pop {
   position: absolute;
   right: 0;
-  bottom: calc(100% + 6px);
+  bottom: calc(100% + 8px);
   z-index: 80;
-  width: 320px;
+  width: 420px;
   background: var(--bg-2);
   border: 1px solid var(--border-1);
   border-radius: var(--radius-2);
   box-shadow: 0 -12px 40px rgba(0, 0, 0, 0.55);
   overflow: hidden;
 }
-.run-review-pop-hd,
-.run-review-pop-foot {
-  padding: var(--sp-1) var(--sp-2);
+.run-review-pop-hd {
+  padding: var(--sp-2) var(--sp-3);
   color: var(--fg-2);
   font-size: var(--fs-0);
-}
-.run-review-pop-hd {
   background: var(--bg-1);
   letter-spacing: 0.08em;
   text-transform: uppercase;
 }
-.run-review-pop-foot { border-top: 1px solid var(--border-0); }
 
 /* One line per review — scope lives in the review's own setup sheet, so this list
    stays readable as the catalogue grows and doubles as the coverage readout. */
 .run-review-row {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--sp-2);
   width: 100%;
-  padding: var(--sp-1) var(--sp-2);
+  padding: 9px var(--sp-3);
   border-top: 1px solid var(--border-0);
   font-size: var(--fs-1);
   text-align: left;
@@ -2668,11 +2674,26 @@ button {
 .run-review-row.soon .run-review-name { color: var(--fg-2); }
 .run-review-name { color: var(--fg-0); }
 .run-review-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
   margin-left: auto;
   color: var(--fg-2);
   font-size: var(--fs-0);
   white-space: nowrap;
 }
+/* The findings count carries the worst open severity as its colour: the number alone
+   says how much is outstanding, the colour says whether it can wait. */
+.run-review-open {
+  padding: 0 6px;
+  border-radius: 999px;
+  line-height: 1.6;
+  font-variant-numeric: tabular-nums;
+}
+.run-review-open.sev-critical { background: var(--err-dim); color: var(--err); }
+.run-review-open.sev-major { background: var(--warn-dim); color: var(--warn); }
+.run-review-open.sev-minor { background: var(--accent-dim); color: var(--accent); }
+.run-review-open.sev-info { background: var(--bg-3); color: var(--fg-1); }
 .run-review-stale { color: var(--warn); }
 
 /* The detailed review's progress, in the footer and on the BOM tab. A determinate bar
