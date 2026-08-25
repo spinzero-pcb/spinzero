@@ -109,6 +109,16 @@ export function IconInfo(p: IconProps) {
   );
 }
 
+/** Warning triangle: something ran and cannot be trusted */
+export function IconAlert(p: IconProps) {
+  return (
+    <Svg {...p}>
+      <path d="M8 2.4 14.4 13.2H1.6z" />
+      <path d="M8 6.6v3.1M8 11.4v.9" />
+    </Svg>
+  );
+}
+
 /** Settings gear */
 export function IconGear(p: IconProps) {
   return (

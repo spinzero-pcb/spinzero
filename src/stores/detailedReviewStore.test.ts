@@ -188,6 +188,43 @@ describe("detailedReviewStore", () => {
     expect(useDetailedReviewStore.getState().error).toContain("not reachable");
   });
 
+  it("calls an incomplete review a failure, however cheerfully the job completed", async () => {
+    // The regression this guards, from job 03ece41f: the judgment pass ruled on none
+    // of its 16 candidates, the service still reported the job "completed", and the
+    // toast — the one surface that always appears — read "Detailed review: 16
+    // findings", exactly what a healthy run says. The user paid for a review, got an
+    // unreviewed one, and the only hint was a grey chip on a tab they weren't on.
+    const doc = paidDoc();
+    doc.run_health = [
+      { stage: "judgment_pass", status: "failed", detail: "16 of 16 rule finding(s) went unreviewed" },
+    ];
+    fetchMock.mockImplementation((url: string) =>
+      String(url).endsWith("/findings")
+        ? Promise.resolve(new Response(JSON.stringify(doc), { status: 200 }))
+        : Promise.resolve(route(String(url))),
+    );
+
+    await useDetailedReviewStore.getState().start();
+
+    // The findings still land — losing a real defect to a failed reviewer is worse
+    // than shipping it unreviewed and saying so.
+    expect(ipcCalls.some((c) => c.cmd === "ingest_findings")).toBe(true);
+    const toast = useToastStore.getState().toasts.at(-1);
+    expect(toast?.kind).toBe("error");
+    expect(toast?.title).toBe("Detailed review incomplete");
+    expect(toast?.message).toContain("low confidence");
+    // …and it outlives the toast: the outcome pill reads its verdict from here.
+    expect(useBomCheckStore.getState().healthDismissed).toBe(false);
+    expect(useBomCheckStore.getState().doc?.run_health).toHaveLength(1);
+  });
+
+  it("says nothing about health when the review actually ran", async () => {
+    await useDetailedReviewStore.getState().start();
+    const toast = useToastStore.getState().toasts.at(-1);
+    expect(toast?.kind).not.toBe("error");
+    expect(toast?.title).toContain("1 finding");
+  });
+
   it("reports progress in plain steps, never a stage id", async () => {
     const seen: string[] = [];
     const unsub = useDetailedReviewStore.subscribe((s) => {

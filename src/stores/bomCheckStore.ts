@@ -29,6 +29,10 @@ interface BomCheckState {
   /** Review session the last run filed into, so the summary can jump to it. */
   sessionId: string | null;
   error: string | null;
+  /** Has the user acknowledged that the last run came back incomplete? Reset by every
+   *  run, because the next one's health is a fresh verdict — an acknowledgement of the
+   *  previous failure must never hide the next. */
+  healthDismissed: boolean;
   /** Depth the BOM review's setup sheet is set to. Remembered per project so a re-run
    *  is one click. (The end application, the sheet's other scope control, is NOT here:
    *  it lives in project.json — see `currentBomProfile`.) */
@@ -39,6 +43,9 @@ interface BomCheckState {
   hydrate: (projectDir: string | null) => Promise<void>;
   setDepth: (depth: BomDepth) => void;
   run: () => Promise<void>;
+  /** "I have read that the last review was incomplete." Acknowledgement only — the
+   *  findings it qualifies keep their own note, and the next run re-arms this. */
+  dismissHealth: () => void;
   clearForSession: (id: string) => void;
   clear: () => void;
 }
@@ -66,6 +73,7 @@ export const useBomCheckStore = create<BomCheckState>((set, get) => ({
   depth: DEFAULT_DEPTH,
   projectDir: null,
   sessionId: null,
+  healthDismissed: false,
 
   hydrate: async (projectDir) => {
     // Settings may not have been read yet on a startup that restores a project.
@@ -86,6 +94,7 @@ export const useBomCheckStore = create<BomCheckState>((set, get) => ({
       unmappedColumns: [],
       sessionId: null,
       error: null,
+      healthDismissed: false,
     });
   },
 
@@ -100,7 +109,7 @@ export const useBomCheckStore = create<BomCheckState>((set, get) => ({
     // Claim the run before the first await: the mapping gate below is asynchronous,
     // and without this a second click would sail past the guard while it is pending
     // and file the whole check twice.
-    set({ running: true, error: null });
+    set({ running: true, error: null, healthDismissed: false });
     // A review is only as good as the column mapping it read. If this project has
     // never had one approved, the dialog takes over and re-enters here once it has.
     const approved = await useBomMappingStore
@@ -154,11 +163,13 @@ export const useBomCheckStore = create<BomCheckState>((set, get) => ({
     }
   },
 
+  dismissHealth: () => set({ healthDismissed: true }),
+
   /** Drop the last run's summary when its session is deleted — the counts in the
    *  strip describe comments that no longer exist. */
   clearForSession: (id) => {
     if (get().sessionId === id) {
-      set({ doc: null, summary: null, unmappedColumns: [], sessionId: null, error: null });
+      set({ doc: null, summary: null, unmappedColumns: [], sessionId: null, error: null, healthDismissed: false });
     }
   },
 
@@ -170,6 +181,7 @@ export const useBomCheckStore = create<BomCheckState>((set, get) => ({
       unmappedColumns: [],
       sessionId: null,
       error: null,
+      healthDismissed: false,
       projectDir: null,
       depth: DEFAULT_DEPTH,
     }),

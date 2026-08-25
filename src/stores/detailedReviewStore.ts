@@ -7,6 +7,7 @@ import {
   DEFAULT_BASE_URL,
   fetchFindings,
   health,
+  runHealthSummary,
   streamProgress,
   submitReview,
   type ReviewBundle,
@@ -231,6 +232,9 @@ export const useDetailedReviewStore = create<DetailedReviewState>((set, get) => 
         },
         sessionId: outcome.session_id,
         error: null,
+        // A fresh verdict on this run's health, whatever the user acknowledged about
+        // the last one.
+        healthDismissed: false,
       });
       await useReviewStore.getState().load();
       // Land on the run's own session, exactly as the free check does — the findings
@@ -242,16 +246,25 @@ export const useDetailedReviewStore = create<DetailedReviewState>((set, get) => 
         .getState()
         .record("bom")
         .catch(() => {});
+      // A stage that did not run makes this an incomplete result, and the toast is the
+      // one surface that always appears — so it is the one that must not read like a
+      // clean run. The job says "completed" in exactly this case (the service finished;
+      // the review did not), which is why this asks the document and not the job.
+      const health = runHealthSummary(doc);
       useToastStore.getState().push({
-        kind: doc.findings.length ? "info" : "success",
-        title: `Detailed review: ${doc.findings.length || "no"} finding${doc.findings.length === 1 ? "" : "s"}`,
-        message: [
-          outcome.filed ? `${outcome.filed} new comment${outcome.filed === 1 ? "" : "s"}` : "",
-          outcome.unchanged ? `${outcome.unchanged} refined` : "",
-          outcome.auto_resolved ? `${outcome.auto_resolved} auto-resolved` : "",
-        ]
-          .filter(Boolean)
-          .join(" · "),
+        kind: health ? "error" : doc.findings.length ? "info" : "success",
+        title: health
+          ? "Detailed review incomplete"
+          : `Detailed review: ${doc.findings.length || "no"} finding${doc.findings.length === 1 ? "" : "s"}`,
+        message: health
+          ? `${health.text}. ${doc.findings.length} finding${doc.findings.length === 1 ? "" : "s"} filed anyway, at low confidence — treat them as unchecked.`
+          : [
+              outcome.filed ? `${outcome.filed} new comment${outcome.filed === 1 ? "" : "s"}` : "",
+              outcome.unchanged ? `${outcome.unchanged} refined` : "",
+              outcome.auto_resolved ? `${outcome.auto_resolved} auto-resolved` : "",
+            ]
+              .filter(Boolean)
+              .join(" · "),
       });
       // The result is safely in the project folder; tell the service to delete its
       // copy (plan §6.1). Fire-and-forget: a failed ack costs a TTL, not the result.

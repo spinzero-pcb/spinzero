@@ -6,10 +6,10 @@ import { useRunLauncherStore } from "../stores/runLauncherStore";
 import { useReviewStore } from "../stores/reviewStore";
 import { severityCounts } from "../lib/findings";
 import { isProjectClass, PROJECT_CLASSES } from "../lib/projectClass";
-import { runHealthSummary } from "../lib/reviewService";
 import type { FindingSeverity } from "../lib/findings";
 import type { CommentSeverity } from "../lib/types";
 import { IconChecklist } from "./icons";
+import { ReviewOutcome } from "./review/ReviewOutcome";
 import { ReviewProgress } from "./review/ReviewProgress";
 
 // BOM check strip — the free deterministic review, run from the BOM tab.
@@ -88,10 +88,6 @@ export function BomCheckBar() {
   // Findings-severity counts folded onto the review vocabulary, so "Low" and
   // "Question" land in one "Info" chip instead of two chips filtering to the same
   // rail. `severityCounts` walks SEVERITY_ORDER, so Map order stays worst-first.
-  // Stages that did not fully run in the review that produced `doc` (paid tier only
-  // — the free deterministic check has nothing to degrade). null on a clean run.
-  const health = runHealthSummary(doc);
-
   const counts = (() => {
     if (!doc) return [] as { role: CommentSeverity; n: number }[];
     const byRole = new Map<CommentSeverity, number>();
@@ -172,16 +168,13 @@ export function BomCheckBar() {
           {unmapped.length > 3 ? ` +${unmapped.length - 3}` : ""}
         </span>
       )}
-      {/* A review whose validation or judgment stage died (provider rate limit, cost
-          cap, timeout) still returns findings, and the job itself reports "completed"
-          — so without this the user reads an incomplete review as a full one. The
-          reason travels in the document's `run_health`; the tooltip carries every
-          stage verbatim. */}
-      {health && (
-        <span className="bom-check-warn" title={`This review is incomplete.\n\n${health.detail}`}>
-          Incomplete review: {health.text}
-        </span>
-      )}
+      {/* A review whose judgment stage died (provider rate limit, cost cap, timeout,
+          a model that ruled on nothing) still returns findings, and the job itself
+          reports "completed" — so without this the user reads an incomplete review as
+          a full one. This used to be a grey chip here and nowhere else, which meant
+          the failure was invisible from every other tab; `ReviewOutcome` is the same
+          verdict, rendered as an alert, and it is in the footer too. */}
+      <ReviewOutcome />
       {error && <span className="bom-check-warn">Check failed: {error}</span>}
     </div>
   );

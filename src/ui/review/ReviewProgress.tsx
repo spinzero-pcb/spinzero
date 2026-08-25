@@ -3,8 +3,14 @@ import { useDetailedReviewStore } from "../../stores/detailedReviewStore";
 // The detailed review's progress, in the two places it has to be visible: the BOM tab
 // it was launched from, and the footer, which is on screen in every view.
 //
-// It reports the same three plain steps the store keeps — never a stage id, never the
-// pipeline's own words.
+// **A bar and a number, nothing else.** It used to print the step it was on beside the
+// bar ("Detailed review · Reviewing against datasheets · 3 of 16 checks · 2 findings"),
+// which is a sentence that changes width every time it changes, in a footer where
+// everything else holds still. The words also said less than they looked like they
+// said: a step name is the same for eight minutes, so the line read as frozen even
+// while the bar moved. A percentage is the one thing a reader wants from a progress
+// bar — is this halfway or nearly done — and it is three characters wide. The words
+// are still there for anyone who wants them, in the tooltip.
 //
 // The bar used to be `step / 3`, which meant it jumped to 66% and then sat perfectly
 // still for the eight to ten minutes the review itself takes. A frozen bar does not
@@ -24,7 +30,7 @@ const SPAN: Record<1 | 2 | 3, [number, number]> = {
   3: [88, 100],
 };
 
-export function ReviewProgress({ compact = false }: { compact?: boolean }) {
+export function ReviewProgress() {
   const progress = useDetailedReviewStore((s) => s.progress);
   const step = useDetailedReviewStore((s) => s.step);
   const found = useDetailedReviewStore((s) => s.liveFindings);
@@ -39,24 +45,32 @@ export function ReviewProgress({ compact = false }: { compact?: boolean }) {
       ? Math.min(1, review.reviewed / review.candidates)
       : 0;
   const pct = step ? from + (to - from) * within : 4;
+  // Rounded once, for the bar and the number together: a fill at 47.4% under a label
+  // reading "47%" is the kind of mismatch someone eventually files a bug about.
+  const shown = Math.round(pct);
 
-  // A second line the reader can act on: how much of the review is done, and that
-  // datasheets are being fetched (which is why it is slow, and is not a hang).
+  // Everything the line used to print, now in the tooltip: which step, how far into
+  // it, and that datasheets are being fetched (which is why it is slow, and is not a
+  // hang). Nobody needs it at a glance; the people who want it know to hover.
   const detail = step === 2 && review ? stageDetail(review) : null;
 
   return (
     <span
-      className={`review-progress ${compact ? "compact" : ""}`}
-      title={`Detailed BOM review — ${label}${detail ? ` · ${detail}` : ""}`}
+      className="review-progress"
+      title={
+        `Detailed BOM review — ${label}${detail ? ` · ${detail}` : ""}` +
+        `${found > 0 ? ` · ${found} finding${found === 1 ? "" : "s"} so far` : ""}`
+      }
+      role="progressbar"
+      aria-valuenow={shown}
+      aria-valuemin={0}
+      aria-valuemax={100}
+      aria-label="Detailed BOM review progress"
     >
       <span className="review-progress-bar">
-        <span className="review-progress-fill" style={{ width: `${pct}%` }} />
+        <span className="review-progress-fill" style={{ width: `${shown}%` }} />
       </span>
-      <span className="review-progress-text">
-        {compact ? label : `Detailed review · ${label}`}
-        {detail && ` · ${detail}`}
-        {found > 0 && ` · ${found} finding${found === 1 ? "" : "s"}`}
-      </span>
+      <span className="review-progress-pct">{shown}%</span>
     </span>
   );
 }

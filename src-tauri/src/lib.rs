@@ -1214,6 +1214,13 @@ fn ingest_findings(
             h.detail
         );
     }
+    // Counted as well as logged: "how often does a paid review come back incomplete"
+    // is a question about the service, and a log line only answers it for the one user
+    // who thought to send their log. A count, never the reason — the detail quotes a
+    // provider error and names parts, and neither leaves the machine.
+    if !doc.run_health.is_empty() {
+        telemetry::bump("detailed_reviews_incomplete");
+    }
     bomcheck::ingest(
         &handle.project_dir,
         &project::author_slug(),

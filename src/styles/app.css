@@ -2691,19 +2691,19 @@ button {
 .run-review-stale { color: var(--warn); }
 
 /* The detailed review's progress, in the footer and on the BOM tab. A determinate bar
-   over three named steps: enough to show it is moving, and nothing it cannot back up. */
+   and a percentage: enough to show it is moving, and nothing it cannot back up. The
+   step names live in the tooltip — see the note in ReviewProgress.tsx. */
 .review-progress {
   display: inline-flex;
   align-items: center;
   gap: var(--sp-2);
   flex: none;
-  max-width: 26rem;
   color: var(--fg-1);
   font-size: var(--fs-0);
 }
 .review-progress-bar {
   flex: none;
-  width: 64px;
+  width: 96px;
   height: 4px;
   border-radius: 999px;
   background: var(--bg-3);
@@ -2716,10 +2716,87 @@ button {
   background: var(--accent);
   transition: width 0.4s ease;
 }
-.review-progress-text {
-  overflow: hidden;
-  text-overflow: ellipsis;
+/* --- last review's failure -----------------------------------------------------
+   Deliberately not styled like the caveats beside it. An incomplete review is not a
+   footnote on a result, it is a reason to distrust the result, so it gets a filled
+   alert pill and stays until acknowledged. See ReviewOutcome.tsx for the why. */
+.review-outcome {
+  position: relative;
+  display: inline-flex;
+  flex: none;
+}
+.review-outcome-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  padding: 1px var(--sp-2);
+  border: 1px solid currentcolor;
+  border-radius: 999px;
+  font: inherit;
+  font-size: var(--fs-0);
   white-space: nowrap;
+  cursor: pointer;
+}
+.review-outcome-pill.failed { background: var(--err-dim); color: var(--err); }
+.review-outcome-pill.incomplete { background: var(--warn-dim); color: var(--warn); }
+.review-outcome-pill:hover,
+.review-outcome-pill.on { filter: brightness(1.15); }
+
+.review-outcome-pop {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 8px);
+  z-index: 80;
+  width: 380px;
+  padding: var(--sp-3);
+  background: var(--bg-2);
+  border: 1px solid var(--border-1);
+  border-radius: var(--radius-2);
+  box-shadow: 0 -12px 40px rgba(0, 0, 0, 0.55);
+}
+.review-outcome-hd {
+  margin-bottom: var(--sp-2);
+  color: var(--warn);
+  font-weight: 600;
+}
+.review-outcome-what {
+  margin: 0 0 var(--sp-2);
+  color: var(--fg-1);
+  line-height: 1.45;
+}
+/* The engine's own words, one stage per line. Monospaced and scrollable because it
+   quotes a provider error verbatim and those run long. */
+.review-outcome-detail {
+  max-height: 9rem;
+  /* Vertical only: the text wraps (`overflow-wrap: anywhere`), so a horizontal track
+     here is a scrollbar for nothing. */
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: var(--sp-2);
+  background: var(--bg-1);
+  border: 1px solid var(--border-0);
+  border-radius: var(--radius-1);
+  color: var(--fg-2);
+  font-family: var(--font-mono);
+  font-size: var(--fs-0);
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+.review-outcome-acts {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--sp-2);
+  margin-top: var(--sp-3);
+}
+
+/* Tabular figures and a reserved width: the number changes every few seconds, and a
+   proportional "11%" → "100%" nudges the footer's whole right side as it goes. */
+.review-progress-pct {
+  flex: none;
+  min-width: 2.6em;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  color: var(--fg-2);
 }
 
 .tag-premium,

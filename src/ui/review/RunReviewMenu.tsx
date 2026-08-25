@@ -8,6 +8,7 @@ import { formatRelative } from "../../lib/time";
 import type { CommentSeverity } from "../../lib/types";
 import type { ReviewKindId } from "../../lib/reviewCatalog";
 import { IconSparkle } from "../icons";
+import { ReviewOutcome } from "./ReviewOutcome";
 import { ReviewProgress } from "./ReviewProgress";
 
 // "Run a review" — the single launcher, in the status bar.
@@ -103,6 +104,10 @@ export function RunReviewMenu() {
       {/* The detailed run takes minutes, so it gets the bar; the instant check only ever
           needs to say that it is going. */}
       {detailedBusy && <ReviewProgress />}
+      {/* The footer is on screen in every view, which is exactly why the last run's
+          failure belongs here: it renders nothing on a healthy run, and does not go
+          away by itself on a bad one. */}
+      <ReviewOutcome />
       {bomRunning && (
         <span className="run-review-active">
           <span className="status-dot running" />
