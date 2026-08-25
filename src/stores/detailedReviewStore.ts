@@ -51,10 +51,19 @@ import { useToastStore } from "./toastStore";
 const STEP_OF_STAGE: Record<string, 1 | 2 | 3> = {
   validate_bundle: 1,
   deterministic_rules: 2,
-  fp_validation: 2,
   judgment_pass: 2,
   assemble: 3,
 };
+
+/** The one stage whose finding count means what the user reads it to mean.
+ *
+ *  Every stage reports a number and they count different things. The rule pack
+ *  reports its RAW hits — 16 on a board that shipped 7 findings, because most of a
+ *  rule pack's output is filtered out downstream. Showing that made the strip read
+ *  "16 so far" for four solid minutes and then contradict itself at the end. Only
+ *  the judgment pass counts findings that are actually going into the report, so
+ *  only the judgment pass may move this number. */
+const COUNTS_REPORTABLE_FINDINGS = "judgment_pass";
 const STEP_LABEL: Record<1 | 2 | 3, string> = {
   1: "Preparing your BOM",
   2: "Reviewing against datasheets",
@@ -62,6 +71,17 @@ const STEP_LABEL: Record<1 | 2 | 3, string> = {
 };
 
 export type ReviewPhase = "idle" | "preparing" | "submitting" | "running" | "ingesting" | "done";
+
+/** The judgment pass, mid-flight. Counts only — the event stream carries no BOM
+ *  content, so there is nothing here to leak and nothing to show but numbers. */
+export interface ReviewStageProgress {
+  /** Rule-pack checks ruled on so far, and how many there are. The only honest
+   *  fraction the run has: turns are a budget, finishing the checks is the job. */
+  reviewed: number;
+  candidates: number;
+  /** Datasheets opened so far. This is where most of the wall clock goes. */
+  datasheetsRead: number;
+}
 
 interface DetailedReviewState {
   phase: ReviewPhase;
@@ -72,8 +92,13 @@ interface DetailedReviewState {
   progress: string;
   /** 1..3 while a run is in flight — the same three steps `progress` names, for a bar. */
   step: 1 | 2 | 3 | null;
-  /** Findings emitted so far, from stage_progress — a ticking count while it runs. */
+  /** Findings that will be REPORTED, so far — a ticking count while it runs. Sourced
+   *  from the judgment pass alone; see [[COUNTS_REPORTABLE_FINDINGS]]. */
   liveFindings: number;
+  /** How far through the review stage itself we are. The three steps alone left the
+   *  bar frozen for the eight-to-ten minutes the judgment pass takes, which reads as
+   *  a hang; this is what moves inside step 2. Null until the stage reports. */
+  reviewProgress: ReviewStageProgress | null;
   doc: FindingsDoc | null;
   error: string | null;
   /** Service reachability from the last check; null = not checked yet. */
@@ -111,6 +136,7 @@ export const useDetailedReviewStore = create<DetailedReviewState>((set, get) => 
   progress: "",
   step: null,
   liveFindings: 0,
+  reviewProgress: null,
   doc: null,
   error: null,
   serviceOk: null,
@@ -252,6 +278,7 @@ export const useDetailedReviewStore = create<DetailedReviewState>((set, get) => 
       progress: "",
       step: null,
       liveFindings: 0,
+      reviewProgress: null,
       doc: null,
       error: null,
     }),
@@ -261,18 +288,33 @@ type Setter = (partial: Partial<DetailedReviewState>) => void;
 
 function onProgress(set: Setter, get: () => DetailedReviewState, event: ReviewProgress): void {
   // The stage's own message is deliberately dropped: it narrates the pipeline, and a
-  // customer reading "fp_validation: 12/40 kept" learns nothing they can act on. What
-  // travels is the step it belongs to and how many findings exist so far.
+  // customer reading "judgment_pass: shard 2 of 3" learns nothing they can act on.
+  // What travels is the step it belongs to and how many findings exist so far.
   switch (event.type) {
     case "stage_started":
     case "stage_done":
     case "stage_progress": {
       const step = STEP_OF_STAGE[event.stage ?? ""] ?? get().step ?? 1;
-      const findings = (event.data as { findings?: number } | undefined)?.findings;
+      const data = event.data as
+        | { findings?: number; reviewed?: number; candidates?: number; datasheets_read?: number }
+        | undefined;
+      const fromJudgment = event.stage === COUNTS_REPORTABLE_FINDINGS;
+      const findings = fromJudgment ? data?.findings : undefined;
+      // Only the judgment pass knows how much of the review is done, and only while
+      // it is running: a `stage_done` from a later stage must not reset the bar.
+      const reviewProgress =
+        fromJudgment && typeof data?.candidates === "number"
+          ? {
+              reviewed: data.reviewed ?? 0,
+              candidates: data.candidates,
+              datasheetsRead: data.datasheets_read ?? 0,
+            }
+          : undefined;
       set({
         step,
         progress: STEP_LABEL[step],
         ...(typeof findings === "number" ? { liveFindings: findings } : {}),
+        ...(reviewProgress ? { reviewProgress } : {}),
       });
       break;
     }

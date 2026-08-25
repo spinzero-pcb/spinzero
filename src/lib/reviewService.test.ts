@@ -82,8 +82,8 @@ describe("reviewService client", () => {
 
   it("reassembles SSE frames split across chunks and stops at the terminal event", async () => {
     const frames = [
-      'event: stage_started\ndata: {"type":"stage_started","ts":"t","stage":"fp_val',
-      'idation"}\n\nevent: stage_progress\ndata: {"type":"stage_progress","ts":"t","stage":"judgment_pass","data":{"findings":2}}\n\n',
+      'event: stage_started\ndata: {"type":"stage_started","ts":"t","stage":"determ',
+      'inistic_rules"}\n\nevent: stage_progress\ndata: {"type":"stage_progress","ts":"t","stage":"judgment_pass","data":{"findings":2}}\n\n',
       ': ping\n\n',
       'event: completed\ndata: {"type":"completed","ts":"t","data":{"findings":7}}\n\n',
       'event: log\ndata: {"type":"log","ts":"t","message":"after the end"}\n\n',
@@ -93,7 +93,7 @@ describe("reviewService client", () => {
     const terminal = await streamProgress(config, "j1", (e) => seen.push(e));
     expect(terminal.type).toBe("completed");
     expect(seen.map((e) => e.type)).toEqual(["stage_started", "stage_progress", "completed"]);
-    expect(seen[0]?.stage).toBe("fp_validation");
+    expect(seen[0]?.stage).toBe("deterministic_rules");
     expect((seen[1]?.data as { findings: number }).findings).toBe(2);
   });
 
@@ -111,18 +111,18 @@ describe("reviewService client", () => {
   });
 
   it("summarises an incomplete review, and says nothing about a clean one", () => {
-    // The regression this guards: a rate-limited validation stage came back as
-    // findings at Low confidence with no visible reason — the run looked complete.
+    // The regression this guards: a rate-limited review came back as findings at
+    // Low confidence with no visible reason — the run looked complete.
     const doc = {
       run_health: [
-        { stage: "fp_validation", status: "failed" as const, detail: "429 Too Many Requests — rate limited" },
-        { stage: "judgment_pass", status: "degraded" as const, detail: "ended early (cost_cap)" },
+        { stage: "judgment_pass", status: "failed" as const, detail: "429 Too Many Requests — rate limited" },
+        { stage: "deterministic_rules", status: "degraded" as const, detail: "ended early (cost_cap)" },
       ],
     } as unknown as FindingsDoc;
     const summary = runHealthSummary(doc);
-    expect(summary?.text).toBe("Validating rule findings failed (+1 more)");
+    expect(summary?.text).toBe("Reviewing against datasheets failed (+1 more)");
     expect(summary?.detail).toContain("429 Too Many Requests");
-    expect(summary?.detail).toContain("Judgment pass degraded");
+    expect(summary?.detail).toContain("Running the rule pack degraded");
 
     expect(runHealthSummary(null)).toBeNull();
     expect(runHealthSummary({ run_health: [] } as unknown as FindingsDoc)).toBeNull();
@@ -130,7 +130,8 @@ describe("reviewService client", () => {
   });
 
   it("labels stages in human words", () => {
-    expect(stageLabel("judgment_pass")).toBe("Judgment pass");
+    // Stage labels are customer-facing: "judgment pass" is our word for it, not theirs.
+    expect(stageLabel("judgment_pass")).toBe("Reviewing against datasheets");
     // An unknown stage still renders something rather than blanking the strip.
     expect(stageLabel("future_stage")).toBe("future_stage");
     expect(stageLabel(undefined)).toBe("");

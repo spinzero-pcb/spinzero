@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useBomCheckStore } from "../../stores/bomCheckStore";
 import { useBomMappingStore } from "../../stores/bomMappingStore";
 import { DEFAULT_SERVICE_URL, isRunning, useDetailedReviewStore } from "../../stores/detailedReviewStore";
@@ -86,11 +86,26 @@ export function BomReviewSetup() {
 
   // A detailed run that got past its readiness checks belongs to the footer and the
   // BOM tab, not to a dialog sitting on top of the board — so the sheet steps aside
-  // the moment the job is real. A failure keeps it open, with the error attached.
-  // `preparing` is excluded because that IS the readiness checks, and a finished run
-  // (`done`) because the sheet must still open afterwards to run a second one.
+  // the moment the job THIS SHEET started becomes real. A failure keeps it open,
+  // with the error attached. `preparing` is excluded because that IS the readiness
+  // checks, and a finished run (`done`) because the sheet must still open afterwards
+  // to run a second one.
+  //
+  // `startedHere` is what makes this a transition rather than a state. Without it the
+  // effect fired on every render while any detailed run was in flight, so opening BOM
+  // Review from the launcher during a run slammed the sheet shut before it painted —
+  // the review became unreachable for the several minutes it takes to run, which is
+  // exactly when someone wants to look at what it is reviewing.
+  const startedHere = useRef(false);
   useEffect(() => {
-    if (open && isRunning(detailedPhase) && detailedPhase !== "preparing") closeSetup();
+    if (!open) {
+      startedHere.current = false;
+      return;
+    }
+    if (startedHere.current && isRunning(detailedPhase) && detailedPhase !== "preparing") {
+      startedHere.current = false;
+      closeSetup();
+    }
   }, [open, detailedPhase, closeSetup]);
 
   // A verdict from a previous press is not a verdict on this one.
@@ -110,8 +125,10 @@ export function BomReviewSetup() {
 
   function start() {
     clearError();
-    if (depth === "detailed") void startDetailed();
-    else {
+    if (depth === "detailed") {
+      startedHere.current = true;
+      void startDetailed();
+    } else {
       closeSetup();
       void run();
     }
@@ -223,14 +240,25 @@ export function BomReviewSetup() {
           {depth === "detailed" && detailedError && (
             <p className="wizard-hint setup-error">Couldn’t start: {detailedError}</p>
           )}
+          {/* The sheet is reachable while a review runs — you can read the mapping and
+              the depth it is running at. It just cannot start a second one, and saying
+              so beats a disabled button with no explanation. */}
+          {detailedBusy && (
+            <p className="wizard-hint">
+              A detailed review is running. Its progress is in the status bar; you can start
+              another when it finishes.
+            </p>
+          )}
           {depth === "detailed" && !service?.base_url && <ServiceFields />}
 
           <div className="wizard-actions">
             <button className="btn-ghost" onClick={closeSetup}>
               Cancel
             </button>
+            {/* Two different disabled states, and conflating them was a small lie: a
+                run someone else already started is not this button "starting". */}
             <button className="btn-primary" disabled={busy} onClick={start}>
-              {busy ? "Starting…" : "Run Review"}
+              {detailedBusy ? "Review running…" : running ? "Starting…" : "Run Review"}
             </button>
           </div>
         </div>

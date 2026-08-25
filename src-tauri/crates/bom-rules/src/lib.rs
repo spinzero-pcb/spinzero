@@ -244,6 +244,10 @@ pub fn run(items: &[BomItem], profile: &str, mapping: &load::MappingReport) -> F
     }
     let populated: Vec<&BomItem> = items.iter().filter(|i| !i.dnp).collect();
     let all: Vec<&BomItem> = items.iter().collect();
+    // Which logical fields the header actually carries. Rules ask this instead of
+    // asking the rows, so "no REACH column" and "the REACH column is empty" stop
+    // being the same finding — see `Ctx::has_column`.
+    let mapped_fields: std::collections::BTreeSet<String> = mapping.fields.keys().cloned().collect();
 
     let mut raws: Vec<(&'static str, &'static str, Raw)> = Vec::new();
     for rule in rules::all_rules() {
@@ -267,6 +271,7 @@ pub fn run(items: &[BomItem], profile: &str, mapping: &load::MappingReport) -> F
         let ctx = model::Ctx {
             items: if rule.scans_dnp() { all.clone() } else { populated.clone() },
             all_items: items,
+            mapped_fields: &mapped_fields,
             severity,
             params,
         };
@@ -290,6 +295,8 @@ pub fn run(items: &[BomItem], profile: &str, mapping: &load::MappingReport) -> F
             )),
         }
     }
+
+    let mut raws = fold_dnp_only(raws, items);
 
     // Severity-sorted, then stable by rule and anchor so ids and ordering don't
     // shuffle between runs on an unchanged BOM.
@@ -341,6 +348,114 @@ pub fn run(items: &[BomItem], profile: &str, mapping: &load::MappingReport) -> F
     }
 }
 
+/// The rule id the folded do-not-populate note is filed under. Not a rule — no
+/// `Rule` impl produces it — but findings carry a `rule_id` and the app groups by
+/// it, so the fold needs one of its own rather than borrowing a real rule's.
+pub const DNP_FOLD_RULE_ID: &str = "bom.dnp_lines";
+
+/// Collapse every finding that lands ONLY on do-not-populate lines into one
+/// informational note.
+///
+/// A DNP line is not built. Its metadata gaps, its odd values and its leftover
+/// sourcing data are therefore not defects — but they are not nothing either: a
+/// line marked DNP that still carries a part number is usually a build variant, and
+/// an engineer wants to confirm that intent *once*, not read six separate findings
+/// about it. Six rows of noise is how a reader learns to skim a report, and the
+/// things worth reading are in the same list.
+///
+/// The test is deliberately strict: EVERY designator the finding names must be a
+/// DNP line. A contradiction that spans a populated part and a DNP one — the same
+/// MPN on two footprints, one of each — is a real defect about the populated part
+/// and survives untouched.
+fn fold_dnp_only(
+    raws: Vec<(&'static str, &'static str, Raw)>,
+    items: &[BomItem],
+) -> Vec<(&'static str, &'static str, Raw)> {
+    let mut dnp: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut known: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for item in items {
+        for r in &item.refs {
+            let key = r.trim().to_ascii_uppercase();
+            if key.is_empty() {
+                continue;
+            }
+            if item.dnp {
+                dnp.insert(key.clone());
+            }
+            known.insert(key);
+        }
+    }
+    if dnp.is_empty() {
+        return raws;
+    }
+
+    let anchored_only_on_dnp = |raw: &Raw| -> bool {
+        // A document-level finding ("this BOM has no RoHS column") anchors to nothing
+        // and is about the whole BOM, DNP lines included. It is not a DNP note.
+        if raw.refdes.is_empty() {
+            return false;
+        }
+        raw.refdes.iter().all(|r| {
+            let key = r.trim().to_ascii_uppercase();
+            // An unknown designator is not evidence of DNP; treat it as populated so a
+            // stale reference can never demote a real finding to an informational one.
+            known.contains(&key) && dnp.contains(&key)
+        })
+    };
+
+    let (folded, kept): (Vec<_>, Vec<_>) =
+        raws.into_iter().partition(|(_, _, raw)| anchored_only_on_dnp(raw));
+    if folded.is_empty() {
+        return kept;
+    }
+
+    let mut refdes: Vec<String> = folded.iter().flat_map(|(_, _, r)| r.refdes.clone()).collect();
+    refdes.sort();
+    refdes.dedup();
+
+    // Each folded finding keeps its own sentence: the point is to spend ONE entry in
+    // the report on DNP lines, not to throw away what the rules noticed.
+    let mut lines: Vec<String> = folded
+        .iter()
+        .map(|(rule_id, _, raw)| {
+            let refs = if raw.refdes.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", raw.refdes.join(", "))
+            };
+            format!("  \u{2022} {}{} [{}]", raw.title, refs, rule_id)
+        })
+        .collect();
+    lines.sort();
+    lines.dedup();
+
+    let mut note = Raw::new(
+        Severity::Low,
+        format!(
+            "{} note{} on do-not-populate lines",
+            lines.len(),
+            if lines.len() == 1 { "" } else { "s" }
+        ),
+    )
+    .detail(format!(
+        "These lines are marked DNP, so nothing here is built and none of it is a defect. \
+         Collected into one note because a DNP line carrying a part number is normally a \
+         build variant, and that intent is worth confirming once rather than row by row.\n\n{}",
+        lines.join("\n")
+    ))
+    .fix(
+        "Confirm these are intentional build variants. If a line is truly unused, clear its \
+         sourcing fields; if it is a variant, nothing needs to change."
+            .to_string(),
+    )
+    .key("dnp_lines".to_string());
+    note.refdes = refdes;
+
+    let mut out = kept;
+    out.push((DNP_FOLD_RULE_ID, rules::SECTION_CONTRADICTIONS, note));
+    out
+}
+
 /// The high-level data-quality summary that heads a review: four questions a
 /// procurement engineer asks of any BOM, answered OK or GAP.
 fn audit(items: &[BomItem], findings: &[Finding], mapping: &load::MappingReport) -> Vec<AuditEntry> {
@@ -353,6 +468,11 @@ fn audit(items: &[BomItem], findings: &[Finding], mapping: &load::MappingReport)
     let refdes_bad = fired("bom.duplicate_refdes") || fired("bom.unannotated_refdes");
     let lifecycle_tracked = items.iter().any(|i| i.filled("lifecycle"));
     let rohs_tracked = items.iter().any(|i| i.filled("rohs"));
+    // A column in the header that nobody filled is a different audit note from no
+    // column at all — the same distinction the rules draw. See `Ctx::has_column`.
+    let has_col = |field: &str| mapping.fields.contains_key(field);
+    let lifecycle_col = lifecycle_tracked || has_col("lifecycle");
+    let rohs_col = rohs_tracked || has_col("rohs");
 
     let mut out = vec![
         AuditEntry {
@@ -378,6 +498,10 @@ fn audit(items: &[BomItem], findings: &[Finding], mapping: &load::MappingReport)
             result: if lifecycle_tracked { "OK".into() } else { "GAP".into() },
             note: if lifecycle_tracked {
                 "Lifecycle column present.".into()
+            } else if lifecycle_col {
+                "Lifecycle column present but empty on every line; status could not be \
+                 confirmed for any part."
+                    .into()
             } else {
                 "No lifecycle column; status could not be confirmed for any part.".into()
             },
@@ -387,6 +511,8 @@ fn audit(items: &[BomItem], findings: &[Finding], mapping: &load::MappingReport)
             result: if rohs_tracked { "OK".into() } else { "GAP".into() },
             note: if rohs_tracked {
                 "RoHS column present.".into()
+            } else if rohs_col {
+                "RoHS column present but empty on every line.".into()
             } else {
                 "No RoHS column in the BOM.".into()
             },
@@ -432,6 +558,141 @@ mod tests {
         assert!(doc.findings.is_empty(), "unexpected: {:?}", doc.findings);
         assert!(doc.bom_audit.iter().all(|a| a.result == "OK"));
         assert_eq!(doc.stats.item_count, 3);
+    }
+
+    #[test]
+    fn a_column_that_exists_but_is_empty_is_not_reported_as_a_missing_column() {
+        // The real MC-02-CONTROL shape: the header carries RoHS, REACH and Lifecycle
+        // and not one row fills them. Telling this engineer to "add a REACH column"
+        // sends them looking for something already in their own header, and the fix
+        // they actually need ("populate the one you have") never gets said.
+        let csv = "Reference,Value,Footprint,Quantity,Manufacturer,MPN,RoHS,REACH,Lifecycle\n\
+                   R1,10k,R_0402_1005Metric,1,Yageo,RC0402FR-0710KL,,,\n\
+                   R2,10k,R_0402_1005Metric,1,Yageo,RC0402FR-0710KL,,,\n\
+                   C1,100nF,C_0402_1005Metric,1,Murata,GRM155R61A104KA01D,,,\n";
+        let doc = doc_for(csv, "default");
+
+        for f in &doc.findings {
+            let text = format!("{} {}", f.title, f.detail);
+            assert!(
+                !text.contains("has no RoHS column")
+                    && !text.contains("has no REACH")
+                    && !text.contains("has no lifecycle column")
+                    && !text.contains("No lifecycle column"),
+                "a present-but-empty column was reported as missing: {} / {}",
+                f.title,
+                text
+            );
+        }
+        for entry in &doc.bom_audit {
+            assert!(
+                !entry.note.starts_with("No RoHS column"),
+                "audit still claims the column is absent: {entry:?}"
+            );
+        }
+
+        // And the gap is still reported, just as the right gap.
+        assert!(
+            doc.findings.iter().any(|f| f.title.contains("empty on every line")),
+            "the empty columns produced no finding at all: {:?}",
+            doc.findings.iter().map(|f| &f.title).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn a_column_the_bom_genuinely_lacks_is_still_reported_as_missing() {
+        // The other half: no compliance columns in the header at all. This wording is
+        // correct here and must survive the fix above.
+        let csv = "Reference,Value,Footprint,Quantity,Manufacturer,MPN\n\
+                   R1,10k,R_0402_1005Metric,1,Yageo,RC0402FR-0710KL\n\
+                   C1,100nF,C_0402_1005Metric,1,Murata,GRM155R61A104KA01D\n";
+        let doc = doc_for(csv, "default");
+        assert!(
+            doc.findings
+                .iter()
+                .any(|f| f.title.contains("No RoHS") || f.title.contains("Lifecycle status not verifiable")),
+            "a BOM with no compliance columns reported no missing-column finding: {:?}",
+            doc.findings.iter().map(|f| &f.title).collect::<Vec<_>>()
+        );
+        assert!(
+            !doc.findings.iter().any(|f| f.title.contains("empty on every line")),
+            "a column that does not exist was reported as an empty column"
+        );
+    }
+
+    #[test]
+    fn findings_that_land_only_on_dnp_lines_collapse_into_one_info_note() {
+        // Two DNP lines, each carrying sourcing data and a bad value. Before the fold
+        // that was four separate findings about parts nobody is building — enough
+        // noise that a reader learns to skim, and the real defects are in the same
+        // list. R1 is populated and broken in the same way, and must survive on its
+        // own at its own severity.
+        let csv = "Reference,Value,Footprint,Quantity,Manufacturer,MPN,DNP\n\
+                   R1,10k,R_0402_1005Metric,1,Yageo,RC0402FR-0710KL,\n\
+                   R90,,R_0402_1005Metric,1,Yageo,RC0402FR-0710KL,DNP\n\
+                   R91,,R_0402_1005Metric,1,Yageo,RC0402FR-0710KL,DNP\n";
+        let doc = doc_for(csv, "default");
+
+        let folded: Vec<&Finding> = doc
+            .findings
+            .iter()
+            .filter(|f| f.rule_id.as_deref() == Some(DNP_FOLD_RULE_ID))
+            .collect();
+        assert!(folded.len() <= 1, "the fold must produce at most one note: {folded:?}");
+
+        // Nothing else may anchor exclusively to a DNP line.
+        for f in &doc.findings {
+            if f.rule_id.as_deref() == Some(DNP_FOLD_RULE_ID) {
+                continue;
+            }
+            let refs: Vec<&str> = f
+                .anchors
+                .iter()
+                .flat_map(|a| a.refdes.iter().map(|r| r.as_str()))
+                .collect();
+            assert!(
+                refs.is_empty() || !refs.iter().all(|r| *r == "R90" || *r == "R91"),
+                "{} still reports a DNP-only finding: {:?}",
+                f.rule_id.as_deref().unwrap_or("?"),
+                refs
+            );
+        }
+
+        // If the fold fired, it is informational and names the lines it covers.
+        if let Some(note) = folded.first() {
+            assert_eq!(note.severity, "Low", "the DNP note must be informational");
+            let refs: Vec<&str> = note
+                .anchors
+                .iter()
+                .flat_map(|a| a.refdes.iter().map(|r| r.as_str()))
+                .collect();
+            assert!(refs.contains(&"R90") && refs.contains(&"R91"), "refs: {refs:?}");
+        }
+    }
+
+    #[test]
+    fn a_defect_spanning_a_populated_and_a_dnp_line_is_not_folded_away() {
+        // The exception that makes the fold safe: one MPN on two footprints, one of
+        // them populated. That is a real defect about the populated part, and
+        // demoting it to an informational DNP note would hide it.
+        let csv = "Reference,Value,Footprint,Quantity,Manufacturer,MPN,DNP\n\
+                   C31,22uF,C_1210_3225Metric_5mil,1,Samsung,CL32Y226KAVVPJE,\n\
+                   C32,22uF,C_1210_3225Metric_6mil,1,Samsung,CL32Y226KAVVPJE,DNP\n";
+        let doc = doc_for(csv, "default");
+
+        let spanning: Vec<&Finding> = doc
+            .findings
+            .iter()
+            .filter(|f| {
+                f.anchors
+                    .iter()
+                    .any(|a| a.refdes.iter().any(|r| r == "C31"))
+            })
+            .collect();
+        assert!(
+            spanning.iter().all(|f| f.rule_id.as_deref() != Some(DNP_FOLD_RULE_ID)),
+            "a finding touching the populated C31 was folded into the DNP note"
+        );
     }
 
     #[test]

@@ -34,7 +34,27 @@ impl Rule for LifecycleStatus {
             .map(|s| s.trim().to_lowercase())
             .collect();
 
-        if !ctx.all_items.iter().any(|i| i.filled("lifecycle")) {
+        // Same distinction the compliance rule draws: a missing column and an empty
+        // one are different jobs for the engineer. See `Ctx::has_column`.
+        if ctx.column_wholly_blank("lifecycle") {
+            return vec![Raw::new(
+                ctx.missing_sev(Severity::Low),
+                "Lifecycle column is empty on every line",
+            )
+            .detail(format!(
+                "The BOM has a lifecycle column, but not one of the {} rows carries a value in \
+                 it, so the BOM cannot confirm that all parts are active (not obsolete / NRND / \
+                 EOL).",
+                ctx.all_items.len()
+            ))
+            .fix(
+                "Populate the lifecycle column that is already there, from distributor or \
+                 manufacturer data, and confirm no part is obsolete, NRND, or end-of-life \
+                 before release.",
+            )
+            .key("empty_lifecycle_column")];
+        }
+        if !ctx.has_column("lifecycle") {
             return vec![Raw::new(
                 ctx.missing_sev(Severity::Low),
                 "Lifecycle status not verifiable from BOM",
@@ -190,7 +210,21 @@ impl Rule for MissingMsl {
         if scoped.is_empty() {
             return Vec::new();
         }
-        if !ctx.all_items.iter().any(|i| i.filled("msl")) {
+        if ctx.column_wholly_blank("msl") {
+            return vec![Raw::new(ctx.severity, "MSL column is empty on every line")
+                .detail(format!(
+                    "The BOM has an MSL column but no row carries a value in it; {} \
+                     moisture-sensitive part(s) need an MSL rating for correct assembly-house \
+                     storage and bake-before-reflow handling.",
+                    scoped.len()
+                ))
+                .fix(
+                    "Populate the MSL column that is already there (J-STD-020 level 1-6) for \
+                     all moisture-sensitive parts.",
+                )
+                .key("empty_msl_column")];
+        }
+        if !ctx.has_column("msl") {
             return vec![Raw::new(
                 ctx.severity,
                 "No MSL (moisture sensitivity level) data in BOM",
@@ -274,7 +308,20 @@ impl Rule for MissingAecq {
         if populated.is_empty() {
             return Vec::new();
         }
-        if !ctx.all_items.iter().any(|i| i.filled("aecq")) {
+        if ctx.column_wholly_blank("aecq") {
+            return vec![Raw::new(ctx.severity, "AEC-Q column is empty on every line")
+                .detail(
+                    "Automotive design; the BOM has an AEC-Q column but no row carries a value \
+                     in it, so part qualification (Q100/Q101/Q200) cannot be confirmed from \
+                     this BOM.",
+                )
+                .fix(
+                    "Populate the AEC-Q column that is already there, confirming every part is \
+                     automotive-qualified or documenting an approved exception.",
+                )
+                .key("empty_aecq_column")];
+        }
+        if !ctx.has_column("aecq") {
             return vec![Raw::new(ctx.severity, "No AEC-Q qualification data in BOM")
                 .detail(
                     "Automotive design; the BOM has no AEC-Q column — part qualification \
@@ -443,7 +490,30 @@ impl Rule for MissingCompliance {
                 "reach" => "REACH/SVHC".to_string(),
                 other => other.to_uppercase(),
             };
-            if !ctx.all_items.iter().any(|i| i.filled(field)) {
+            // Two different defects that used to be reported as one. A BOM with no
+            // REACH column needs a column added; a BOM whose REACH column is blank on
+            // every line needs it populated, and telling that engineer to "add a REACH
+            // column" sends them looking for something already in their header.
+            if ctx.column_wholly_blank(field) {
+                out.push(
+                    Raw::new(
+                        miss_sev,
+                        format!("{label} column is empty on every line"),
+                    )
+                    .detail(format!(
+                        "The BOM has a {label} column, but not one of the {} rows carries a \
+                         value in it, so {label} compliance cannot be confirmed from this BOM.",
+                        ctx.all_items.len()
+                    ))
+                    .fix(format!(
+                        "Populate the {label} column that is already there, from manufacturer \
+                         or distributor declarations."
+                    ))
+                    .key(format!("empty_column:{field}")),
+                );
+                continue;
+            }
+            if !ctx.has_column(field) {
                 out.push(
                     Raw::new(miss_sev, format!("No {label} compliance data in BOM"))
                         .detail(format!(

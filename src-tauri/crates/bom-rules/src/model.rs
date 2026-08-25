@@ -252,11 +252,37 @@ pub struct Ctx<'a> {
     /// Every row, DNP included — for the "does this BOM have the column at all?"
     /// question, which must not depend on the rule's DNP scope.
     pub all_items: &'a [BomItem],
+    /// Logical fields the mapping actually found a column for. See [`Ctx::has_column`].
+    pub mapped_fields: &'a BTreeSet<String>,
     pub severity: Severity,
     pub params: serde_json::Value,
 }
 
 impl Ctx<'_> {
+    /// Does the BOM carry a column for this logical field?
+    ///
+    /// This is a question about the HEADER, not about the data, and the two answers
+    /// lead to different advice. "Add a REACH column" sends an engineer looking for
+    /// something already there; "populate the REACH column you have" is the actual
+    /// job. Asking the rows — `all_items.any(|i| i.filled(field))` — cannot tell the
+    /// two apart, and on a BOM whose compliance columns are present but blank on
+    /// every line it always answers with the wrong one.
+    ///
+    /// An empty mapping (a caller that built items without one) falls back to the
+    /// data test, so this can only ever be more accurate than what it replaced.
+    pub fn has_column(&self, field: &str) -> bool {
+        if self.mapped_fields.is_empty() {
+            return self.all_items.iter().any(|i| i.filled(field));
+        }
+        self.mapped_fields.contains(field) || self.all_items.iter().any(|i| i.filled(field))
+    }
+
+    /// Does the BOM carry the column but leave it blank on every row? The gap the
+    /// old "no column" finding was really describing on most real boards.
+    pub fn column_wholly_blank(&self, field: &str) -> bool {
+        self.has_column(field) && !self.all_items.iter().any(|i| i.filled(field))
+    }
+
     pub fn param_f64(&self, key: &str, default: f64) -> f64 {
         self.params.get(key).and_then(|v| v.as_f64()).unwrap_or(default)
     }

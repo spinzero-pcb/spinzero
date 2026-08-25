@@ -226,8 +226,7 @@ export async function streamProgress(
 export const STAGE_LABELS: Record<string, string> = {
   validate_bundle: "Checking the bundle",
   deterministic_rules: "Running the rule pack",
-  fp_validation: "Validating rule findings",
-  judgment_pass: "Judgment pass",
+  judgment_pass: "Reviewing against datasheets",
   assemble: "Assembling the report",
 };
 

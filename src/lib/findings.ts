@@ -47,7 +47,7 @@ export interface AuditEntry {
 /** One stage of a review that did not fully run. Only non-clean stages appear, so a
  *  non-empty `run_health` means "this result is incomplete" — and says why. */
 export interface RunHealthEntry {
-  /** Producer stage id ("fp_validation", "judgment_pass"). */
+  /** Producer stage id ("deterministic_rules", "judgment_pass"). */
   stage: string;
   /** "degraded" = it ran but covered less than it should; "failed" = it produced nothing. */
   status: "degraded" | "failed";
