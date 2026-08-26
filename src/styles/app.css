@@ -2651,6 +2651,24 @@ button {
   text-transform: uppercase;
 }
 
+/* The assistant-review config's environment box. A textarea inherits none of the
+   input sizing, and a free-resize handle in a modal sheet drags the dialog's layout
+   around, so it grows vertically only. */
+textarea.wizard-input {
+  resize: vertical;
+  min-height: 4.5em;
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: var(--fs-0);
+  line-height: 1.5;
+}
+
+/* The drop-box section's own heading. Separated by a rule rather than a gap: it is a
+   second list in the same popover (findings that arrived from a review run outside
+   this window), and it must not read as a continuation of the runnable reviews. */
+.run-review-pop-hd.sub {
+  border-top: 1px solid var(--border-1);
+}
+
 /* One line per review — scope lives in the review's own setup sheet, so this list
    stays readable as the catalogue grows and doubles as the coverage readout. */
 .run-review-row {
@@ -2693,7 +2711,20 @@ button {
 /* The detailed review's progress, in the footer and on the BOM tab. A determinate bar
    and a percentage: enough to show it is moving, and nothing it cannot back up. The
    step names live in the tooltip — see the note in ReviewProgress.tsx. */
+/* The progress bar is a button now (it opens the activity feed), so it has to be
+   stripped back to looking like the text it replaced. */
+.review-progress-wrap {
+  position: relative;
+  display: inline-flex;
+  flex: none;
+}
+
 .review-progress {
+  appearance: none;
+  border: 0;
+  padding: 0;
+  background: none;
+  cursor: pointer;
   display: inline-flex;
   align-items: center;
   gap: var(--sp-2);
@@ -2797,6 +2828,96 @@ button {
   font-variant-numeric: tabular-nums;
   text-align: right;
   color: var(--fg-2);
+}
+
+/* The activity feed. Opens UPWARD: its anchor lives in the footer, and a panel that
+   opened downward would render off the bottom of the window. */
+.review-activity {
+  position: absolute;
+  bottom: calc(100% + var(--sp-2));
+  right: 0;
+  z-index: 60;
+  width: 420px;
+  max-width: 70vw;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border-1);
+  border-radius: var(--radius-2);
+  background: var(--bg-1);
+  box-shadow: 0 10px 34px rgba(0, 0, 0, 0.5);
+}
+
+.review-activity-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--sp-2) var(--sp-3);
+  border-bottom: 1px solid var(--border-1);
+  color: var(--fg-2);
+  font-size: var(--fs-0);
+}
+
+.review-activity-close {
+  padding: 0 var(--sp-1);
+  line-height: 1;
+}
+
+.review-activity-list {
+  max-height: 320px;
+  overflow-y: auto;
+  padding: var(--sp-1) 0;
+}
+
+.review-activity-empty {
+  margin: 0;
+  padding: var(--sp-3);
+  color: var(--fg-3);
+  font-size: var(--fs-0);
+}
+
+.review-activity-row {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+  padding: 2px var(--sp-3);
+  font-size: var(--fs-0);
+  color: var(--fg-1);
+}
+
+.review-activity-time {
+  flex: none;
+  color: var(--fg-3);
+  font-variant-numeric: tabular-nums;
+}
+
+.review-activity-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* A tool call is the model's own move; a heartbeat is the app saying "still alive"
+   and must recede, because there are a lot of them. */
+.review-activity-row.tone-tool .review-activity-text {
+  font-family: var(--font-mono);
+}
+
+.review-activity-row.tone-waiting {
+  color: var(--fg-3);
+}
+
+.review-activity-row.tone-error {
+  color: var(--err);
+}
+
+/* The gap is the point of the whole panel: it is what names the six minutes nothing
+   happened, so it is the one thing in a row that is allowed to shout. */
+.review-activity-gap {
+  flex: none;
+  color: var(--warn);
+  font-variant-numeric: tabular-nums;
 }
 
 .tag-premium,

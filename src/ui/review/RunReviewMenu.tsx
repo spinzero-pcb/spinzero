@@ -1,7 +1,9 @@
 import { useEffect, useRef } from "react";
+import { isAgentRunning, useAgentReviewStore } from "../../stores/agentReviewStore";
 import { useBomCheckStore } from "../../stores/bomCheckStore";
 import { isRunning, useDetailedReviewStore } from "../../stores/detailedReviewStore";
 import { reviewRows, useReviewRunsStore } from "../../stores/reviewRunsStore";
+import { useReviewInboxStore } from "../../stores/reviewInboxStore";
 import { useReviewStore } from "../../stores/reviewStore";
 import { useRunLauncherStore } from "../../stores/runLauncherStore";
 import { formatRelative } from "../../lib/time";
@@ -66,6 +68,14 @@ export function RunReviewMenu() {
   const runs = useReviewRunsStore((s) => s.runs);
   const current = useReviewRunsStore((s) => s.current);
   const comments = useReviewStore((s) => s.comments);
+  // What is waiting in the project's review drop-box. Listed here rather than in a
+  // corner of the BOM tab because this popover already answers "what has this board
+  // been through" — and a review that ran on the user's own agent, outside this
+  // window, is exactly that question's newest answer.
+  const inbox = useReviewInboxStore((s) => s.entries);
+  const importing = useReviewInboxStore((s) => s.importing);
+  const loadInbox = useReviewInboxStore((s) => s.load);
+  const importInbox = useReviewInboxStore((s) => s.importOne);
 
   // Running state. The two BOM tiers are separate stores and can both be in flight,
   // so the footer counts jobs rather than showing a single boolean — concurrent runs
@@ -73,6 +83,11 @@ export function RunReviewMenu() {
   const bomRunning = useBomCheckStore((s) => s.running);
   const detailedPhase = useDetailedReviewStore((s) => s.phase);
   const detailedBusy = isRunning(detailedPhase);
+  // A review running through the user's own assistant has no stages of ours to
+  // report, so it gets a line of its own rather than the detailed review's bar.
+  const agentPhase = useAgentReviewStore((s) => s.phase);
+  const agentLine = useAgentReviewStore((s) => s.line);
+  const agentBusy = isAgentRunning(agentPhase);
 
   const wrapRef = useRef<HTMLDivElement | null>(null);
 
@@ -97,6 +112,12 @@ export function RunReviewMenu() {
     };
   }, [menuOpen, closeMenu]);
 
+  // Read on open rather than polled: the drop-box changes when a review the user
+  // started elsewhere finishes, and opening the launcher is when they ask.
+  useEffect(() => {
+    if (menuOpen) void loadInbox();
+  }, [menuOpen, loadInbox]);
+
   const rows = reviewRows(runs, current);
 
   return (
@@ -108,6 +129,14 @@ export function RunReviewMenu() {
           failure belongs here: it renders nothing on a healthy run, and does not go
           away by itself on a bad one. */}
       <ReviewOutcome />
+      {agentBusy && (
+        <span className="run-review-active" title={agentLine || "Your assistant is reviewing this BOM"}>
+          <span className="status-dot running" />
+          {/* The assistant's own last line, when it has said something. It narrates at
+              its own pace, and a sign of life beats a bar we would have to invent. */}
+          {agentLine ? agentLine.slice(0, 60) : "Assistant reviewing"}
+        </span>
+      )}
       {bomRunning && (
         <span className="run-review-active">
           <span className="status-dot running" />
@@ -163,6 +192,37 @@ export function RunReviewMenu() {
               </button>
             );
           })}
+          {inbox.length > 0 && (
+            <>
+              <div className="run-review-pop-hd sub">Findings waiting to import</div>
+              {inbox.map((entry) => (
+                <button
+                  key={entry.name}
+                  role="menuitem"
+                  className="run-review-row"
+                  disabled={Boolean(entry.error) || importing !== null}
+                  // The file name is the only handle on WHICH run this was, and the
+                  // rows are one line, so it lives in the tooltip with the reason a
+                  // broken one cannot be imported.
+                  title={entry.error ? `${entry.name} — ${entry.error}` : entry.name}
+                  onClick={() => void importInbox(entry.name)}
+                >
+                  <span className="run-review-name">
+                    {entry.error ? entry.name : `Import ${entry.pipeline || "review"}`}
+                  </span>
+                  <span className="run-review-meta">
+                    {entry.error ? (
+                      <span className="run-review-stale">unreadable</span>
+                    ) : importing === entry.name ? (
+                      "importing…"
+                    ) : (
+                      `${entry.finding_count} finding${entry.finding_count === 1 ? "" : "s"}`
+                    )}
+                  </span>
+                </button>
+              ))}
+            </>
+          )}
         </div>
       )}
     </div>

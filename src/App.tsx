@@ -19,6 +19,7 @@ import { BomReviewSetup } from "./ui/review/BomReviewSetup";
 import { HistoryGraph } from "./ui/history/HistoryGraph";
 import { Toaster } from "./ui/Toaster";
 import { KeyboardShortcuts, useShortcutsDialog } from "./ui/shell/KeyboardShortcuts";
+import { useAgentReviewStore } from "./stores/agentReviewStore";
 import { useToastStore } from "./stores/toastStore";
 import { useProjectStore } from "./stores/projectStore";
 import { usePcbViewStore } from "./stores/pcbViewStore";
@@ -132,10 +133,16 @@ export default function App() {
         else if (ev.kind === "succeeded") d.markPendingReload();
       }
     });
+    // A review running through the user's own assistant is a subprocess, so its only
+    // channel back is this event stream. Subscribed here rather than in the launcher
+    // because the launcher can be closed while the review keeps going.
+    const unlistenAgent = useAgentReviewStore.getState().subscribe();
+    void useAgentReviewStore.getState().refresh();
     return () => {
       // listen() rejects on a plain browser dev server / plugin failure — swallow so
       // neither the setup promise nor this cleanup leaks an unhandled rejection.
       void unlisten.then((fn) => fn()).catch(() => {});
+      void unlistenAgent.then((fn) => fn()).catch(() => {});
     };
   }, [init, loadSettings, refreshIndex, applyCrunchEvent, loadDesign, loadReviews]);
 

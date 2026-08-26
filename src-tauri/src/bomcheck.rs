@@ -15,7 +15,7 @@
 //!   person's judgment.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 use time::format_description::well_known::Rfc3339;
@@ -255,6 +255,150 @@ fn blank_action(action: &str) -> reviews::ActionInput {
         assignee: None,
         author_name: None,
     }
+}
+
+// ------------------------------------------------------------------ review inbox
+//
+// The drop-box a review run writes into when it did not come from the app.
+//
+// A review executed outside the app — the engine CLI on this machine, or a
+// customer's own agent through the MCP server — produces the same
+// `findings-1.0.json` the hosted service does, but it has no window to hand it to.
+// So it writes the document into `<project>/reviews/inbox/` and the app imports it
+// through the SAME `ingest` path as everything else: same fingerprint
+// reconciliation, same comment semantics, same asymmetric auto-resolve rule.
+//
+// **Why an explicit import and not the folder watcher.** `watcher.rs` watches the
+// DESIGN source for EDA files on a 2 s debounce and its only job is to trigger a
+// re-extraction. Teaching it to ingest review documents would put an untrusted-file
+// path that files comments into the user's project behind a timer meant for CAD
+// saves, and would file findings the user never asked for the moment a file appeared.
+// The import is a click. What the app does automatically is NOTICE.
+
+/// The drop-box directory for a project. Inside the project folder, beside
+/// `reviews/`, because a findings document is review content that syncs — not
+/// regenerable machine-local data (see docs/storage-model.md).
+pub fn inbox_dir(project_dir: &Path) -> PathBuf {
+    project_dir.join("reviews").join("inbox")
+}
+
+/// Where an imported document is moved once its findings are comments. Kept rather
+/// than deleted: "which run filed this comment" is answerable afterwards, and a
+/// re-import is a file move away.
+fn consumed_dir(project_dir: &Path) -> PathBuf {
+    inbox_dir(project_dir).join("consumed")
+}
+
+/// One document waiting in the drop-box, summarised enough for the rail to say what
+/// it is without the user opening a file.
+#[derive(Serialize)]
+pub struct InboxEntry {
+    /// File name inside the inbox. This is what `import` is called with — never a
+    /// path, so nothing outside the drop-box can be named.
+    pub name: String,
+    pub pipeline: String,
+    pub engine_version: String,
+    pub finding_count: usize,
+    /// Set when the file is not a findings document we can import; the rail shows it
+    /// instead of an import button. A junk file in the drop-box must be visible, not
+    /// silently skipped.
+    pub error: Option<String>,
+}
+
+/// Everything currently in the drop-box, newest-looking first (name order, which is
+/// timestamped by every producer we ship).
+pub fn list_inbox(project_dir: &Path) -> Vec<InboxEntry> {
+    let dir = inbox_dir(project_dir);
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    let mut out: Vec<InboxEntry> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_file() && p.extension().is_some_and(|x| x.eq_ignore_ascii_case("json")))
+        .map(|p| {
+            let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            match std::fs::read_to_string(&p)
+                .map_err(|e| format!("could not read it: {e}"))
+                .and_then(|text| validated_doc_str(&text))
+            {
+                Ok(doc) => InboxEntry {
+                    name,
+                    pipeline: doc.pipeline,
+                    engine_version: doc.engine_version,
+                    finding_count: doc.findings.len(),
+                    error: None,
+                },
+                Err(e) => InboxEntry {
+                    name,
+                    pipeline: String::new(),
+                    engine_version: String::new(),
+                    finding_count: 0,
+                    error: Some(e),
+                },
+            }
+        })
+        .collect();
+    out.sort_by(|a, b| b.name.cmp(&a.name));
+    out
+}
+
+/// Read one drop-box document, or say why it cannot be imported.
+///
+/// `name` is a bare file name by contract: anything with a separator or a parent
+/// segment is refused rather than resolved, so a caller cannot reach out of the
+/// drop-box and hand `ingest` a document from elsewhere on the disk.
+pub fn read_inbox(project_dir: &Path, name: &str) -> Result<FindingsDoc, String> {
+    if name.is_empty()
+        || name.contains('/')
+        || name.contains('\\')
+        || name.contains("..")
+        || Path::new(name).file_name().map(|n| n != name).unwrap_or(true)
+    {
+        return Err(format!("\"{name}\" is not a file in the review inbox"));
+    }
+    let path = inbox_dir(project_dir).join(name);
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("could not read {name}: {e}"))?;
+    validated_doc_str(&text)
+}
+
+/// Move an imported document out of the drop-box so the next import does not offer
+/// it again. A failure here is deliberately not fatal: the findings are already
+/// comments, and re-offering a file the user has imported is a nuisance, not a
+/// correctness problem.
+pub fn archive_inbox(project_dir: &Path, name: &str) -> Result<(), String> {
+    let from = inbox_dir(project_dir).join(name);
+    let to_dir = consumed_dir(project_dir);
+    std::fs::create_dir_all(&to_dir).map_err(|e| e.to_string())?;
+    std::fs::rename(&from, to_dir.join(name)).map_err(|e| e.to_string())
+}
+
+/// Parse and vet a findings document from untrusted text.
+///
+/// The same three checks the network path applies (`ingest_findings` in lib.rs), for
+/// the same reason: a malformed or hostile document must not be able to file review
+/// comments with arbitrary shapes into the user's project folder, and a document
+/// claiming to be the free tier must not be able to auto-resolve the free tier's
+/// own comments.
+pub fn validated_doc(value: serde_json::Value) -> Result<FindingsDoc, String> {
+    let doc: FindingsDoc =
+        serde_json::from_value(value).map_err(|e| format!("not a findings.json document: {e}"))?;
+    if doc.schema_version != "1.0" {
+        return Err(format!(
+            "findings schema_version {} is not supported by this app (expected 1.0)",
+            doc.schema_version
+        ));
+    }
+    if doc.pipeline == "bom-rules" {
+        return Err("a bom-rules document must come from the local check, not an import".into());
+    }
+    Ok(doc)
+}
+
+fn validated_doc_str(text: &str) -> Result<FindingsDoc, String> {
+    let value: serde_json::Value =
+        serde_json::from_str(text).map_err(|e| format!("not valid JSON: {e}"))?;
+    validated_doc(value)
 }
 
 /// File `doc`'s findings as review comments, reconciling against what a previous run
@@ -668,6 +812,54 @@ mod tests {
             .find(|c| c.source == "agent")
             .expect("still there");
         assert_eq!(judgment.status, "open");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_inbox_lists_what_it_can_import_and_flags_what_it_cannot() {
+        let root = temp_root("inbox");
+        let dir = inbox_dir(&root);
+        std::fs::create_dir_all(&dir).expect("inbox");
+        std::fs::write(
+            dir.join("bom-detailed-2026.json"),
+            r#"{"schema_version":"1.0","engine_version":"engine-0.2.0","pipeline":"bom-detailed",
+                "profile":"default","findings":[],"bom_audit":[],"stats":{}}"#,
+        )
+        .expect("doc");
+        std::fs::write(dir.join("junk.json"), "not json at all").expect("junk");
+        // The free tier's own document must not be importable: it would let an
+        // arbitrary file auto-resolve the local checker's comments.
+        std::fs::write(
+            dir.join("bom-rules-2026.json"),
+            r#"{"schema_version":"1.0","engine_version":"x","pipeline":"bom-rules",
+                "profile":"default","findings":[],"bom_audit":[],"stats":{}}"#,
+        )
+        .expect("free tier");
+
+        let entries = list_inbox(&root);
+        assert_eq!(entries.len(), 3, "a file that cannot be imported is still shown");
+        let good = entries.iter().find(|e| e.pipeline == "bom-detailed").expect("importable");
+        assert!(good.error.is_none());
+        assert!(entries.iter().any(|e| e.name == "junk.json" && e.error.is_some()));
+        assert!(entries
+            .iter()
+            .any(|e| e.name.starts_with("bom-rules") && e.error.is_some()));
+
+        assert!(read_inbox(&root, "bom-detailed-2026.json").is_ok());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_inbox_cannot_be_talked_out_of_its_own_folder() {
+        let root = temp_root("inbox_escape");
+        std::fs::create_dir_all(inbox_dir(&root)).expect("inbox");
+        for name in ["../secrets.json", "..", "sub/doc.json", "", r"a\b.json"] {
+            let err = read_inbox(&root, name).expect_err("must be refused");
+            assert!(
+                err.contains("not a file in the review inbox"),
+                "{name} was resolved instead of refused: {err}"
+            );
+        }
         let _ = std::fs::remove_dir_all(&root);
     }
 

@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   ackReview,
+  describeProgress,
   fetchFindings,
   health,
   runHealthSummary,
@@ -11,6 +12,9 @@ import {
   type ReviewProgress,
 } from "./reviewService";
 import type { FindingsDoc } from "./findings";
+
+/** The em dash the labels use, spelled out so this file stays ASCII. */
+const DASH = String.fromCharCode(0x2014);
 
 // The client's job is to make a remote, optional, failure-prone service feel like a
 // local capability: a dead service must produce an explainable message rather than an
@@ -135,5 +139,48 @@ describe("reviewService client", () => {
     // An unknown stage still renders something rather than blanking the strip.
     expect(stageLabel("future_stage")).toBe("future_stage");
     expect(stageLabel(undefined)).toBe("");
+  });
+
+  it("renders every event as an activity line, including the ones the bar ignores", () => {
+    // The regression this guards: a run spent six minutes inside one model turn and
+    // the app showed nothing at all, because `log` events were dropped on the floor.
+    // The heartbeat is the row that distinguishes a slow run from a dead one, so it
+    // must survive the trip from the engine to the feed.
+    const beat = describeProgress({
+      type: "log",
+      ts: "2026-08-25T10:20:01.000Z",
+      stage: "judgment_pass",
+      message: "waiting on the model - turn 6 of 30, 214s",
+      data: { waiting: true, turn: 6, max_turns: 30, elapsed_ms: 214000 },
+    });
+    expect(beat?.tone).toBe("waiting");
+    expect(beat?.text).toContain("turn 6 of 30");
+
+    const tool = describeProgress({
+      type: "log",
+      ts: "2026-08-25T10:20:03.000Z",
+      stage: "judgment_pass",
+      data: { tool: "read_datasheet", turn: 6, duration_ms: 1234, ok: true },
+    });
+    expect(tool?.tone).toBe("tool");
+    expect(tool?.text).toMatch(/^read_datasheet .* turn 6 .* 1\.2s$/);
+    // Arguments ride only under SPINZERO_TRACE; without them there is no detail line.
+    expect(tool?.detail).toBeUndefined();
+
+    const failed = describeProgress({
+      type: "log",
+      ts: "2026-08-25T10:20:04.000Z",
+      data: { tool: "web_search", turn: 6, duration_ms: 90, ok: false, input: '{"q":"x"}' },
+    });
+    expect(failed?.tone).toBe("error");
+    expect(failed?.detail).toContain('{"q":"x"}');
+
+    // Stages keep their human labels here too, and a duration when they finish.
+    expect(
+      describeProgress({ type: "stage_done", ts: "t", stage: "judgment_pass", data: { duration_ms: 3185 } })?.text,
+    ).toBe(`${stageLabel("judgment_pass")} ${DASH} done (3.2s)`);
+    // An event type this app has not been taught still gets a row: an unknown event
+    // is exactly when someone is staring at the feed asking what is going on.
+    expect(describeProgress({ type: "invented" as never, ts: "t", message: "hello" })?.text).toBe("hello");
   });
 });

@@ -1,3 +1,4 @@
+mod agent;
 mod bomcheck;
 mod cache;
 mod checkpoints;
@@ -31,6 +32,10 @@ use util::LockExt;
 #[derive(Default)]
 struct AppState {
     project: Mutex<Option<Arc<ProjectHandle>>>,
+    /// The one review running through the user's own assistant, if any. One at a
+    /// time: two assistants reviewing the same board would both write into the
+    /// drop-box and file two sets of comments for one review.
+    agent: Mutex<agent::AgentRun>,
 }
 
 fn current_project(state: &State<AppState>) -> Result<Arc<ProjectHandle>, String> {
@@ -1181,19 +1186,19 @@ fn ingest_findings(
     doc: serde_json::Value,
 ) -> Result<bomcheck::CheckOutcome, String> {
     let handle = current_project(&state)?;
-    let doc: bom_rules::FindingsDoc =
-        serde_json::from_value(doc).map_err(|e| format!("not a findings.json document: {e}"))?;
-    if doc.schema_version != "1.0" {
-        return Err(format!(
-            "findings schema_version {} is not supported by this app (expected 1.0)",
-            doc.schema_version
-        ));
-    }
-    if doc.pipeline == "bom-rules" {
-        // The free tier has its own command; letting a network document file as the
-        // local checker would let it auto-resolve the checker's comments.
-        return Err("a bom-rules document must come from the local check, not the service".into());
-    }
+    // The same vetting the drop-box import applies — schema version, and a refusal to
+    // let anything claim to be the free tier and auto-resolve the free tier's own
+    // comments. One implementation, because there are now two ways in.
+    let doc = bomcheck::validated_doc(doc)?;
+    ingest_validated(&handle, doc)
+}
+
+/// The half of ingestion both entry points share: count it, log what came back
+/// incomplete, and file the comments.
+fn ingest_validated(
+    handle: &Arc<ProjectHandle>,
+    doc: bom_rules::FindingsDoc,
+) -> Result<bomcheck::CheckOutcome, String> {
     telemetry::bump("detailed_reviews");
     log::info!(
         "ingesting {} findings from pipeline {} ({})",
@@ -1228,6 +1233,79 @@ fn ingest_findings(
         doc,
         &bom_rules::load::MappingReport::default(),
     )
+}
+
+/// What is sitting in the project's review drop-box.
+///
+/// The drop-box is how a review that ran OUTSIDE the app gets its findings in: the
+/// engine CLI on this machine, or the customer's own agent through the MCP server,
+/// writes `findings-1.0.json` into `<project>/reviews/inbox/` and the app imports it
+/// through the same path a hosted review takes.
+///
+/// Listing is cheap and safe (it parses, it never files), so the rail can poll it and
+/// say "a review is waiting" without the user knowing the folder exists.
+#[tauri::command]
+fn list_review_inbox(state: State<AppState>) -> Result<Vec<bomcheck::InboxEntry>, String> {
+    let handle = current_project(&state)?;
+    Ok(bomcheck::list_inbox(&handle.project_dir))
+}
+
+/// Import one document from the drop-box, by bare file name.
+///
+/// Deliberately a user action rather than something the folder watcher does: filing
+/// comments into someone's project the instant a file appears is not a convenience,
+/// and `watcher.rs` is a CAD-save debounce, not an ingestion path. See the note above
+/// `bomcheck::inbox_dir`.
+#[tauri::command]
+fn import_review_inbox(
+    state: State<AppState>,
+    name: String,
+) -> Result<bomcheck::CheckOutcome, String> {
+    let handle = current_project(&state)?;
+    let doc = bomcheck::read_inbox(&handle.project_dir, &name)?;
+    let outcome = ingest_validated(&handle, doc)?;
+    // Archived only after the comments exist. An import that files findings and then
+    // fails to move the file is a duplicate offer; one that moves the file and then
+    // fails to file is a lost review.
+    if let Err(e) = bomcheck::archive_inbox(&handle.project_dir, &name) {
+        log::warn!("imported {name} but could not archive it out of the review inbox: {e}");
+    }
+    Ok(outcome)
+}
+
+/// Start a detailed review through the user's own AI assistant, over MCP.
+///
+/// The app writes an MCP config naming its own review server, spawns the assistant's
+/// CLI against it, and gets out of the way. The findings come back through the review
+/// drop-box like every other review that ran outside this window, so there is exactly
+/// one ingestion path (see `bomcheck::inbox_dir`).
+///
+/// Progress arrives on `agent-event`; this returns as soon as the process is up.
+#[tauri::command]
+fn start_agent_review(
+    app: AppHandle,
+    state: State<AppState>,
+    profile: Option<String>,
+    config: agent::AgentConfig,
+) -> Result<(), String> {
+    let handle = current_project(&state)?;
+    let profile = profile.unwrap_or_else(|| "default".to_string());
+    // Scratch, not project: the MCP config is regenerable and must not land in the
+    // folder that syncs (docs/storage-model.md).
+    let scratch = project::local_data_root(&handle.project_dir).join("agent");
+    telemetry::bump("agent_reviews");
+    log::info!("starting an assistant review, profile {profile}");
+    state
+        .agent
+        .lock_safe()
+        .start(app, handle.project_dir.clone(), scratch, profile, config)
+}
+
+/// Is an assistant review in flight? The launcher asks on mount so a reopened window
+/// does not offer to start a second one.
+#[tauri::command]
+fn agent_review_running(state: State<AppState>) -> bool {
+    state.agent.lock_safe().is_running()
 }
 
 // ------------------------------------------------------------ reviews (Phase 2)
@@ -1540,6 +1618,10 @@ pub fn run() {
             set_bom_mapping,
             build_review_bundle,
             ingest_findings,
+            list_review_inbox,
+            import_review_inbox,
+            start_agent_review,
+            agent_review_running,
             get_review_author,
             list_comments,
             apply_review_action,

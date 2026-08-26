@@ -82,6 +82,27 @@ export interface CheckOutcome {
   comments: Comment[];
 }
 
+/**
+ * One findings document waiting in the project's review drop-box
+ * (`<project>/reviews/inbox/`). Mirrors `bomcheck::InboxEntry`.
+ *
+ * The drop-box is how a review that ran outside the app gets in: the engine CLI on
+ * this machine, or the user's own agent through the MCP server. It lands as review
+ * comments through the same ingestion path a hosted review takes, so a finding both
+ * tiers detect still refines one comment rather than filing two.
+ */
+export interface ReviewInboxEntry {
+  /** Bare file name inside the inbox — what `importReviewInbox` is called with. */
+  name: string;
+  pipeline: string;
+  engine_version: string;
+  finding_count: number;
+  /** Why this file cannot be imported, when it cannot. A junk file in the drop-box
+   *  is shown rather than skipped: a review the user believes ran and cannot find is
+   *  worse than an error message. */
+  error: string | null;
+}
+
 /** Where one logical field's data comes from. Mirrors `bom_rules::load::FieldMapping`. */
 export interface FieldMapping {
   /** Logical field the rules read, e.g. "mpn", "lifecycle". */

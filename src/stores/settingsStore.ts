@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import { ipc } from "../lib/ipc";
 import { usePcbViewStore } from "./pcbViewStore";
-import type { KeymapPreset, ProjectUi, ReviewServiceSettings } from "../lib/types";
+import type { AgentReviewSettings, KeymapPreset, ProjectUi, ReviewServiceSettings } from "../lib/types";
 
 // App-level UI preferences. `keymap === null` after load means the user has
 // never chosen — App shows the first-launch preset picker (spec: onboarding).
@@ -29,6 +29,11 @@ interface SettingsState {
   /** Review-service endpoint + token; null = never configured (the detailed review
    *  button then explains how to point the app at a service). */
   reviewService: ReviewServiceSettings | null;
+  /** How to run a review through the user's own AI assistant; null = not set up. */
+  agentReview: AgentReviewSettings | null;
+  /** Which surface the detailed BOM review runs on. Absent keeps the hosted service,
+   *  so an existing install's button does exactly what it did yesterday. */
+  reviewDriver: "service" | "agent" | null;
   loaded: boolean;
   load: () => Promise<void>;
   setKeymap: (k: KeymapPreset) => Promise<void>;
@@ -51,6 +56,8 @@ interface SettingsState {
   setUpdateDeferred: (v: string | null) => Promise<void>;
   /** Persist the review-service endpoint + token (or clear it with null). */
   setReviewService: (v: ReviewServiceSettings | null) => Promise<void>;
+  setAgentReview: (v: AgentReviewSettings | null) => Promise<void>;
+  setReviewDriver: (v: "service" | "agent") => Promise<void>;
 }
 
 export const useSettingsStore = create<SettingsState>((set, get) => ({
@@ -65,6 +72,8 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   bottomPanelH: null,
   updateDeferred: null,
   reviewService: null,
+  agentReview: null,
+  reviewDriver: null,
   loaded: false,
 
   load: async () => {
@@ -99,6 +108,8 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
             : null,
         updateDeferred: typeof s?.update_deferred === "string" ? s.update_deferred : null,
         reviewService: normalizeReviewService(s?.review_service ?? null),
+        agentReview: normalizeAgentReview(s?.agent_review ?? null),
+        reviewDriver: s?.review_driver === "agent" ? "agent" : s?.review_driver === "service" ? "service" : null,
         loaded: true,
       });
       // Push the saved transparency into the PCB view store so the sliders open where
@@ -183,6 +194,18 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
     set({ reviewService: normalizeReviewService(v) });
     await persist();
   },
+
+  setAgentReview: async (v) => {
+    await ensureLoaded();
+    set({ agentReview: normalizeAgentReview(v) });
+    await persist();
+  },
+
+  setReviewDriver: async (v) => {
+    await ensureLoaded();
+    set({ reviewDriver: v });
+    await persist();
+  },
 }));
 
 /** Read the file before the first write of a session. Every setter mutates state and
@@ -210,8 +233,10 @@ async function persist() {
   // fire without a setter in front of it. Every real setter awaits ensureLoaded, so
   // this returning early means there was nothing worth writing yet.
   if (!useSettingsStore.getState().loaded) return;
-  const { keymap, projectRoot, accentColor, authorName, projectUi, pcbOpacity, bomChips, diffBlink, bottomPanelH, updateDeferred, reviewService } =
-    useSettingsStore.getState();
+  const {
+    keymap, projectRoot, accentColor, authorName, projectUi, pcbOpacity, bomChips,
+    diffBlink, bottomPanelH, updateDeferred, reviewService, agentReview, reviewDriver,
+  } = useSettingsStore.getState();
   try {
     await ipc.setSettings({
       keymap_preset: keymap,
@@ -225,6 +250,8 @@ async function persist() {
       bottom_panel_h: bottomPanelH,
       update_deferred: updateDeferred,
       review_service: reviewService,
+      agent_review: agentReview,
+      review_driver: reviewDriver,
     });
   } catch {
     // Persisting failed (e.g. read-only config dir) — the in-memory choice stands.
@@ -233,6 +260,29 @@ async function persist() {
 
 /** Settings are hand-editable, so the service config is untrusted at load: an
  *  endpoint that is not http(s) is dropped rather than handed to fetch. */
+/** Vet the assistant config on the way in. A half-filled one is null rather than a
+ *  config that fails at spawn time: the UI offers "set this up" for null, which is a
+ *  better answer than a subprocess error a minute later. */
+function normalizeAgentReview(v: unknown): AgentReviewSettings | null {
+  if (typeof v !== "object" || v === null) return null;
+  const o = v as { claude_bin?: unknown; server_command?: unknown; server_args?: unknown; server_env?: unknown };
+  const command = typeof o.server_command === "string" ? o.server_command.trim() : "";
+  const args = Array.isArray(o.server_args) ? o.server_args.filter((a): a is string => typeof a === "string") : [];
+  if (!command || !args.length) return null;
+  const env: Record<string, string> = {};
+  if (typeof o.server_env === "object" && o.server_env !== null) {
+    for (const [k, val] of Object.entries(o.server_env as Record<string, unknown>)) {
+      if (typeof val === "string") env[k] = val;
+    }
+  }
+  return {
+    claude_bin: typeof o.claude_bin === "string" ? o.claude_bin.trim() : "",
+    server_command: command,
+    server_args: args,
+    server_env: env,
+  };
+}
+
 function normalizeReviewService(v: unknown): ReviewServiceSettings | null {
   if (typeof v !== "object" || v === null) return null;
   const o = v as { base_url?: unknown; token?: unknown };

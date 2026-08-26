@@ -235,4 +235,42 @@ describe("detailedReviewStore", () => {
     expect(seen.length).toBeGreaterThan(0);
     expect(seen.some((t) => /_/.test(t))).toBe(false);
   });
+
+  it("keeps every event of the run in the activity feed, in order", async () => {
+    // The bar folds four stages onto three words and drops `log` entirely, which is
+    // right for someone waiting and useless for someone asking where a ten-minute run
+    // went. The feed is the unfolded record, so a tool call and a heartbeat — neither
+    // of which moves the bar at all — must both be in it.
+    fetchMock.mockImplementation((url: string) => {
+      const u = String(url);
+      if (u.endsWith("/events")) {
+        return Promise.resolve(
+          sse(
+            'data: {"type":"stage_started","ts":"2026-08-25T10:00:00.000Z","stage":"judgment_pass"}\n\n',
+            'data: {"type":"log","ts":"2026-08-25T10:00:15.000Z","data":{"waiting":true,"turn":1,"max_turns":30}}\n\n',
+            'data: {"type":"log","ts":"2026-08-25T10:02:00.000Z","data":{"tool":"read_datasheet","turn":1,"duration_ms":900,"ok":true}}\n\n',
+            'data: {"type":"completed","ts":"2026-08-25T10:02:01.000Z","data":{"findings":1}}\n\n',
+          ),
+        );
+      }
+      return Promise.resolve(route(u));
+    });
+
+    await useDetailedReviewStore.getState().start();
+    const feed = useDetailedReviewStore.getState().activity;
+    expect(feed.map((e) => e.tone)).toEqual(["step", "waiting", "tool", "step"]);
+    expect(feed.map((e) => e.seq)).toEqual([1, 2, 3, 4]);
+    expect(feed[2]?.text).toContain("read_datasheet");
+    // The engine's own timestamps survive the relay — the gaps between them are the
+    // whole point of the panel.
+    expect(feed[1]?.ts).toBe("2026-08-25T10:00:15.000Z");
+  });
+
+  it("starts each run with an empty feed", async () => {
+    await useDetailedReviewStore.getState().start();
+    expect(useDetailedReviewStore.getState().activity.length).toBeGreaterThan(0);
+    await useDetailedReviewStore.getState().start();
+    // Two runs' events in one list would read as one very long run.
+    expect(useDetailedReviewStore.getState().activity.length).toBe(2);
+  });
 });

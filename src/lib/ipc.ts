@@ -24,7 +24,8 @@ import type {
   TelemetryInfo,
   UiSettings,
 } from "./types";
-import type { CheckOutcome, FindingsDoc, MappingView } from "./findings";
+import type { CheckOutcome, FindingsDoc, MappingView, ReviewInboxEntry } from "./findings";
+import type { AgentReviewSettings } from "./types";
 import type { ReviewBundle } from "./reviewService";
 import type { DesignIndexes } from "./design";
 import type { DiffHandle } from "./diff";
@@ -133,6 +134,22 @@ export const ipc = {
   /** Paid tier, step 2: the service's findings.json, ingested through the SAME path
    *  as the free check so fingerprints reconcile against the existing comments. */
   ingestFindings: (doc: FindingsDoc) => invoke<CheckOutcome>("ingest_findings", { doc }),
+  /** What is waiting in `<project>/reviews/inbox/` — findings produced by a review
+   *  that ran outside the app (the engine CLI, or the user's agent over MCP). Listing
+   *  parses and never files, so it is safe to call whenever the launcher opens. */
+  listReviewInbox: () => invoke<ReviewInboxEntry[]>("list_review_inbox"),
+  /** Import one drop-box document by name, through the same ingestion path as every
+   *  other tier. A user action on purpose: filing comments into someone's project the
+   *  moment a file appears is not a convenience. */
+  importReviewInbox: (name: string) =>
+    invoke<CheckOutcome>("import_review_inbox", { name }),
+
+  /** Paid tier, local surface: run the review through the user's own AI assistant
+   *  over MCP. Returns as soon as the assistant is running; progress arrives on
+   *  `agent-event` and the findings come back through the review inbox. */
+  startAgentReview: (profile: string, config: AgentReviewSettings) =>
+    invoke<void>("start_agent_review", { profile, config }),
+  agentReviewRunning: () => invoke<boolean>("agent_review_running"),
 
   getReviewAuthor: () => invoke<string>("get_review_author"),
   listComments: () => invoke<Comment[]>("list_comments"),
@@ -180,4 +197,16 @@ export function onCrunchEvent(
   handler: (ev: CrunchEvent) => void,
 ): Promise<UnlistenFn> {
   return listen<CrunchEvent>("crunch-event", (e) => handler(e.payload));
+}
+
+/** One line of life from a review running through the user's assistant. Mirrors
+ *  `agent::AgentEvent`. */
+export type AgentEvent =
+  | { kind: "started"; assistant: string }
+  | { kind: "progress"; line: string }
+  | { kind: "finished"; seconds: number }
+  | { kind: "failed"; detail: string };
+
+export function onAgentEvent(handler: (ev: AgentEvent) => void): Promise<UnlistenFn> {
+  return listen<AgentEvent>("agent-event", (e) => handler(e.payload));
 }

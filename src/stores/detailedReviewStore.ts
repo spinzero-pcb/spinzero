@@ -4,22 +4,22 @@ import type { FindingsDoc } from "../lib/findings";
 import {
   ackReview,
   cancelReview,
+  describeProgress,
   DEFAULT_BASE_URL,
   fetchFindings,
   health,
-  runHealthSummary,
   streamProgress,
   submitReview,
+  type ActivityEntry,
   type ReviewBundle,
   type ReviewProgress,
   type ReviewServiceConfig,
 } from "../lib/reviewService";
-import { currentBomProfile, useBomCheckStore } from "./bomCheckStore";
+import { currentBomProfile } from "./bomCheckStore";
 import { useBomMappingStore } from "./bomMappingStore";
-import { useReviewRunsStore } from "./reviewRunsStore";
-import { useReviewStore } from "./reviewStore";
 import { useSettingsStore } from "./settingsStore";
 import { useToastStore } from "./toastStore";
+import { landFindings } from "./landFindings";
 
 // Detailed BOM review (paid tier) — the app's half of the service conversation.
 //
@@ -84,6 +84,11 @@ export interface ReviewStageProgress {
   datasheetsRead: number;
 }
 
+/** How many activity lines to keep. A ten-minute run with tool events and a 15 s
+ *  heartbeat lands well inside this; the cap exists so a pathological run cannot
+ *  grow the store without bound, and the oldest lines are the least interesting. */
+const ACTIVITY_LIMIT = 500;
+
 interface DetailedReviewState {
   phase: ReviewPhase;
   /** The bundle actually posted. Internal — the UI no longer itemises it. */
@@ -104,6 +109,14 @@ interface DetailedReviewState {
   error: string | null;
   /** Service reachability from the last check; null = not checked yet. */
   serviceOk: boolean | null;
+  /** Every event of the current run, oldest first, capped at ACTIVITY_LIMIT.
+   *
+   *  The three-step bar deliberately folds four stages onto three words, which is the
+   *  right answer for someone waiting and the wrong one for someone debugging: a run
+   *  that spent six minutes inside one model turn and a run that died look the same
+   *  through it. This is the unfolded version, and it is only ever read by the panel
+   *  behind the progress bar. */
+  activity: ActivityEntry[];
 
   /** Run the whole thing: gate the mapping, build the bundle, check the service, submit,
    *  stream, ingest, ack. Every failure lands in `error` rather than in a dialog. */
@@ -141,6 +154,7 @@ export const useDetailedReviewStore = create<DetailedReviewState>((set, get) => 
   doc: null,
   error: null,
   serviceOk: null,
+  activity: [],
 
   checkService: async () => {
     const config = serviceConfig();
@@ -157,7 +171,15 @@ export const useDetailedReviewStore = create<DetailedReviewState>((set, get) => 
     const profile = currentBomProfile();
 
     // Everything the old pre-flight dialog did, in order, before a byte is posted.
-    set({ phase: "preparing", error: null, progress: "Preparing your BOM", step: 1, liveFindings: 0 });
+    set({
+      phase: "preparing",
+      error: null,
+      progress: "Preparing your BOM",
+      step: 1,
+      liveFindings: 0,
+      // Last run's feed is not this run's feed, and a stale one is worse than none.
+      activity: [],
+    });
 
     const config = serviceConfig();
     if (!config) {
@@ -221,51 +243,10 @@ export const useDetailedReviewStore = create<DetailedReviewState>((set, get) => 
       const doc = await fetchFindings(config, jobId);
       const outcome = await ipc.ingestFindings(doc);
       set({ phase: "done", doc, progress: "", step: null });
-      // The BOM tab's summary strip renders whatever ran last, free or paid.
-      useBomCheckStore.setState({
-        doc,
-        summary: {
-          filed: outcome.filed,
-          reopened: outcome.reopened,
-          unchanged: outcome.unchanged,
-          auto_resolved: outcome.auto_resolved,
-        },
-        sessionId: outcome.session_id,
-        error: null,
-        // A fresh verdict on this run's health, whatever the user acknowledged about
-        // the last one.
-        healthDismissed: false,
-      });
-      await useReviewStore.getState().load();
-      // Land on the run's own session, exactly as the free check does — the findings
-      // the user just paid to wait for are what the rail should be showing.
-      if (outcome.session_id) useReviewStore.getState().setActiveSession(outcome.session_id);
-      // Same stamp the free check writes — the launcher's BOM row reflects whichever
-      // depth ran last. Cosmetic, so a failure here never touches the result.
-      void useReviewRunsStore
-        .getState()
-        .record("bom")
-        .catch(() => {});
-      // A stage that did not run makes this an incomplete result, and the toast is the
-      // one surface that always appears — so it is the one that must not read like a
-      // clean run. The job says "completed" in exactly this case (the service finished;
-      // the review did not), which is why this asks the document and not the job.
-      const health = runHealthSummary(doc);
-      useToastStore.getState().push({
-        kind: health ? "error" : doc.findings.length ? "info" : "success",
-        title: health
-          ? "Detailed review incomplete"
-          : `Detailed review: ${doc.findings.length || "no"} finding${doc.findings.length === 1 ? "" : "s"}`,
-        message: health
-          ? `${health.text}. ${doc.findings.length} finding${doc.findings.length === 1 ? "" : "s"} filed anyway, at low confidence — treat them as unchecked.`
-          : [
-              outcome.filed ? `${outcome.filed} new comment${outcome.filed === 1 ? "" : "s"}` : "",
-              outcome.unchanged ? `${outcome.unchanged} refined` : "",
-              outcome.auto_resolved ? `${outcome.auto_resolved} auto-resolved` : "",
-            ]
-              .filter(Boolean)
-              .join(" · "),
-      });
+      // Everything a landed review owes the user — BOM strip, rail, launcher stamp,
+      // one honest toast — is shared with the drop-box import (`landFindings`), so a
+      // review that came back incomplete cannot report clean on one surface only.
+      await landFindings({ doc, outcome, label: "Detailed review" });
       // The result is safely in the project folder; tell the service to delete its
       // copy (plan §6.1). Fire-and-forget: a failed ack costs a TTL, not the result.
       void ackReview(config, jobId);
@@ -294,12 +275,26 @@ export const useDetailedReviewStore = create<DetailedReviewState>((set, get) => 
       reviewProgress: null,
       doc: null,
       error: null,
+      activity: [],
     }),
 }));
 
 type Setter = (partial: Partial<DetailedReviewState>) => void;
 
 function onProgress(set: Setter, get: () => DetailedReviewState, event: ReviewProgress): void {
+  // EVERY event lands in the feed, including the ones the switch below ignores —
+  // `log` lines are the whole reason the feed exists. The bar's reading of an event
+  // and the feed's are independent on purpose: folding a stage onto a step is a
+  // product decision, and the feed must not inherit it.
+  const entry = describeProgress(event);
+  if (entry) {
+    const activity = get().activity;
+    const seq = (activity[activity.length - 1]?.seq ?? 0) + 1;
+    set({
+      activity: [...activity.slice(-(ACTIVITY_LIMIT - 1)), { ...entry, seq }],
+    });
+  }
+
   // The stage's own message is deliberately dropped: it narrates the pipeline, and a
   // customer reading "judgment_pass: shard 2 of 3" learns nothing they can act on.
   // What travels is the step it belongs to and how many findings exist so far.

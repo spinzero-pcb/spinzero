@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { isAgentRunning, useAgentReviewStore } from "../../stores/agentReviewStore";
 import { useBomCheckStore } from "../../stores/bomCheckStore";
 import { useBomMappingStore } from "../../stores/bomMappingStore";
 import { DEFAULT_SERVICE_URL, isRunning, useDetailedReviewStore } from "../../stores/detailedReviewStore";
@@ -24,10 +25,16 @@ import { IconInfo, IconPremium } from "../icons";
 // The end application is `project.class`, not a second setting — see lib/projectClass.
 
 /** Short, non-verbose, and the whole promise. Deliberately says nothing about file
- *  names or sizes: the user is being asked to trust a boundary, not to audit one. */
-const PRIVACY =
+ *  names or sizes: the user is being asked to trust a boundary, not to audit one.
+ *
+ *  There are two promises now, because there are two places the review can run, and
+ *  the difference is the entire point of offering the choice. */
+const PRIVACY_SERVICE =
   "Only your BOM is sent for review — never your schematic or layout. " +
   "It is deleted as soon as the review finishes.";
+const PRIVACY_AGENT =
+  "The review runs on this machine. Only part numbers are looked up online — " +
+  "your BOM, schematic and layout never leave the computer.";
 
 export function BomReviewSetup() {
   const setupFor = useRunLauncherStore((s) => s.setupFor);
@@ -43,6 +50,15 @@ export function BomReviewSetup() {
   const run = useBomCheckStore((s) => s.run);
 
   const openMapping = useBomMappingStore((s) => s.openDialog);
+
+  // Which surface a detailed review runs on. Absent means the hosted service, so an
+  // existing install's button keeps doing exactly what it did yesterday.
+  const driver = useSettingsStore((s) => s.reviewDriver) ?? "service";
+  const setDriver = useSettingsStore((s) => s.setReviewDriver);
+  const agentConfig = useSettingsStore((s) => s.agentReview);
+  const agentPhase = useAgentReviewStore((s) => s.phase);
+  const agentError = useAgentReviewStore((s) => s.error);
+  const startAgent = useAgentReviewStore((s) => s.start);
   const startDetailed = useDetailedReviewStore((s) => s.start);
   const detailedPhase = useDetailedReviewStore((s) => s.phase);
   const detailedError = useDetailedReviewStore((s) => s.error);
@@ -115,7 +131,7 @@ export function BomReviewSetup() {
 
   if (!open) return null;
 
-  const detailedBusy = isRunning(detailedPhase);
+  const detailedBusy = isRunning(detailedPhase) || isAgentRunning(agentPhase);
   const busy = running || detailedBusy;
   const fields = mapping
     ? [...mapping.fields].sort(
@@ -125,13 +141,20 @@ export function BomReviewSetup() {
 
   function start() {
     clearError();
-    if (depth === "detailed") {
-      startedHere.current = true;
-      void startDetailed();
-    } else {
+    if (depth !== "detailed") {
       closeSetup();
       void run();
+      return;
     }
+    if (driver === "agent") {
+      // The assistant runs in its own process and reports through `agent-event`, so
+      // there is no in-sheet phase to wait on: close and let the status bar carry it.
+      closeSetup();
+      void startAgent();
+      return;
+    }
+    startedHere.current = true;
+    void startDetailed();
   }
 
   return (
@@ -226,14 +249,51 @@ export function BomReviewSetup() {
               <button
                 type="button"
                 className="setup-info"
-                title={PRIVACY}
-                aria-label={PRIVACY}
+                title={driver === "agent" ? PRIVACY_AGENT : PRIVACY_SERVICE}
+                aria-label={driver === "agent" ? PRIVACY_AGENT : PRIVACY_SERVICE}
                 onClick={(e) => e.preventDefault()}
               >
                 <IconInfo size={13} />
               </button>
             </span>
           </label>
+
+          {/* WHERE it runs, which is a different question from how deep it goes. Both
+              produce the same findings document through the same ingestion path; what
+              differs is whose tokens pay for it and whether the BOM leaves the
+              machine. */}
+          {depth === "detailed" && (
+            <>
+              <div className="setup-section">Run it</div>
+              <label className={`setup-depth ${driver === "service" ? "on" : ""}`}>
+                <input
+                  type="radio"
+                  name="bom-driver"
+                  checked={driver === "service"}
+                  disabled={busy}
+                  onChange={() => void setDriver("service")}
+                />
+                <span className="setup-depth-name">On SpinZero&rsquo;s service</span>
+                <span className="setup-depth-what">
+                  We run it. Your BOM is uploaded and deleted when the review finishes.
+                </span>
+              </label>
+              <label className={`setup-depth ${driver === "agent" ? "on" : ""}`}>
+                <input
+                  type="radio"
+                  name="bom-driver"
+                  checked={driver === "agent"}
+                  disabled={busy}
+                  onChange={() => void setDriver("agent")}
+                />
+                <span className="setup-depth-name">With my AI assistant</span>
+                <span className="setup-depth-what">
+                  Your assistant does the reading, on your own subscription. Nothing about the
+                  design leaves this computer.
+                </span>
+              </label>
+            </>
+          )}
 
           {/* Readiness is checked on the button press, so this is where its verdict
               belongs — beside the control the user just used, not in a toast. */}
@@ -249,7 +309,11 @@ export function BomReviewSetup() {
               another when it finishes.
             </p>
           )}
-          {depth === "detailed" && !service?.base_url && <ServiceFields />}
+          {depth === "detailed" && driver === "agent" && agentError && (
+            <p className="wizard-hint setup-error">Couldn’t start: {agentError}</p>
+          )}
+          {depth === "detailed" && driver === "service" && !service?.base_url && <ServiceFields />}
+          {depth === "detailed" && driver === "agent" && !agentConfig && <AgentFields />}
 
           <div className="wizard-actions">
             <button className="btn-ghost" onClick={closeSetup}>
@@ -306,6 +370,87 @@ function ServiceFields() {
       </label>
       <button className="btn-ghost" onClick={() => void save()}>
         Save service
+      </button>
+    </div>
+  );
+}
+
+/**
+ * How to start the assistant, shown only when nothing is configured.
+ *
+ * Two fields and no more. The MCP server's location is the one thing the app cannot
+ * guess before it ships as a bundled binary (M2), and the environment box exists
+ * because that server needs distributor credentials and the path to the rule pack.
+ * Everything else — the config file, `--strict-mcp-config`, the tool allowlist — is
+ * written by the app, so a user who has never configured an MCP server still gets a
+ * working review.
+ */
+function AgentFields() {
+  const saved = useSettingsStore((s) => s.agentReview);
+  const [command, setCommand] = useState(saved?.server_command ?? "node");
+  const [args, setArgs] = useState((saved?.server_args ?? []).join(" "));
+  const [env, setEnv] = useState(
+    Object.entries(saved?.server_env ?? {})
+      .map(([k, v]) => `${k}=${v}`)
+      .join("\n"),
+  );
+
+  async function save() {
+    const parsedArgs = args.trim().split(/\s+/).filter(Boolean);
+    if (!command.trim() || !parsedArgs.length) return;
+    // `KEY=value` per line, and a value may itself contain `=` (paths and tokens do).
+    const parsedEnv: Record<string, string> = {};
+    for (const line of env.split(/\r?\n/)) {
+      const eq = line.indexOf("=");
+      if (eq <= 0) continue;
+      parsedEnv[line.slice(0, eq).trim()] = line.slice(eq + 1).trim();
+    }
+    await useSettingsStore.getState().setAgentReview({
+      claude_bin: "",
+      server_command: command.trim(),
+      server_args: parsedArgs,
+      server_env: parsedEnv,
+    });
+  }
+
+  return (
+    <div className="review-service-config">
+      <p className="wizard-hint">
+        SpinZero starts its own review server and hands it to your assistant. Tell it how.
+      </p>
+      <label className="review-field">
+        <span>Server command</span>
+        <input
+          className="wizard-input"
+          value={command}
+          spellCheck={false}
+          onChange={(e) => setCommand(e.target.value)}
+          placeholder="node"
+        />
+      </label>
+      <label className="review-field">
+        <span>Arguments</span>
+        <input
+          className="wizard-input"
+          value={args}
+          spellCheck={false}
+          onChange={(e) => setArgs(e.target.value)}
+          placeholder="/path/to/spinzero-mcp/src/server.ts"
+        />
+      </label>
+      <label className="review-field">
+        <span>Environment</span>
+        <textarea
+          className="wizard-input"
+          rows={3}
+          value={env}
+          spellCheck={false}
+          onChange={(e) => setEnv(e.target.value)}
+          placeholder={"SPINZERO_MCP_DEV=1\nDIGIKEY_CLIENT_ID=…\nDIGIKEY_CLIENT_SECRET=…"}
+        />
+      </label>
+      <button className="btn-ghost" onClick={() => void save()}>
+        Save
       </button>
     </div>
   );

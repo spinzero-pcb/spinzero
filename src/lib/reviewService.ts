@@ -234,6 +234,86 @@ export function stageLabel(stage: string | undefined): string {
   return stage ? (STAGE_LABELS[stage] ?? stage) : "";
 }
 
+/** What kind of row this is, which is all the activity feed styles on. */
+export type ActivityTone = "step" | "tool" | "waiting" | "error";
+
+/** One line of the activity feed — the raw event stream, made readable.
+ *
+ *  The three-step bar answers "how far along"; this answers "what is it doing right
+ *  now", which is the question a run that takes ten minutes actually provokes. It is
+ *  a rendering of the event stream and nothing more: every field here came off the
+ *  wire, so it carries counts, stage names and tool names, never BOM content —
+ *  unless the operator ran the engine with SPINZERO_TRACE, which is what `detail`
+ *  carries and why it is separate from `text`. */
+export interface ActivityEntry {
+  /** Sequence number, for React keys: six events can share a millisecond. */
+  seq: number;
+  /** The engine's own timestamp — the relay does not rewrite it. */
+  ts: string;
+  tone: ActivityTone;
+  text: string;
+  /** Tool arguments/result, present only under SPINZERO_TRACE. */
+  detail?: string;
+}
+
+function seconds(ms: unknown): string {
+  return typeof ms === "number" ? `${(ms / 1000).toFixed(1)}s` : "";
+}
+
+/**
+ * Turn one progress event into a feed line.
+ *
+ * Deliberately lossy in one direction only: it never invents detail the event did
+ * not carry, and it never drops an event. A type this app has not been taught yet
+ * still gets a row — an unknown event is exactly the case where someone is staring
+ * at this panel wondering what the service is doing.
+ */
+export function describeProgress(event: ReviewProgress): ActivityEntry | null {
+  const data = event.data ?? {};
+  const label = stageLabel(event.stage);
+  switch (event.type) {
+    case "queued":
+      return line(event, "step", "Waiting for a reviewer");
+    case "run_started":
+      return line(event, "step", "Review started");
+    case "stage_started":
+      return line(event, "step", `${label} — started`);
+    case "stage_done": {
+      const took = seconds(data.duration_ms);
+      return line(event, "step", `${label} — done${took ? ` (${took})` : ""}`);
+    }
+    case "stage_progress":
+      return line(event, "step", event.message || label);
+    case "log": {
+      // A heartbeat: the loop saying it is alive while one model turn runs. These are
+      // the rows that prove a silent stretch is a slow turn and not a dead worker.
+      if (data.waiting) return line(event, "waiting", event.message || "waiting on the model");
+      if (typeof data.tool === "string") {
+        const took = seconds(data.duration_ms);
+        const turn = typeof data.turn === "number" ? ` · turn ${data.turn}` : "";
+        const entry = line(
+          event,
+          data.ok === false ? "error" : "tool",
+          `${data.tool}${turn}${took ? ` · ${took}` : ""}`,
+        );
+        const detail = [data.input, data.result].filter((v) => typeof v === "string").join("\n -> ");
+        return detail ? { ...entry, detail } : entry;
+      }
+      return event.message ? line(event, "step", event.message) : null;
+    }
+    case "completed":
+      return line(event, "step", "Review complete");
+    case "failed":
+      return line(event, "error", `Failed: ${String(data.error ?? event.message ?? "no reason given")}`);
+    default:
+      return line(event, "step", event.message || String(event.type));
+  }
+}
+
+function line(event: ReviewProgress, tone: ActivityTone, text: string): ActivityEntry {
+  return { seq: 0, ts: event.ts, tone, text };
+}
+
 /**
  * What to tell the user when a review came back incomplete — or null when it
  * didn't.

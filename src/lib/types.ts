@@ -231,6 +231,29 @@ export interface UiSettings {
    *  dev token (plan §5); Phase 2 replaces it with a Clerk session whose refresh
    *  token belongs in the OS keychain, not here. */
   review_service?: ReviewServiceSettings | null;
+  /** How to start a review through the user's own AI assistant, over MCP. Null =
+   *  never set up, and the option says so rather than failing on click. */
+  agent_review?: AgentReviewSettings | null;
+  /** Which surface the detailed BOM review runs on. Absent keeps the hosted service. */
+  review_driver?: "service" | "agent" | null;
+}
+
+/**
+ * What the app needs to spawn the user's assistant against SpinZero's own MCP server.
+ *
+ * The app writes the MCP config itself and passes `--strict-mcp-config`, so the
+ * assistant sees exactly one server and a user who has never run `claude mcp add`
+ * still gets a working review. Mirrors `agent::AgentConfig`.
+ */
+export interface AgentReviewSettings {
+  /** Path to the `claude` executable; empty means "whatever is on PATH". */
+  claude_bin: string;
+  /** Command that starts the MCP server, e.g. "node". */
+  server_command: string;
+  /** Its arguments, e.g. ["/path/to/mcp/src/server.ts"]. */
+  server_args: string[];
+  /** Environment for the server: credentials, binary paths. */
+  server_env: Record<string, string>;
 }
 
 export interface ReviewServiceSettings {
