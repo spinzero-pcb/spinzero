@@ -38,7 +38,7 @@ impl Rule for LifecycleStatus {
         // one are different jobs for the engineer. See `Ctx::has_column`.
         if ctx.column_wholly_blank("lifecycle") {
             return vec![Raw::new(
-                ctx.missing_sev(Severity::Low),
+                ctx.missing_sev(Severity::Observation),
                 "Lifecycle column is empty on every line",
             )
             .detail(format!(
@@ -56,7 +56,7 @@ impl Rule for LifecycleStatus {
         }
         if !ctx.has_column("lifecycle") {
             return vec![Raw::new(
-                ctx.missing_sev(Severity::Low),
+                ctx.missing_sev(Severity::Observation),
                 "Lifecycle status not verifiable from BOM",
             )
             .detail(
@@ -417,7 +417,7 @@ impl Rule for MissingAecq {
             let listed = listed_by_part(&labelled);
             out.push(
                 Raw::new(
-                    ctx.missing_sev(Severity::Low),
+                    ctx.missing_sev(Severity::Observation),
                     format!(
                         "{} part{} have no AEC-Q status recorded",
                         blank.len(),
@@ -481,7 +481,7 @@ impl Rule for MissingCompliance {
         if populated.is_empty() {
             return Vec::new();
         }
-        let miss_sev = ctx.missing_sev(Severity::Medium);
+        let miss_sev = ctx.missing_sev(Severity::Observation);
 
         let mut out = Vec::new();
         for field in &required {

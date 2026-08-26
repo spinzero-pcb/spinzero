@@ -32,7 +32,7 @@ function outcome(partial: Partial<CheckOutcome> = {}): CheckOutcome {
   };
 }
 
-const finding = (severity: "Critical" | "Major" | "Low", fingerprint: string) => ({
+const finding = (severity: "Important" | "Observation", fingerprint: string) => ({
   id: "B01",
   section: "BOM · Integrity",
   severity,
@@ -57,7 +57,7 @@ describe("bomCheckStore", () => {
       calls.push({ cmd, args });
       if (cmd === "run_bom_check")
         return outcome({
-          findings: doc({ findings: [finding("Critical", "abc123")] }),
+          findings: doc({ findings: [finding("Important", "abc123")] }),
           filed: 1,
         });
       if (cmd === "list_comments") return [];
@@ -136,7 +136,7 @@ describe("bomCheckStore", () => {
   it("summarizes a run for the toast", () => {
     const out = outcome({
       findings: doc({
-        findings: [finding("Critical", "a"), finding("Low", "b")],
+        findings: [finding("Important", "a"), finding("Observation", "b")],
       }),
       filed: 1,
       auto_resolved: 2,
@@ -144,7 +144,7 @@ describe("bomCheckStore", () => {
     });
     expect(runTitle(out)).toBe("BOM check: 2 issues found");
     const msg = runMessage(out);
-    expect(msg).toContain("1 critical");
+    expect(msg).toContain("1 important");
     expect(msg).toContain("1 new comment");
     expect(msg).toContain("2 auto-resolved");
     expect(msg).toContain("House Code");

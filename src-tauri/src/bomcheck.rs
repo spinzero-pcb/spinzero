@@ -66,8 +66,16 @@ pub struct CheckOutcome {
 }
 
 /// Findings-schema severity → the review comment vocabulary (four levels).
+///
+/// The findings contract carries two levels; the comment rail carries four, and its
+/// values are persisted on disk, so the two ends stay separate and meet here. The
+/// retired five-level words are still matched so a v1.0 document in a project's
+/// review inbox lands on the colour it was written for instead of on "info".
 fn comment_severity(severity: &str) -> &'static str {
     match severity {
+        "Important" => "critical",
+        "Observation" => "info",
+        // Legacy (findings v1.0).
         "Critical" => "critical",
         "Major" => "major",
         "Medium" => "minor",
@@ -383,9 +391,9 @@ pub fn archive_inbox(project_dir: &Path, name: &str) -> Result<(), String> {
 pub fn validated_doc(value: serde_json::Value) -> Result<FindingsDoc, String> {
     let doc: FindingsDoc =
         serde_json::from_value(value).map_err(|e| format!("not a findings.json document: {e}"))?;
-    if doc.schema_version != "1.0" {
+    if doc.schema_version != "1.1" && doc.schema_version != "1.0" {
         return Err(format!(
-            "findings schema_version {} is not supported by this app (expected 1.0)",
+            "findings schema_version {} is not supported by this app (expected 1.1 or 1.0)",
             doc.schema_version
         ));
     }
@@ -637,7 +645,7 @@ mod tests {
         let root = temp_root("ingest");
         let pcb = root.join(".pcbreview");
 
-        // A duplicate designator across two lines: one Critical finding.
+        // A duplicate designator across two lines: one Important finding.
         let broken = vec![
             line(1, &["R1"], "10k", "RC0402FR-0710KL"),
             line(2, &["R1"], "4k7", "RC0402FR-074K7L"),
@@ -754,8 +762,8 @@ mod tests {
         doc.findings.push(bom_rules::Finding {
             id: "B99".into(),
             section: "BOM · Judgment".into(),
-            severity: "Major".into(),
-            confidence: "Medium".into(),
+            severity: "Important".into(),
+            confidence: "Low".into(),
             rule_id: None,
             title: "R1 MPN decodes to 4.7k but the value says 10k".into(),
             detail: String::new(),

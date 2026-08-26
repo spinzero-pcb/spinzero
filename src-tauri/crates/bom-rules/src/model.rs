@@ -7,50 +7,40 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::re;
 
-/// Findings-schema severity. `Question` exists in the schema but no deterministic
-/// rule emits it — judgment stages do.
+/// Findings-schema severity — two levels, deliberately.
+///
+/// `Important` = act before this ships; `Observation` = worth knowing, not a blocker.
+/// How sure the reviewer is lives in `confidence`, not here.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Severity {
-    Critical,
-    Major,
-    Medium,
-    Low,
-    Question,
+    Important,
+    Observation,
 }
 
 impl Severity {
-    /// Accepts both the config vocabulary (BLOCKER/CRITICAL/MAJOR/MINOR/INFO) and
-    /// already-normalized schema values. Unknown text degrades to `Low` rather than
-    /// failing a run — a hand-edited profile must never break the check.
+    /// Accepts the config vocabulary (BLOCKER/CRITICAL/MAJOR/MINOR/INFO), the schema
+    /// values, and the retired five-level words so a hand-edited profile or an old
+    /// document still loads. Unknown text degrades to `Observation` rather than
+    /// failing a run — a bad profile must never break the check.
     pub fn parse(raw: &str) -> Severity {
         match raw.trim().to_ascii_uppercase().as_str() {
-            "BLOCKER" | "CRITICAL" => Severity::Critical,
-            "MAJOR" => Severity::Major,
-            "MINOR" | "MEDIUM" => Severity::Medium,
-            "INFO" | "LOW" => Severity::Low,
-            "QUESTION" => Severity::Question,
-            _ => Severity::Low,
+            "BLOCKER" | "CRITICAL" | "MAJOR" | "IMPORTANT" => Severity::Important,
+            _ => Severity::Observation,
         }
     }
 
     pub fn as_str(self) -> &'static str {
         match self {
-            Severity::Critical => "Critical",
-            Severity::Major => "Major",
-            Severity::Medium => "Medium",
-            Severity::Low => "Low",
-            Severity::Question => "Question",
+            Severity::Important => "Important",
+            Severity::Observation => "Observation",
         }
     }
 
-    /// Sort rank — Critical first, matching the schema's severity order.
+    /// Sort rank — Important first, matching the schema's severity order.
     pub fn rank(self) -> u8 {
         match self {
-            Severity::Critical => 0,
-            Severity::Major => 1,
-            Severity::Medium => 2,
-            Severity::Low => 3,
-            Severity::Question => 4,
+            Severity::Important => 0,
+            Severity::Observation => 1,
         }
     }
 }

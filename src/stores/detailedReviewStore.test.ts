@@ -26,7 +26,7 @@ function paidDoc(): FindingsDoc {
       {
         id: "B01",
         section: "BOM · Sourcing",
-        severity: "Major",
+        severity: "Important",
         confidence: "High",
         rule_id: "bom.manufacturer_mpn_unpaired",
         title: "Manufacturer without a part number",

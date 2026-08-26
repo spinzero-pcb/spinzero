@@ -6,6 +6,6 @@
     "bom.lifecycle_status",
     "bom.missing_compliance"
   ],
-  "expect_severities": { "bom.missing_aecq": "Major", "bom.lifecycle_status": "Critical" },
+  "expect_severities": { "bom.missing_aecq": "Important", "bom.lifecycle_status": "Important" },
   "forbid_rules": ["bom.missing_msl", "bom.missing_sourcing_id"]
 }

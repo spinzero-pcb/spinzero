@@ -1,0 +1,121 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://spinzero.app/schemas/findings-1.1.json",
+  "title": "SpinZero findings.json",
+  "description": "The one output contract every SpinZero review producer emits: the free in-app deterministic checks (confidence 'Unvalidated'), the paid review engine, and any future CLI/CI surface. Consumers ingest it through a single path (findings -> review comments).",
+  "type": "object",
+  "required": ["schema_version", "pipeline", "findings"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": { "const": "1.1" },
+    "engine_version": {
+      "type": "string",
+      "description": "Version of the producer that emitted this document (rule pack / prompt pack)."
+    },
+    "pipeline": {
+      "type": "string",
+      "description": "Which review produced this. 'bom-rules' = free local deterministic checks; 'bom-detailed' = the paid LLM pipeline.",
+      "examples": ["bom-rules", "bom-detailed"]
+    },
+    "profile": {
+      "type": "string",
+      "description": "End-application profile the rules were configured with.",
+      "examples": ["default", "industrial", "medical", "automotive"]
+    },
+    "generated_ts": { "type": "string", "format": "date-time" },
+    "findings": { "type": "array", "items": { "$ref": "#/$defs/finding" } },
+    "bom_audit": { "type": "array", "items": { "$ref": "#/$defs/auditEntry" } },
+    "stats": { "$ref": "#/$defs/stats" },
+    "run_health": {
+      "type": "array",
+      "description": "Stages that did not fully run. Only non-clean stages appear, so a non-empty array means the result is incomplete and says why. Consumers should SHOW this: a validation stage killed by a provider error otherwise reaches the engineer as unexplained low-confidence findings.",
+      "items": { "$ref": "#/$defs/runHealthEntry" }
+    }
+  },
+  "$defs": {
+    "severity": {
+      "enum": ["Important", "Observation"],
+      "description": "Two levels, deliberately. 'Important' = act before this design ships; 'Observation' = worth knowing, not a blocker. How SURE the reviewer is lives in `confidence`, not here — that split is why the old five-level scale (which mixed 'Question' into severity) is gone."
+    },
+    "confidence": {
+      "enum": ["High", "Low", "Unvalidated"],
+      "description": "'High' = verified against a datasheet, distributor record or KB entry; 'Low' = plausible but unverified, so the engineer must confirm it; 'Unvalidated' = a raw deterministic-rule hit that no validation pass has looked at — what the free tier emits."
+    },
+    "finding": {
+      "type": "object",
+      "required": ["id", "section", "severity", "confidence", "title", "fingerprint"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string", "description": "Document-local id (B01, B02 …). Not stable across runs — use `fingerprint` for identity." },
+        "section": { "type": "string", "examples": ["BOM · Sourcing"] },
+        "severity": { "$ref": "#/$defs/severity" },
+        "confidence": { "$ref": "#/$defs/confidence" },
+        "rule_id": {
+          "type": ["string", "null"],
+          "description": "Deterministic rule that produced this; null for judgment findings."
+        },
+        "title": { "type": "string" },
+        "detail": { "type": "string" },
+        "evidence": { "type": "array", "items": { "type": "string" } },
+        "fix": { "type": "string" },
+        "anchors": { "type": "array", "items": { "$ref": "#/$defs/anchor" } },
+        "fingerprint": {
+          "type": "string",
+          "description": "blake3(rule_id | anchor set | normalized predicate), truncated. The dedupe key: a re-run updates the existing comment instead of re-filing, and a fingerprint that disappears auto-resolves its comment."
+        }
+      }
+    },
+    "anchor": {
+      "type": "object",
+      "required": ["type"],
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "enum": ["bom_row", "bom"],
+          "description": "'bom_row' anchors to reference designators; 'bom' is a document-level finding with no single row."
+        },
+        "refdes": { "type": "array", "items": { "type": "string" } },
+        "mpn": { "type": "string" }
+      }
+    },
+    "auditEntry": {
+      "type": "object",
+      "required": ["item", "result"],
+      "additionalProperties": false,
+      "properties": {
+        "item": { "type": "string" },
+        "result": { "enum": ["OK", "GAP", "TRUNCATED"] },
+        "note": { "type": "string" },
+        "ref": { "type": "string", "description": "Cross-link to a finding id." }
+      }
+    },
+    "runHealthEntry": {
+      "type": "object",
+      "required": ["stage", "status"],
+      "additionalProperties": false,
+      "properties": {
+        "stage": {
+          "type": "string",
+          "description": "Stage id, as used in the producer's progress events.",
+          "examples": ["fp_validation", "judgment_pass"]
+        },
+        "status": {
+          "enum": ["degraded", "failed"],
+          "description": "'degraded' = the stage ran but covered less than it should; 'failed' = it produced nothing."
+        },
+        "detail": { "type": "string", "description": "One sentence naming the real cause — a provider error, a cost cap, a timeout." }
+      }
+    },
+    "stats": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "item_count": { "type": "integer" },
+        "finding_count": { "type": "integer" },
+        "duration_ms": { "type": "integer" },
+        "tokens": { "type": "object", "additionalProperties": true },
+        "stage_timings": { "type": "object", "additionalProperties": true }
+      }
+    }
+  }
+}

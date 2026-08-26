@@ -70,7 +70,7 @@ impl Rule for MissingSourcingId {
         }
         if systemic(missing.len(), eligible.len(), ctx, 0.35, 8) {
             return vec![Raw::new(
-                Severity::Major,
+                Severity::Important,
                 format!(
                     "BOM does not track sourcing identifiers ({} of {} parts have no MPN or \
                      distributor part number)",

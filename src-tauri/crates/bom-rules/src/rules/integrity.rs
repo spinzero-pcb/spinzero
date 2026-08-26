@@ -202,7 +202,7 @@ impl Rule for MissingRequiredField {
                 systemic_fields.push(f);
                 out.push(
                     Raw::new(
-                        Severity::Major,
+                        Severity::Important,
                         format!(
                             "Required field '{f}' is not populated in this BOM ({missing_n} of {} \
                              parts lack it)",

@@ -1,4 +1,4 @@
-// findings.json — the one review contract, mirroring schemas/findings-1.0.json.
+// findings.json — the one review contract, mirroring schemas/findings-1.1.json.
 //
 // Every review producer emits this document: the free deterministic BOM check
 // (Rust `bom-rules`, confidence "Unvalidated") today, the paid detailed review
@@ -6,13 +6,17 @@
 // comments in bomcheck.rs, matched by `fingerprint` — and this file is what the
 // BOM tab renders the run summary from.
 //
-// Keep in sync with schemas/findings-1.0.json and src-tauri/crates/bom-rules.
+// Keep in sync with schemas/findings-1.1.json and src-tauri/crates/bom-rules.
 
 import type { Comment } from "./types";
 
-export type FindingSeverity = "Critical" | "Major" | "Medium" | "Low" | "Question";
-/** "Unvalidated" = a raw rule hit no validation pass has confirmed (the free tier). */
-export type FindingConfidence = "High" | "Medium" | "Low" | "Unvalidated";
+/** Two levels, deliberately. "Important" = act before this ships; "Observation" =
+ *  worth knowing, not a blocker. How SURE the reviewer is lives in `confidence`. */
+export type FindingSeverity = "Important" | "Observation";
+/** "High" = verified against a datasheet/distributor/KB record; "Low" = plausible but
+ *  unverified, so the engineer must confirm it; "Unvalidated" = a raw rule hit no
+ *  validation pass has looked at (the free tier). */
+export type FindingConfidence = "High" | "Low" | "Unvalidated";
 
 export interface FindingAnchor {
   /** "bom_row" anchors to designators; "bom" is a document-level finding. */
@@ -150,13 +154,7 @@ export function isBomProfile(v: unknown): v is BomProfile {
   return typeof v === "string" && BOM_PROFILES.some((p) => p.id === v);
 }
 
-export const SEVERITY_ORDER: FindingSeverity[] = [
-  "Critical",
-  "Major",
-  "Medium",
-  "Low",
-  "Question",
-];
+export const SEVERITY_ORDER: FindingSeverity[] = ["Important", "Observation"];
 
 /** Findings per severity, highest first — the summary strip's data. */
 export function severityCounts(doc: FindingsDoc): { severity: FindingSeverity; n: number }[] {

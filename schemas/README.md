@@ -7,13 +7,14 @@ repos consume them rather than each defining their own shape.
 
 | File | What it pins |
 |---|---|
-| `findings-1.0.json` | `findings.json` — the one output contract every review producer emits. |
+| `findings-1.1.json` | `findings.json` — the one output contract every review producer emits. |
+| `findings-1.0.json` | The retired five-level severity / four-level confidence version. No producer emits it; kept so a document already sitting in a project's review inbox still reads. |
 | `bundle-1.0.json` | The review bundle — every file a detailed review may upload, and by omission everything it may not. |
-| `rule-fixtures/` | Golden BOM fixtures + expected rule hits. Both rule runtimes (the Rust `bom-rules` crate here, the Python `run_bom.py` in the engine) must agree on them. |
+| `rule-fixtures/` | Golden BOM fixtures + expected rule hits, pinning the Rust `bom-rules` crate. |
 
 ## Consumers
 
-- Rust: `src-tauri/crates/bom-rules` emits `findings.json` v1.0 with
+- Rust: `src-tauri/crates/bom-rules` emits `findings.json` v1.1 with
   `pipeline: "bom-rules"` and `confidence: "Unvalidated"`.
 - TypeScript: `src/lib/findings.ts` mirrors the schema for the UI.
 - The app ingests **both** tiers through one path (`bomcheck.rs` →
@@ -30,8 +31,11 @@ repos consume them rather than each defining their own shape.
 ## Changing the schema
 
 `schema_version` is the compatibility gate. Additive, optional fields keep
-`1.0`; anything a consumer could choke on gets a new version and a new file
-(`findings-1.1.json`), with the old one kept for readers.
+the version; anything a consumer could choke on gets a new version and a new file
+(`findings-1.2.json`), with the old one kept for readers. That is why 1.1 exists:
+collapsing severity to two levels and confidence to three is a value a 1.0 reader
+would not recognise. The app reads both and normalises on ingest
+(`comment_severity` in `bomcheck.rs`).
 
 ## Rule fixtures
 
