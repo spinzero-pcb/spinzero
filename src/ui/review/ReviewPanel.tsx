@@ -15,6 +15,22 @@ import type { Comment, CommentSeverity, CommentView } from "../../lib/types";
 import { ContextMenu, type MenuItem } from "../ContextMenu";
 import { IconChecklist, IconComment, IconCopy, IconCheck, IconRefresh, IconTrash } from "../icons";
 
+/** Worst first. A rail sorted by filing order buries the one comment that matters
+ *  under twenty notes, so severity decides the order and time only breaks ties. An
+ *  unset severity sorts last: it is a comment nobody has triaged. */
+const SEVERITY_RANK: Record<CommentSeverity, number> = { critical: 0, major: 1, minor: 2, info: 3 };
+const NO_SEVERITY_RANK = 4;
+
+function bySeverity(a: Comment, b: Comment): number {
+  const ra = a.severity ? SEVERITY_RANK[a.severity] : NO_SEVERITY_RANK;
+  const rb = b.severity ? SEVERITY_RANK[b.severity] : NO_SEVERITY_RANK;
+  return ra - rb;
+}
+
+/** Resolved and dismissed threads are DONE. They stay reachable, but out of the way:
+ *  the rail is for what still needs a decision. */
+const CLOSED: DisplayStatus[] = ["resolved", "dismissed"];
+
 const SEVERITY_CLASS: Record<CommentSeverity, string> = {
   info: "sev-info",
   minor: "sev-minor",
@@ -64,6 +80,9 @@ export function ReviewPanel() {
   const deleteSession = useReviewStore((s) => s.deleteSession);
 
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null);
+  // Collapsed on every mount, deliberately: opening the tab should put the open
+  // threads in front of you, not last session's finished ones.
+  const [showClosed, setShowClosed] = useState(false);
 
   const numbers = numberMap(comments);
 
@@ -87,14 +106,29 @@ export function ReviewPanel() {
   }
   const recheckCount = counts.recheck;
 
-  const visible = comments.filter((c) => {
-    if (!inSession(c)) return false;
-    const st = infoById.get(c.id)!.status;
-    if (filterStatus !== "all" && st !== filterStatus) return false;
-    if (filterSeverity !== "all" && c.severity !== filterSeverity) return false;
-    if (filterView !== "all" && c.view !== filterView) return false;
-    return true;
-  });
+  const visible = comments
+    .filter((c) => {
+      if (!inSession(c)) return false;
+      const st = infoById.get(c.id)!.status;
+      if (filterStatus !== "all" && st !== filterStatus) return false;
+      if (filterSeverity !== "all" && c.severity !== filterSeverity) return false;
+      if (filterView !== "all" && c.view !== filterView) return false;
+      return true;
+    })
+    // `sort` is stable in every engine we ship on, so equal severities keep the
+    // order the store already put them in.
+    .sort(bySeverity);
+
+  // Split only when the user has NOT asked for a status. Filtering to "Done" and then
+  // finding the results folded into a collapsed section would be absurd, so an
+  // explicit status filter renders one flat list.
+  const splitClosed = filterStatus === "all";
+  const open = splitClosed
+    ? visible.filter((c) => !CLOSED.includes(infoById.get(c.id)!.status))
+    : visible;
+  const closed = splitClosed
+    ? visible.filter((c) => CLOSED.includes(infoById.get(c.id)!.status))
+    : [];
 
   /** Item 8: clicking a comment GOES to it (correct canvas + camera) and opens the
    *  thread — it never selects or highlights the object. */
@@ -160,6 +194,98 @@ export function ReviewPanel() {
     items.push({ label: `Delete “${session.title}”`, icon: <IconTrash size={14} />, onClick: () => void deleteSession(session.id) });
     const r = e.currentTarget.getBoundingClientRect();
     setCtxMenu({ x: r.left, y: r.bottom + 2, items });
+  }
+
+  /** One rail row. Shared by the open list and the resolved drawer, which render the
+   *  same thing in two places. */
+  function renderRow(c: Comment) {
+    const info = infoById.get(c.id)!;
+    const sev = c.severity ? SEVERITY_CLASS[c.severity] : "sev-none";
+    const body = c.thread[0]?.body ?? "";
+    const anchorLabel = refLabel(c);
+    const lastTs = c.thread[c.thread.length - 1]?.ts ?? c.created_ts;
+    return (
+      <div
+        key={c.id}
+        role="button"
+        tabIndex={0}
+        className={`rv-row ${sev} st-${info.status} ${openThreadId === c.id ? "sel" : ""}`}
+        onClick={() => go(c)}
+        onContextMenu={(e) => rowMenu(e, c)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            go(c);
+          }
+        }}
+      >
+        <span className={`rv-status st-${info.status}`}>
+          {statusGlyph(info.status, numbers.get(c.id) ?? 0)}
+        </span>
+        <span className="rv-main">
+          <span className="rv-reftop">
+            <span className="rv-ref mono">{anchorLabel}</span>
+            <span className={`rv-viewtag view-${c.view}`}>{VIEW_LABEL[c.view]}</span>
+            {c.severity && (
+              <span className={`rv-sev ${SEVERITY_CLASS[c.severity]}`}>{c.severity}</span>
+            )}
+            {c.source !== "human" && (
+              <span className={`rv-src src-${c.source}`}>{c.source}</span>
+            )}
+          </span>
+          <span className="rv-body">{body || <em className="dim">(no text)</em>}</span>
+          <span className="rv-foot">
+            <span className="dim">{formatRelative(lastTs)}</span>
+            {c.thread.length > 1 && (
+              <span>{c.thread.length - 1} repl{c.thread.length - 1 > 1 ? "ies" : "y"}</span>
+            )}
+            {c.assignee && <span className="rv-assignee">@{c.assignee}</span>}
+            {info.status === "recheck" && info.diff.length > 0 && (
+              <span className="rv-diff mono">{info.diff[0]}</span>
+            )}
+          </span>
+        </span>
+        {/* Inline mark-done / dismiss / reopen (item 9) — act on a comment
+            straight from the rail without opening the thread. */}
+        <span className="rv-rowactions">
+          {c.status === "resolved" || c.status === "dismissed" ? (
+            <button
+              className="rv-rowbtn"
+              title="Reopen"
+              onClick={(e) => {
+                e.stopPropagation();
+                void setStatus(c.id, "open");
+              }}
+            >
+              <IconRefresh size={13} />
+            </button>
+          ) : (
+            <>
+              <button
+                className="rv-rowbtn resolve"
+                title="Done"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  void setStatus(c.id, "resolved");
+                }}
+              >
+                <IconCheck size={13} />
+              </button>
+              <button
+                className="rv-rowbtn dismiss"
+                title="Dismiss"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  void setStatus(c.id, "dismissed");
+                }}
+              >
+                <span className="rv-glyph-x">×</span>
+              </button>
+            </>
+          )}
+        </span>
+      </div>
+    );
   }
 
   const chip = (key: typeof filterStatus, label: string, n?: number) => (
@@ -273,95 +399,28 @@ export function ReviewPanel() {
         </div>
       ) : (
         <div className="rv-list">
-          {visible.map((c) => {
-            const info = infoById.get(c.id)!;
-            const sev = c.severity ? SEVERITY_CLASS[c.severity] : "sev-none";
-            const body = c.thread[0]?.body ?? "";
-            const anchorLabel = refLabel(c);
-            const lastTs = c.thread[c.thread.length - 1]?.ts ?? c.created_ts;
-            return (
-              <div
-                key={c.id}
-                role="button"
-                tabIndex={0}
-                className={`rv-row ${sev} st-${info.status} ${openThreadId === c.id ? "sel" : ""}`}
-                onClick={() => go(c)}
-                onContextMenu={(e) => rowMenu(e, c)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" || e.key === " ") {
-                    e.preventDefault();
-                    go(c);
-                  }
-                }}
+          {open.map(renderRow)}
+          {open.length === 0 && closed.length > 0 && (
+            <div className="rv-empty rv-empty-inline">Nothing open. Everything here is done.</div>
+          )}
+          {/* Done threads, folded away and collapsed on every open. Struck-through rows
+              still competed for attention in a list the reader is scanning for work;
+              the count is enough to say "and these are handled". */}
+          {closed.length > 0 && (
+            <>
+              <button
+                className="rv-drawer"
+                aria-expanded={showClosed}
+                title="Threads that are done — resolved or dismissed"
+                onClick={() => setShowClosed((v) => !v)}
               >
-                <span className={`rv-status st-${info.status}`}>
-                  {statusGlyph(info.status, numbers.get(c.id) ?? 0)}
-                </span>
-                <span className="rv-main">
-                  <span className="rv-reftop">
-                    <span className="rv-ref mono">{anchorLabel}</span>
-                    <span className={`rv-viewtag view-${c.view}`}>{VIEW_LABEL[c.view]}</span>
-                    {c.severity && (
-                      <span className={`rv-sev ${SEVERITY_CLASS[c.severity]}`}>{c.severity}</span>
-                    )}
-                    {c.source !== "human" && (
-                      <span className={`rv-src src-${c.source}`}>{c.source}</span>
-                    )}
-                  </span>
-                  <span className="rv-body">{body || <em className="dim">(no text)</em>}</span>
-                  <span className="rv-foot">
-                    <span className="dim">{formatRelative(lastTs)}</span>
-                    {c.thread.length > 1 && (
-                      <span>{c.thread.length - 1} repl{c.thread.length - 1 > 1 ? "ies" : "y"}</span>
-                    )}
-                    {c.assignee && <span className="rv-assignee">@{c.assignee}</span>}
-                    {info.status === "recheck" && info.diff.length > 0 && (
-                      <span className="rv-diff mono">{info.diff[0]}</span>
-                    )}
-                  </span>
-                </span>
-                {/* Inline mark-done / dismiss / reopen (item 9) — act on a comment
-                    straight from the rail without opening the thread. */}
-                <span className="rv-rowactions">
-                  {c.status === "resolved" || c.status === "dismissed" ? (
-                    <button
-                      className="rv-rowbtn"
-                      title="Reopen"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        void setStatus(c.id, "open");
-                      }}
-                    >
-                      <IconRefresh size={13} />
-                    </button>
-                  ) : (
-                    <>
-                      <button
-                        className="rv-rowbtn resolve"
-                        title="Done"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          void setStatus(c.id, "resolved");
-                        }}
-                      >
-                        <IconCheck size={13} />
-                      </button>
-                      <button
-                        className="rv-rowbtn dismiss"
-                        title="Dismiss"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          void setStatus(c.id, "dismissed");
-                        }}
-                      >
-                        <span className="rv-glyph-x">×</span>
-                      </button>
-                    </>
-                  )}
-                </span>
-              </div>
-            );
-          })}
+                <span className={`rv-drawer-caret ${showClosed ? "open" : ""}`}>›</span>
+                Resolved
+                <span className="rv-filter-n">{closed.length}</span>
+              </button>
+              {showClosed && closed.map(renderRow)}
+            </>
+          )}
         </div>
       )}
       {ctxMenu && <ContextMenu {...ctxMenu} onClose={() => setCtxMenu(null)} />}

@@ -3218,6 +3218,32 @@ textarea.wizard-input {
 .rv-row.st-resolved, .rv-row.st-dismissed { opacity: 0.6; }
 .rv-row.st-resolved .rv-body { text-decoration: line-through; }
 
+/* The "Resolved" drawer: done threads are folded behind it so the rail reads as a
+   list of work, not a mix of work and history. */
+.rv-drawer {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+  width: 100%;
+  padding: var(--sp-1) var(--sp-2);
+  margin: var(--sp-1) 0;
+  border-radius: var(--radius-1);
+  border-top: 1px solid var(--border-1);
+  background: none;
+  color: var(--fg-2);
+  font-size: var(--fs-0);
+  text-align: left;
+  cursor: pointer;
+}
+.rv-drawer:hover { background: var(--bg-2); color: var(--fg-1); }
+.rv-drawer:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
+.rv-drawer-caret {
+  display: inline-block;
+  transition: transform 0.12s;
+}
+.rv-drawer-caret.open { transform: rotate(90deg); }
+.rv-empty-inline { padding: var(--sp-2); }
+
 .rv-status {
   flex: none;
   width: 20px;
