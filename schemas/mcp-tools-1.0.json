@@ -1,0 +1,331 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://spinzero.app/schemas/mcp-tools-1.0.json",
+  "title": "SpinZero MCP tool contract",
+  "description": "The tool surface the SpinZero MCP server exposes to a customer's own agent. It is a HARNESS, not a toolbox: the server owns the workflow and hands out one step at a time. Two conventions every tool honours — every call but spinzero_start_review carries a review_id and is phase-checked, and every result carries a `next` field naming the call to make. An out-of-order call is refused WITH that instruction rather than merely denied. Published so the surface can be audited and implemented against; the server itself is not open source.",
+  "contract": "mcp-tools-1.0",
+  "notes": {
+    "unreachable_stages": "There is deliberately no tool for the deterministic layer — bundle validation, distributor lookup, datasheet collection, the rule pack, the BOM/distributor cross-check and document assembly. They are not refused; they are ABSENT, which is what makes them impossible to skip, reorder or reimplement rather than merely discouraged. They all run inside spinzero_start_review.",
+    "findings_are_submissions": "A finding exists only as an accepted submission. Prose in the conversation is discarded, the findings document is assembled by the server, and a client cannot set a fingerprint — so it cannot address another finding's comment thread by guessing one.",
+    "coverage": "A batch of parts must be accounted for in full, including the parts nothing was wrong with. A submission that omits one is refused with the missing part numbers named. A run that is abandoned assembles a report that SAYS it is incomplete; silence is never presented as clearance.",
+    "privacy": "The review runs on the customer's machine. Manufacturer part numbers go out for distributor and datasheet lookups; the schematic, BOM and layout do not. Note what that does not say: the evidence the client model reasons over goes to the client's own model provider, which is the surface working as designed.",
+    "feedback_verdicts": [
+      "false_positive",
+      "wrong_severity",
+      "missed_this",
+      "helpful",
+      "unclear"
+    ]
+  },
+  "tools": [
+    {
+      "name": "spinzero_start_review",
+      "description": "Start a SpinZero review. Give it a KiCad project directory or a prepared review bundle directory; a raw project is extracted for you. This runs the whole deterministic layer inside the server — bundle validation, distributor lookups, EVERY datasheet on the BOM, the public rule pack, and a field-by-field cross-check of every row against the distributor record — then hands you the first batch of parts to verify. Expect it to take a minute or two on a real board. Nothing else in this toolset works until you call it. PRIVACY: the schematic, BOM and layout never leave this machine; part numbers go out only for distributor and datasheet lookups. If this server has improvement telemetry switched on, the result of this call says so in `telemetry` and names exactly what would be sent — relay that sentence to the user before you go any further.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Absolute path to the KiCad or SpinZero project directory, or to a review bundle directory containing bom_enriched.csv."
+          },
+          "profile": {
+            "type": "string",
+            "enum": [
+              "default",
+              "industrial",
+              "medical",
+              "automotive"
+            ],
+            "description": "End application profile. Changes which rules and thresholds apply."
+          },
+          "pipeline": {
+            "type": "string",
+            "enum": [
+              "bom-detailed"
+            ],
+            "description": "Which review to run. Only bom-detailed is available over MCP today."
+          },
+          "model": {
+            "type": "string",
+            "description": "The model you are running as, e.g. 'claude-opus-4'. Recorded in the review's audit trail so a reader knows whose reasoning produced the findings. Say it honestly."
+          },
+          "allow_low_coverage": {
+            "type": "boolean",
+            "description": "Review the board even when most of its datasheets could not be obtained. Only pass this after a run has been refused for low coverage AND the user has said to go ahead: the resulting review cannot verify specs against documents it does not have, and the report will say so. Requires a SpinZero licence."
+          },
+          "pack_version": {
+            "type": "string",
+            "description": "Pin this review to a specific SpinZero content pack version, e.g. '2026.08.27-1'. Use the version printed in a previous review of the same project when you want the findings to line up with it: prompt content changes findings, changed findings get new fingerprints, and a new fingerprint files a fresh review comment instead of updating the thread that already carries the engineer's replies. Omit it to use whatever pack the service is currently serving."
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "spinzero_get_step",
+      "description": "Fetch the open step: the instructions, the evidence assembled for it, and the JSON schema your submission must satisfy. Read the evidence in full before using any evidence tool — the BOM rows and the field-by-field cross-check against the distributor are already in it. Most steps are a BATCH OF PARTS you must account for individually; the last one is the whole board, for consolidation and systemic gaps.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "review_id": {
+            "type": "string",
+            "description": "The id returned by spinzero_start_review."
+          }
+        },
+        "required": [
+          "review_id"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "spinzero_submit",
+      "description": "Submit your verdict for one step: the findings you are filing, the rule candidates you are dismissing, and — on a part batch — one `verified` entry for EVERY part in the batch. This is the ONLY way a finding exists; prose is discarded. A payload that omits a part, or claims a datasheet check for a part with no datasheet, is rejected with the specific errors so you can repair and resubmit; after three rejections the step is recorded as unverified in the review's coverage map.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "review_id": {
+            "type": "string",
+            "description": "The id returned by spinzero_start_review."
+          },
+          "step": {
+            "type": "string",
+            "description": "The step id from spinzero_get_step, verbatim."
+          },
+          "payload": {
+            "type": "object",
+            "description": "Your verdict, matching the schema spinzero_get_step gave you."
+          }
+        },
+        "required": [
+          "review_id",
+          "step",
+          "payload"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "spinzero_finish",
+      "description": "Close the review. Assembles the findings document from your accepted submissions and writes it into the project's review drop-box, where SpinZero imports it as review comments. Returns where it landed, what it says, and what it did NOT cover.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "review_id": {
+            "type": "string",
+            "description": "The id returned by spinzero_start_review."
+          }
+        },
+        "required": [
+          "review_id"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "spinzero_abandon",
+      "description": "Give up on the open step and close the review anyway. Use it when you cannot complete a step — not to skip work you could do. The report still assembles, and every check nobody ruled on reaches the engineer marked unreviewed, so an abandoned review can never read as a clean one.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "review_id": {
+            "type": "string",
+            "description": "The id returned by spinzero_start_review."
+          },
+          "reason": {
+            "type": "string",
+            "description": "One sentence: why you cannot finish this step."
+          }
+        },
+        "required": [
+          "review_id",
+          "reason"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "spinzero_feedback",
+      "description": "Tell SpinZero what was wrong with a finished review, so the rule pack and the prompts improve. Call it only AFTER spinzero_finish or spinzero_abandon, and only with something the USER actually said — never your own opinion of your own review. The most valuable verdict is `missed_this`: what the review failed to catch is the one signal nothing else in the system can see. This LEAVES THE MACHINE, so show the user the exact arguments you are about to send and get a yes first. `note` is free text and is DROPPED unless this server was configured to accept it; never put a board name, a designator, a net name or a project path in it.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "review_id": {
+            "type": "string",
+            "description": "The id returned by spinzero_start_review."
+          },
+          "verdict": {
+            "type": "string",
+            "enum": [
+              "false_positive",
+              "wrong_severity",
+              "missed_this",
+              "helpful",
+              "unclear"
+            ],
+            "description": "false_positive: the finding is wrong. wrong_severity: real, but ranked wrong. missed_this: a defect the review should have caught and did not. helpful: it was right and worth filing. unclear: the engineer could not tell what it meant."
+          },
+          "rule_id": {
+            "type": "string",
+            "description": "The rule this is about, when it names one."
+          },
+          "fingerprint": {
+            "type": "string",
+            "description": "The finding's fingerprint, verbatim from the report, when it is about one finding."
+          },
+          "note": {
+            "type": "string",
+            "description": "One sentence, in the user's own words, with no board-identifying detail. Usually omit it."
+          }
+        },
+        "required": [
+          "review_id",
+          "verdict"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "spinzero_status",
+      "description": "Where a review is: its phase, how many steps are done, and what to call next. Use it to resume a review you lost track of rather than starting a second one over the same board.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "review_id": {
+            "type": "string",
+            "description": "The id returned by spinzero_start_review."
+          }
+        },
+        "required": [
+          "review_id"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "spinzero_list_bundle",
+      "description": "List every file in the review bundle with its size in bytes.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "review_id": {
+            "type": "string",
+            "description": "The id returned by spinzero_start_review."
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "review_id"
+        ]
+      }
+    },
+    {
+      "name": "spinzero_read_bundle",
+      "description": "Read a text file from the review bundle. Paths are relative to the bundle root (e.g. 'bom_enriched.csv'). Call list_bundle first if you are unsure what exists.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "review_id": {
+            "type": "string",
+            "description": "The id returned by spinzero_start_review."
+          },
+          "path": {
+            "type": "string",
+            "description": "Bundle-relative path."
+          },
+          "max_bytes": {
+            "type": "integer",
+            "description": "Optional read cap in bytes."
+          }
+        },
+        "required": [
+          "review_id",
+          "path"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "spinzero_parts_kb",
+      "description": "Look up a manufacturer part number: manufacturer, description, RoHS, REACH, MSL, lifecycle status, datasheet URL and decoded parametrics. Returns found:false when the part is unknown — then use read_datasheet or web_search, and never assert an unverified claim. Does NOT answer AEC-Q: use read_datasheet for that.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "review_id": {
+            "type": "string",
+            "description": "The id returned by spinzero_start_review."
+          },
+          "mpn": {
+            "type": "string",
+            "description": "Manufacturer part number, verbatim."
+          }
+        },
+        "required": [
+          "review_id",
+          "mpn"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "spinzero_datasheet",
+      "description": "Search a part's datasheet and get back the matching passages WITH PAGE NUMBERS, ready to cite. Give keywords, not questions: separate alternatives with '|' (e.g. 'AEC-Q|automotive|qualified', 'derating|temperature coefficient', 'commercial grade'). IMPORTANT: 'no match in N pages' is a RESULT, not a failure — a datasheet that never mentions AEC-Q is evidence the part is not qualified. Only an explicit ERROR means the document was unavailable.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "review_id": {
+            "type": "string",
+            "description": "The id returned by spinzero_start_review."
+          },
+          "mpn": {
+            "type": "string",
+            "description": "Manufacturer part number, verbatim from the BOM."
+          },
+          "query": {
+            "type": "string",
+            "description": "Keywords to find, alternatives separated by '|'. Case-insensitive."
+          },
+          "max_matches": {
+            "type": "integer",
+            "description": "Default 8, max 20."
+          }
+        },
+        "required": [
+          "review_id",
+          "mpn",
+          "query"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "spinzero_web_search",
+      "description": "Search the web for a datasheet or part information. Returns titles, URLs and snippets. A snippet is NOT a source: cite only a datasheet you actually read.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "review_id": {
+            "type": "string",
+            "description": "The id returned by spinzero_start_review."
+          },
+          "query": {
+            "type": "string",
+            "description": "Search query, e.g. 'ERJ-2RKF1001X datasheet'."
+          },
+          "max_results": {
+            "type": "integer",
+            "description": "Default 5, max 10."
+          }
+        },
+        "required": [
+          "review_id",
+          "query"
+        ],
+        "additionalProperties": false
+      }
+    }
+  ]
+}

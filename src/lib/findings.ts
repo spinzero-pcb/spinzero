@@ -71,6 +71,27 @@ export interface FindingsDoc {
   /** Stages that degraded or failed. Absent on a clean run (and on the free tier,
    *  which is deterministic and has nothing to degrade). */
   run_health?: RunHealthEntry[];
+  /** How this review was produced. Absent on the free tier. */
+  execution?: Execution;
+}
+
+/** Which surface produced a review, and with which content.
+ *
+ *  Worth showing next to a clean result: a review reasoned by the user's own agent
+ *  through the SpinZero MCP harness had our workflow, our evidence and our validation
+ *  but somebody else's model doing the judging, and a reader is entitled to know that
+ *  before they trust it. `prompt_pack` is the other half — two reviews of the same
+ *  board that disagree are explained by a content version far more often than by a
+ *  regression. Mirrors `$defs/execution` in `schemas/findings-1.1.json`. */
+export interface Execution {
+  surface: "local" | "mcp" | "hosted";
+  /** What the client reported itself as. Never verified — read it as a claim. */
+  model_reported?: string;
+  /** "builtin/<hash>" or "pack/<version>". */
+  prompt_pack?: string;
+  rule_pack?: string;
+  /** True when the datasheet coverage gate was deliberately overridden. */
+  allow_low_coverage?: boolean;
 }
 
 /** What `run_bom_check` returns: the document plus what ingestion did with it. */

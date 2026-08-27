@@ -4572,3 +4572,69 @@ textarea.wizard-input {
 
 /* The strip's link into the Reviews rail — a launcher, not a run button. */
 .bom-check-reviews { color: var(--accent); }
+
+/* Connect your AI assistant — the MCP setup screen (docs/mcp-server.md).
+   Wider than the default wizard card because a config block that wraps is a config
+   block somebody pastes with a line missing. */
+.connect-card { width: 620px; }
+
+/* `.review-field` is `flex: 1 1 180px` because it was written for the setup sheet's
+   ROW of fields. In this dialog's column that basis makes every field grow to fill
+   the card, which is where the acre of empty space between the inputs came from. */
+.connect-card .review-field { flex: none; }
+
+/* The screen is long by nature — two setup sections, a config block and the privacy
+   disclosure — and it must not push its own header off the top of a laptop screen.
+   Scroll the body, keep the title and the buttons where they can be found. */
+.connect-card .wizard-body {
+  max-height: min(62vh, 560px);
+  overflow-y: auto;
+}
+
+.connect-tabs {
+  display: flex;
+  gap: var(--sp-1);
+}
+
+.connect-tab {
+  flex: 1;
+  padding: var(--sp-1) var(--sp-2);
+  font-size: var(--fs-0);
+  color: var(--fg-2);
+  background: var(--bg-3);
+  border: 1px solid var(--border-1);
+  border-radius: var(--radius-1);
+  cursor: pointer;
+}
+
+.connect-tab:hover { color: var(--fg-1); }
+
+.connect-tab.on {
+  color: var(--fg-1);
+  border-color: var(--accent);
+  background: var(--bg-2);
+}
+
+.connect-block {
+  margin: 0;
+  padding: var(--sp-2);
+  background: var(--bg-1);
+  border: 1px solid var(--border-1);
+  border-radius: var(--radius-1);
+  color: var(--fg-1);
+  font-family: var(--font-mono);
+  font-size: var(--fs-0);
+  line-height: 1.5;
+  /* Wrap rather than scroll: a horizontally scrolled block hides the half of the
+     command a reader most needs to sanity-check before pasting it into a shell. */
+  white-space: pre-wrap;
+  word-break: break-all;
+  user-select: text;
+  /* `.wizard-body` is a flex column, so without this the block is the item that gets
+     shrunk to nothing when the card is tight — which it always is here. The whole
+     point of the screen is that this text is readable before it is pasted. */
+  flex: none;
+  min-height: 5.5em;
+  max-height: 180px;
+  overflow-y: auto;
+}

@@ -268,7 +268,11 @@ function normalizeAgentReview(v: unknown): AgentReviewSettings | null {
   const o = v as { claude_bin?: unknown; server_command?: unknown; server_args?: unknown; server_env?: unknown };
   const command = typeof o.server_command === "string" ? o.server_command.trim() : "";
   const args = Array.isArray(o.server_args) ? o.server_args.filter((a): a is string => typeof a === "string") : [];
-  if (!command || !args.length) return null;
+  // Arguments are NOT required. They were when the only way to run the server was
+  // `node …/mcp/src/server.ts` from a checkout; the shipped build is a single
+  // executable that takes none, so demanding them silently discarded the setup every
+  // customer actually has — saved, then normalised back to null on the way in.
+  if (!command) return null;
   const env: Record<string, string> = {};
   if (typeof o.server_env === "object" && o.server_env !== null) {
     for (const [k, val] of Object.entries(o.server_env as Record<string, unknown>)) {

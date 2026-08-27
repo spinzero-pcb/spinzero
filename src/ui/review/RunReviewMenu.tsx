@@ -4,6 +4,7 @@ import { useBomCheckStore } from "../../stores/bomCheckStore";
 import { isRunning, useDetailedReviewStore } from "../../stores/detailedReviewStore";
 import { reviewRows, useReviewRunsStore } from "../../stores/reviewRunsStore";
 import { useReviewInboxStore } from "../../stores/reviewInboxStore";
+import { useSettingsStore } from "../../stores/settingsStore";
 import { useReviewStore } from "../../stores/reviewStore";
 import { useRunLauncherStore } from "../../stores/runLauncherStore";
 import { formatRelative } from "../../lib/time";
@@ -64,6 +65,7 @@ export function RunReviewMenu() {
   const toggleMenu = useRunLauncherStore((s) => s.toggleMenu);
   const closeMenu = useRunLauncherStore((s) => s.closeMenu);
   const openSetup = useRunLauncherStore((s) => s.openSetup);
+  const openConnect = useRunLauncherStore((s) => s.openConnect);
 
   const runs = useReviewRunsStore((s) => s.runs);
   const current = useReviewRunsStore((s) => s.current);
@@ -88,6 +90,11 @@ export function RunReviewMenu() {
   const agentPhase = useAgentReviewStore((s) => s.phase);
   const agentLine = useAgentReviewStore((s) => s.line);
   const agentBusy = isAgentRunning(agentPhase);
+
+  // Whether the assistant has been set up at all. Shown on the row rather than
+  // hidden behind a click: "set up" and "configured" answer different questions, and
+  // a row that reads the same either way is a row nobody revisits when it breaks.
+  const agentConfigured = useSettingsStore((s) => s.agentReview !== null);
 
   const wrapRef = useRef<HTMLDivElement | null>(null);
 
@@ -192,6 +199,18 @@ export function RunReviewMenu() {
               </button>
             );
           })}
+          {/* Below the reviews rather than above them: this is setup, and setup that
+              sits at the top of a list of actions reads as the first step every time
+              you open it, which it is exactly once. */}
+          <button
+            role="menuitem"
+            className="run-review-row"
+            title="Run SpinZero reviews through Claude Code, Cursor, or any MCP client — on your own subscription"
+            onClick={() => openConnect()}
+          >
+            <span className="run-review-name">Connect your AI assistant</span>
+            <span className="run-review-meta">{agentConfigured ? "configured" : "set up"}</span>
+          </button>
           {inbox.length > 0 && (
             <>
               <div className="run-review-pop-hd sub">Findings waiting to import</div>

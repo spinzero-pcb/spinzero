@@ -30,9 +30,39 @@
       "type": "array",
       "description": "Stages that did not fully run. Only non-clean stages appear, so a non-empty array means the result is incomplete and says why. Consumers should SHOW this: a validation stage killed by a provider error otherwise reaches the engineer as unexplained low-confidence findings.",
       "items": { "$ref": "#/$defs/runHealthEntry" }
-    }
+    },
+    "execution": { "$ref": "#/$defs/execution" }
   },
   "$defs": {
+    "execution": {
+      "type": "object",
+      "description": "WHICH SURFACE produced this review, and with WHICH CONTENT. Two different readers need it. An engineer needs to know a clean report was reasoned by their own agent's model under the SpinZero harness rather than by the hosted pipeline — the workflow, the evidence and the validation were ours, the judgment was not. And anyone comparing two reviews of the same board needs to know whether the model, the rule pack or the prompt changed between them: without `prompt_pack`, a content update is indistinguishable from a regression.",
+      "additionalProperties": false,
+      "properties": {
+        "surface": {
+          "enum": ["local", "mcp", "hosted"],
+          "description": "Which execution surface drove the reasoning stages. 'local' = SpinZero's own tool loop against SpinZero's keys; 'mcp' = the customer's model through the SpinZero MCP harness; 'hosted' = the hosted review service."
+        },
+        "model_reported": {
+          "type": "string",
+          "description": "What the client said it was running as. REPORTED, never verified — an MCP client can say anything, and this field exists to be read as a claim rather than as a fact."
+        },
+        "prompt_pack": {
+          "type": "string",
+          "description": "Which prompt content was in force: 'builtin/<hash>' for the prompts compiled into the build, 'pack/<version>' for a delivered content pack. A prompt edit changes findings, so a report that cannot name its prompts cannot be explained.",
+          "examples": ["builtin/9f2a1c4b7e01", "pack/2026.08.27-1"]
+        },
+        "rule_pack": {
+          "type": "string",
+          "description": "Version of the deterministic rule pack that produced the candidates, as the runner reported it.",
+          "examples": ["bom-rules/0.4.2"]
+        },
+        "allow_low_coverage": {
+          "type": "boolean",
+          "description": "Set when the datasheet coverage gate was deliberately overridden for this run. The report's silence about the un-evidenced parts is then absence of evidence, not evidence of absence."
+        }
+      }
+    },
     "severity": {
       "enum": ["Important", "Observation"],
       "description": "Two levels, deliberately. 'Important' = act before this design ships; 'Observation' = worth knowing, not a blocker. How SURE the reviewer is lives in `confidence`, not here — that split is why the old five-level scale (which mixed 'Question' into severity) is gone."

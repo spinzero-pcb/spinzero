@@ -16,6 +16,7 @@ import { PropertiesCard } from "./ui/PropertiesCard";
 import { CheckoutConfirm } from "./ui/CheckoutConfirm";
 import { BomMappingDialog } from "./ui/BomMappingDialog";
 import { BomReviewSetup } from "./ui/review/BomReviewSetup";
+import { ConnectAssistantHost } from "./ui/review/ConnectAssistantHost";
 import { HistoryGraph } from "./ui/history/HistoryGraph";
 import { Toaster } from "./ui/Toaster";
 import { KeyboardShortcuts, useShortcutsDialog } from "./ui/shell/KeyboardShortcuts";
@@ -471,6 +472,7 @@ export default function App() {
       )}
       <CheckoutConfirm />
       <BomReviewSetup />
+      <ConnectAssistantHost />
       <BomMappingDialog />
       <HistoryGraph />
       <Toaster />
