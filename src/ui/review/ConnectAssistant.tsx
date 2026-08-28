@@ -3,8 +3,10 @@ import { useMemo, useState } from "react";
 import {
   CLIENT_LABELS,
   configBlock,
+  formatArgs,
   KNOWN_ENV,
   missingFrom,
+  parseArgs,
   redactSecrets,
   type McpClient,
 } from "../../lib/mcpConfig";
@@ -41,7 +43,11 @@ export function ConnectAssistant({ onClose }: { onClose: () => void }) {
 
   const [client, setClient] = useState<McpClient>("claude-code");
   const [command, setCommand] = useState(saved?.server_command ?? "");
-  const [args, setArgs] = useState((saved?.server_args ?? []).join(" "));
+  // `formatArgs`/`parseArgs`, not `join(" ")`/`split(/\s+/)`. A saved
+  // `["C:/Program Files/x/server.ts"]` re-opened as three arguments the moment it was
+  // shown, which is the exact failure `shellQuote` and its tests exist to prevent,
+  // one field earlier.
+  const [args, setArgs] = useState(formatArgs(saved?.server_args ?? []));
   const [env, setEnv] = useState<Record<string, string>>(saved?.server_env ?? {});
   const [saving, setSaving] = useState(false);
 
@@ -49,7 +55,7 @@ export function ConnectAssistant({ onClose }: { onClose: () => void }) {
     () => ({
       claude_bin: saved?.claude_bin ?? "",
       server_command: command.trim(),
-      server_args: args.trim().split(/\s+/).filter(Boolean),
+      server_args: parseArgs(args),
       server_env: env,
     }),
     [saved?.claude_bin, command, args, env],
@@ -131,6 +137,8 @@ export function ConnectAssistant({ onClose }: { onClose: () => void }) {
               spellCheck={false}
               onChange={(e) => setArgs(e.target.value)}
               placeholder="(none — the shipped build takes no arguments)"
+              // Split like a shell, so a path with a space is expressible at all.
+              title={'Quote anything containing a space, e.g. "C:\\Program Files\\SpinZero\\server.ts".'}
             />
           </label>
 
@@ -146,7 +154,7 @@ export function ConnectAssistant({ onClose }: { onClose: () => void }) {
                 // screen share of somebody's first setup.
                 type={key === "SPINZERO_LICENCE_KEY" ? "password" : "text"}
                 onChange={(e) => setEnv({ ...env, [key]: e.target.value })}
-                placeholder={key === "SPINZERO_TELEMETRY" ? "on" : ""}
+                placeholder={key === "SPINZERO_TELEMETRY" ? "on" : key === "SPINZERO_MCP_DEV" ? "(off)" : ""}
               />
             </label>
           ))}

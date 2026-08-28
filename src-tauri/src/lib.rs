@@ -1406,18 +1406,15 @@ fn get_settings(app: AppHandle) -> serde_json::Value {
 #[tauri::command]
 fn set_settings(app: AppHandle, settings: serde_json::Value) -> Result<(), String> {
     let path = ui_settings_path(&app).ok_or("no config dir")?;
-    // How many installs have connected an assistant at all. Counted on the transition
-    // rather than on every save, because the frontend persists the WHOLE settings
-    // object on every setter — an opacity-slider drag would otherwise report a hundred
-    // MCP setups. Nothing about the configuration is recorded, only that one happened.
+    // How many installs have connected an assistant AT ALL. Not counted on every save,
+    // because the frontend persists the WHOLE settings object on every setter and an
+    // opacity-slider drag would report a hundred MCP setups; and not counted on every
+    // transition either, because disconnecting and reconnecting is one install, not
+    // two. `bump_once` is lifetime-idempotent, so this is an install count rather than
+    // a count of how often somebody toggled it. Nothing about the configuration is
+    // recorded, only that one happened.
     if settings.get("agent_review").is_some_and(|v| !v.is_null()) {
-        let had = std::fs::read_to_string(&path)
-            .ok()
-            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-            .is_some_and(|v| v.get("agent_review").is_some_and(|a| !a.is_null()));
-        if !had {
-            telemetry::bump("assistants_connected");
-        }
+        telemetry::bump_once("assistants_connected");
     }
     let json = serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())?;
     // Atomic write (tmp + rename) like set_highlights and every other whole-file writer.

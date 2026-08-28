@@ -335,6 +335,34 @@ pub fn bump(metric: &str) {
     }
 }
 
+/// Increment a counter ONCE per install, and never again.
+///
+/// For "how many installs ever did X at all". [`bump`] counts events, which is right
+/// for "reviews run" and wrong for "assistants connected": a user who disconnects and
+/// reconnects has not installed anything twice, and counting the transition turns an
+/// install count into a fidget count. The counter is lifetime and persisted, so its
+/// own value is the flag — nothing extra is stored.
+pub fn bump_once(metric: &str) {
+    let Some(t) = get() else { return };
+    if !t.enabled.load(Ordering::SeqCst) {
+        return;
+    }
+    let snapshot = {
+        let mut counters = t.counters.lock_safe();
+        let key = normalize(metric);
+        if counters.get(&key).is_some_and(|n| *n > 0) {
+            return;
+        }
+        counters.insert(key, 1);
+        // Persisted immediately rather than on the SAVE_EVERY cadence: this fires once
+        // in the life of an install, and a crash before the next flush would lose the
+        // one observation AND let it be counted again on the next run.
+        t.bumps_since_save.store(0, Ordering::SeqCst);
+        counters.clone()
+    };
+    save(&t.config_path, &t.install_id, true, &snapshot);
+}
+
 /// Persist the lifetime usage totals and ship them as ONE event tagged
 /// `event_type=usage` (so usage is filterable apart from crash/error Issues),
 /// then flush the transport. Called from the Tauri `RunEvent::Exit` handler —

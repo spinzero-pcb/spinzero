@@ -4328,6 +4328,15 @@ textarea.wizard-input {
 
 .bom-check-count { color: var(--fg-2); }
 .bom-check-delta { color: var(--fg-2); }
+/* Which content produced the review — prompt pack, surface, reported model. Quiet by
+   design: it is provenance, not a result, and it earns its place only when two runs
+   disagree. The tooltip carries the rest. */
+.bom-check-meta {
+  color: var(--fg-3, var(--fg-2));
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  cursor: help;
+}
 
 /* One chip per severity present — click to filter the review rail to it. */
 .bom-check-sev {

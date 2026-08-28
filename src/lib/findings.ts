@@ -184,3 +184,43 @@ export function severityCounts(doc: FindingsDoc): { severity: FindingSeverity; n
     n: doc.findings.filter((f) => f.severity === severity).length,
   })).filter((s) => s.n > 0);
 }
+
+/**
+ * How this review was produced, in one chip and one tooltip — or null on the free
+ * tier, which has no `execution` block because it has nothing to disclose.
+ *
+ * `Execution` was defined here and read by nothing, which meant the engine stamped
+ * `prompt_pack` into every document and the engineer never saw it. That was half the
+ * point of it existing: two reviews of the same board that disagree are explained by
+ * a content version far more often than by a regression, and the version is no use in
+ * a JSON file nobody opens. The other half is `surface` — a review reasoned by the
+ * user's own agent had our workflow, our evidence and our validation but somebody
+ * else's model doing the judging, and a reader is entitled to know that before they
+ * trust a clean result.
+ */
+export function executionSummary(
+  doc: FindingsDoc | null,
+): { text: string; detail: string } | null {
+  const e = doc?.execution;
+  if (!e) return null;
+  const SURFACE: Record<Execution["surface"], string> = {
+    local: "Reviewed in SpinZero",
+    mcp: "Reviewed by your assistant",
+    hosted: "Reviewed on the hosted service",
+  };
+  const detail = [
+    SURFACE[e.surface] ?? e.surface,
+    // "Reported, never verified" is a real caveat and it is said, not implied.
+    e.model_reported ? `Model: ${e.model_reported} (as reported by the client)` : "",
+    e.prompt_pack ? `Prompts: ${e.prompt_pack}` : "",
+    e.rule_pack ? `Rules: ${e.rule_pack}` : "",
+    e.allow_low_coverage
+      ? "Datasheet coverage gate was overridden for this run, so parts were judged without their datasheets."
+      : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
+  // The chip itself stays short: the content version is what a reader compares
+  // between two runs, so it is the part that shows without hovering.
+  return { text: e.prompt_pack ?? SURFACE[e.surface] ?? e.surface, detail };
+}

@@ -2,8 +2,10 @@ import { describe, expect, it } from "vitest";
 
 import {
   claudeCodeBlock,
+  formatArgs,
   jsonBlock,
   missingFrom,
+  parseArgs,
   redactSecrets,
   shellQuote,
 } from "./mcpConfig";
@@ -32,6 +34,57 @@ describe("shellQuote", () => {
 
   it("survives a value containing a single quote", () => {
     expect(shellQuote("/home/o'brien/mcp")).toBe(`'/home/o'\\''brien/mcp'`);
+  });
+});
+
+describe("the Arguments field", () => {
+  it("keeps a quoted path with spaces as ONE argument", () => {
+    // The failure this exists to stop: `args.trim().split(/\s+/)` turned
+    // `node "C:\Program Files\x\server.ts"` into three arguments, and the block that
+    // came out was three correctly quoted pieces of nonsense — the exact silent
+    // breakage shellQuote and its tests exist to prevent, reintroduced one field
+    // earlier.
+    expect(parseArgs('node "C:\\Program Files\\SpinZero\\server.ts"')).toEqual([
+      "node",
+      "C:\\Program Files\\SpinZero\\server.ts",
+    ]);
+  });
+
+  it("handles single quotes, empty arguments and runs of whitespace", () => {
+    expect(parseArgs("  a   b  ")).toEqual(["a", "b"]);
+    expect(parseArgs(`'one two' three`)).toEqual(["one two", "three"]);
+    expect(parseArgs('a "" b')).toEqual(["a", "", "b"]);
+    expect(parseArgs("")).toEqual([]);
+  });
+
+  it("leaves a backslash alone outside quotes — it is a path separator, not an escape", () => {
+    expect(parseArgs("C:\\tools\\mcp.exe")).toEqual(["C:\\tools\\mcp.exe"]);
+  });
+
+  it("escapes a quote inside a double-quoted argument", () => {
+    expect(parseArgs('"say \\"hi\\""')).toEqual(['say "hi"']);
+  });
+
+  it("round-trips through formatArgs, so re-opening a saved setup does not resplit it", () => {
+    // The parse was only half of it: the field was seeded with `join(" ")`, so a saved
+    // list re-opened as text that split differently from the list it came from.
+    for (const args of [
+      ["node", "C:\\Program Files\\SpinZero\\server.ts"],
+      ["--flag", "value with spaces", ""],
+      ["plain"],
+      [],
+    ]) {
+      expect(parseArgs(formatArgs(args))).toEqual(args);
+    }
+  });
+
+  it("reaches the config block with the path intact", () => {
+    const block = claudeCodeBlock({
+      ...CONFIG,
+      server_command: "node",
+      server_args: parseArgs('"C:\\Program Files\\SpinZero\\server.ts"'),
+    });
+    expect(block).toContain("'C:\\Program Files\\SpinZero\\server.ts'");
   });
 });
 

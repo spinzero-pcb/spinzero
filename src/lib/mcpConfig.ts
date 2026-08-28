@@ -58,7 +58,77 @@ export const KNOWN_ENV: { key: string; label: string; hint: string }[] = [
     label: "Improvement telemetry",
     hint: "On by default. Set to 0 to switch it off.",
   },
+  {
+    key: "SPINZERO_MCP_DEV",
+    label: "Development build",
+    hint: "Set to 1 to run an unlicensed build from source. missingFrom accepts it in place of a licence key, and without a field for it that escape hatch was unreachable from the one screen that depends on it.",
+  },
 ];
+
+/**
+ * Split an Arguments field the way a shell would.
+ *
+ * `args.split(/\s+/)` was the bug `shellQuote` exists to prevent, reintroduced one
+ * field earlier: `node C:\Program Files\x\server.ts` became three arguments, and the
+ * config block that came out was correctly quoted nonsense. Quotes are honoured here
+ * so a path with a space can be expressed at all, and stripped from the result — they
+ * are the user telling US where the argument ends, not part of the value. The
+ * block-writing side re-quotes with `shellQuote`, so the round trip is exact.
+ *
+ * Deliberately small: quoting, and a backslash escape inside double quotes only. No
+ * expansion, no globbing, no operators — this is one program's argv, not a shell.
+ */
+export function parseArgs(input: string): string[] {
+  const out: string[] = [];
+  let current = "";
+  /** An argument can be empty (`""`) but only if something actually opened it. */
+  let started = false;
+  let quote: '"' | "'" | null = null;
+  for (let i = 0; i < input.length; i++) {
+    const c = input[i] as string;
+    if (quote) {
+      // A backslash escapes only inside double quotes, and only the two characters a
+      // shell would let it. Everywhere else it is a Windows path separator, which is
+      // the whole reason this field is hard.
+      if (quote === '"' && c === "\\" && (input[i + 1] === '"' || input[i + 1] === "\\")) {
+        current += input[++i] as string;
+      } else if (c === quote) {
+        quote = null;
+      } else {
+        current += c;
+      }
+      continue;
+    }
+    if (c === '"' || c === "'") {
+      quote = c;
+      started = true;
+      continue;
+    }
+    if (/\s/.test(c)) {
+      if (started || current) out.push(current);
+      current = "";
+      started = false;
+      continue;
+    }
+    current += c;
+  }
+  if (started || current) out.push(current);
+  return out;
+}
+
+/**
+ * Render an argument list back into the Arguments field.
+ *
+ * The inverse of `parseArgs`, so a saved setup re-opens as text that parses back to
+ * the same list rather than one a re-parse would split differently. Double quotes
+ * because these values are overwhelmingly Windows paths, and a backslash is not an
+ * escape outside them.
+ */
+export function formatArgs(args: readonly string[]): string {
+  return args
+    .map((a) => (a === "" || /["'\s\\]/.test(a) ? `"${a.replace(/(["\\])/g, "\\$1")}"` : a))
+    .join(" ");
+}
 
 /** Quote one argument for a POSIX-ish shell, which is what `claude mcp add` is pasted
  *  into. Paths with spaces are the common case on Windows and macOS alike, and an

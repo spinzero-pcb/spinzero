@@ -4,7 +4,7 @@ import { isRunning, useDetailedReviewStore } from "../stores/detailedReviewStore
 import { useProjectStore } from "../stores/projectStore";
 import { useRunLauncherStore } from "../stores/runLauncherStore";
 import { useReviewStore } from "../stores/reviewStore";
-import { severityCounts } from "../lib/findings";
+import { executionSummary, severityCounts } from "../lib/findings";
 import { isProjectClass, PROJECT_CLASSES } from "../lib/projectClass";
 import type { FindingSeverity } from "../lib/findings";
 import type { CommentSeverity } from "../lib/types";
@@ -83,6 +83,10 @@ export function BomCheckBar() {
   // `severityCounts` walks SEVERITY_ORDER and drops empty levels, so chip order stays
   // worst-first and a clean run shows no chips at all.
   const counts = doc ? severityCounts(doc) : [];
+  // Which content produced this. Absent on the free tier, which is deterministic and
+  // has nothing to disclose; on the paid tiers it is the first thing to compare when
+  // two runs of one board disagree.
+  const execution = executionSummary(doc);
 
   return (
     <div className="bom-check-bar">
@@ -128,6 +132,11 @@ export function BomCheckBar() {
               {c.n} {SEVERITY_LABEL[c.severity]}
             </button>
           ))}
+          {execution && (
+            <span className="bom-check-meta" title={execution.detail}>
+              {execution.text}
+            </span>
+          )}
           {summary && (summary.filed > 0 || summary.auto_resolved > 0 || summary.reopened > 0) && (
             <span className="bom-check-delta">
               {[
