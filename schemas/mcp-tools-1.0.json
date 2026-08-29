@@ -20,7 +20,7 @@
   "tools": [
     {
       "name": "spinzero_start_review",
-      "description": "Start a SpinZero review. Give it a KiCad project directory or a prepared review bundle directory; a raw project is extracted for you. This runs the whole deterministic layer inside the server — bundle validation, distributor lookups, EVERY datasheet on the BOM, the public rule pack, and a field-by-field cross-check of every row against the distributor record — then hands you the first batch of parts to verify. Expect it to take a minute or two on a real board. Nothing else in this toolset works until you call it. PRIVACY: the schematic, BOM and layout never leave this machine; part numbers go out only for distributor and datasheet lookups. If this server has improvement telemetry switched on, the result of this call says so in `telemetry` and names exactly what would be sent — relay that sentence to the user before you go any further.",
+      "description": "Start a SpinZero review. Give it a KiCad project directory or a prepared review bundle directory; a raw project is extracted for you. This runs the whole deterministic layer inside the server — bundle validation, distributor lookups, EVERY datasheet on the BOM (fetched AND searched for the topics a BOM review turns on, so the passages come to you with each batch), the public rule pack, and a field-by-field cross-check of every row against the distributor record — then hands you the first batch of parts to verify. Expect it to take a minute or two on a real board. Nothing else in this toolset works until you call it. PRIVACY: the schematic, BOM and layout never leave this machine; part numbers go out only for distributor and datasheet lookups. If this server has improvement telemetry switched on, the result of this call says so in `telemetry` and names exactly what would be sent — relay that sentence to the user before you go any further.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -66,7 +66,7 @@
     },
     {
       "name": "spinzero_get_step",
-      "description": "Fetch the open step: the instructions, the evidence assembled for it, and the JSON schema your submission must satisfy. Read the evidence in full before using any evidence tool — the BOM rows and the field-by-field cross-check against the distributor are already in it. Most steps are a BATCH OF PARTS you must account for individually; the last one is the whole board, for consolidation and systemic gaps.",
+      "description": "Fetch the open step: the instructions, the evidence assembled for it, and the JSON schema your submission must satisfy. Read the evidence in full before using any evidence tool — the BOM rows, the field-by-field cross-check against the distributor, and the DATASHEET EXTRACTS (every held document, already searched for qualification, temperature, compliance, moisture sensitivity, lifecycle, ratings and derating, verbatim with page numbers) are all already in it. Most steps are a BATCH OF PARTS you must account for individually; the last one is the whole board, for consolidation and systemic gaps.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -83,7 +83,7 @@
     },
     {
       "name": "spinzero_submit",
-      "description": "Submit your verdict for one step: the findings you are filing, the rule candidates you are dismissing, and — on a part batch — one `verified` entry for EVERY part in the batch. This is the ONLY way a finding exists; prose is discarded. A payload that omits a part, or claims a datasheet check for a part with no datasheet, is rejected with the specific errors so you can repair and resubmit; after three rejections the step is recorded as unverified in the review's coverage map.",
+      "description": "Submit your verdict for one step: the findings you are filing, the rule candidates you are dismissing, and — on a part batch — one `verified` entry for EVERY part in the batch. This is the ONLY way a finding exists; prose is discarded. A payload is rejected, with the specific errors so you can repair and resubmit, if it omits a part, claims a datasheet check for a part with no datasheet, or OMITS the datasheet check for a part whose extract was in the step — the server knows which documents it holds and hands those part numbers back so you can read them. After three rejections the step is recorded as unverified in the review's coverage map.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -272,7 +272,7 @@
     },
     {
       "name": "spinzero_datasheet",
-      "description": "Search a part's datasheet and get back the matching passages WITH PAGE NUMBERS, ready to cite. Give keywords, not questions: separate alternatives with '|' (e.g. 'AEC-Q|automotive|qualified', 'derating|temperature coefficient', 'commercial grade'). IMPORTANT: 'no match in N pages' is a RESULT, not a failure — a datasheet that never mentions AEC-Q is evidence the part is not qualified. Only an explicit ERROR means the document was unavailable.",
+      "description": "Search a part's datasheet and get back the matching passages WITH PAGE NUMBERS, ready to cite. FOLLOW-UP TOOL: this server already searched every datasheet it holds for AEC-Q, ordering codes, temperature, RoHS/REACH, moisture sensitivity, lifecycle, ratings and derating, and those passages are already in your step. Use this for what those extracts do not settle. Give keywords, not questions: separate alternatives with '|' (e.g. 'AEC-Q|automotive|qualified', 'derating|temperature coefficient', 'commercial grade'). IMPORTANT: 'no match in N pages' is a RESULT, not a failure — a datasheet that never mentions AEC-Q is evidence the part is not qualified. Only an explicit ERROR means the document was unavailable.",
       "inputSchema": {
         "type": "object",
         "properties": {
