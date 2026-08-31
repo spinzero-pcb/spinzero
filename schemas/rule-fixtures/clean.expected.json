@@ -1,5 +1,5 @@
 {
-  "profile": "default",
+  "profile": "commercial",
   "comment": "A well-formed BOM must produce nothing. Every rule here is a chance to over-fire: TP1 is non-orderable (no MPN expected), R1/R2 share an MPN legitimately, and the MSL column exists but only the IC needs a level.",
   "expect_rules": [],
   "forbid_rules": [

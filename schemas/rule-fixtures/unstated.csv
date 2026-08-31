@@ -1,0 +1,6 @@
+Reference,Value,Footprint,Quantity,Manufacturer,MPN,Datasheet,Lifecycle,RoHS,MSL
+R1,10k,R_0402_1005Metric,1,Yageo,RC0402FR-0710KL,https://example.com/r.pdf,Active,Yes,
+R2,10k,R_0402_1005Metric,1,Yageo,RC0402FR-0710KL,https://example.com/r.pdf,Active,Yes,
+C1,100nF,C_0402_1005Metric,1,Murata,GRM155R61A104KA01D,https://example.com/c.pdf,Active,Yes,
+U1,STM32F103C8T6,Package_QFP:LQFP-48_7x7mm_P0.5mm,1,ST,STM32F103C8T6,https://example.com/u.pdf,Active,Yes,3
+TP1,TestPoint,TestPoint_Pad_D1.0mm,1,,,,,,

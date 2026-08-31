@@ -7,7 +7,7 @@
 //! comment beside it. One implementation, two callers.
 //!
 //! ```text
-//! bom-rules --bom bom_enriched.csv [--profile automotive] [--out findings.json]
+//! bom-rules --bom bom_enriched.csv [--profile commercial] [--out findings.json]
 //! ```
 //!
 //! findings.json v1.0 goes to `--out` or stdout; usage errors exit 2, read errors 1.
@@ -86,5 +86,8 @@ fn main() -> ExitCode {
 const USAGE: &str = "bom-rules --bom <file.csv> [--profile <name>] [--out <findings.json>]
 
 Runs the deterministic BOM rule pack and emits findings.json v1.0.
-Profiles: default | industrial | medical | automotive (default: default)
+Profiles: commercial | industrial | medical | automotive
+With no --profile, or an unrecognised one, the rules run UNSTATED: the strictest
+setting of every rule, because an unanswered `what is this board for` must not be
+the loosest review we can give. Say `--profile commercial` for an ordinary board.
 With no --out the document goes to stdout.";

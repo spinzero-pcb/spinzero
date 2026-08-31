@@ -1,5 +1,5 @@
 {
-  "profile": "default",
+  "profile": "commercial",
   "comment": "R1 is duplicated, R? is unannotated, C1 has no footprint (one part of six, so per-item not systemic), C2 has quantity 0.",
   "expect_rules": [
     "bom.duplicate_refdes",

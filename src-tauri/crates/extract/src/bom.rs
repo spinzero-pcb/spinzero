@@ -450,15 +450,38 @@ fn csv_field(f: &str) -> String {
 }
 
 /// The mapping audit, written as a `.mapping.json` sidecar for the agent to scan.
+///
+/// Three keys, and the third is the one this function was missing.
+///
+/// * `fields` — for each logical field, the source-BOM column that fed it, the
+///   columns that would have been consulted after it, and how full that column was.
+/// * `distributors` — the detected distributor part-number columns.
+/// * `unmapped_columns` — **every parameter key no field and no distributor
+///   consumed, with its fill rate.** This is new (SpinZero plan item B5).
+///
+/// Why the third one matters more than it looks. A reviewer downstream cannot tell
+/// "this BOM has no tolerance data" from "this BOM has a `Tol.` column we did not
+/// recognise" — the two are byte-identical once the enriched CSV is written, and the
+/// first produces a page of confident findings about data that was sitting right
+/// there. The reader (`validateBundle.ts`) has had a check for exactly this since it
+/// was written, and it could never fire, because nothing ever emitted the key. A
+/// well-filled column mapped to nothing is the single most useful thing a mapping
+/// audit can say, and it was the one thing this report did not say.
+///
+/// Fill rate, not raw count, and reported for every unconsumed column rather than
+/// only the full ones: the threshold for "well filled" is a review-side policy, and
+/// baking it in here would mean changing the extractor to change a judgment call.
 pub fn mapping_report(mapping: &Mapping, components: &[Component]) -> serde_json::Value {
     let total = components.len().max(1) as f64;
-    let coverage = |key: &str| -> u32 {
+    let fill = |key: &str| -> f64 {
         let n = components
             .iter()
             .filter(|c| c.parameters.get(key).map(|v| !clean(v).is_empty()).unwrap_or(false))
             .count();
-        ((n as f64 / total) * 100.0).round() as u32
+        n as f64 / total
     };
+    let coverage = |key: &str| -> u32 { (fill(key) * 100.0).round() as u32 };
+
     let fields: serde_json::Map<String, serde_json::Value> = mapping
         .fields
         .iter()
@@ -474,9 +497,50 @@ pub fn mapping_report(mapping: &Mapping, components: &[Component]) -> serde_json
             )
         })
         .collect();
+
+    // Consumed = every candidate key of every field (not just the primary — a
+    // fallback IS consulted, so reporting it as unmapped would be a false alarm) plus
+    // every distributor column.
+    let mut consumed: BTreeSet<&str> = BTreeSet::new();
+    for keys in mapping.fields.values() {
+        for k in keys {
+            consumed.insert(k.as_str());
+        }
+    }
+    for k in mapping.distributors.values() {
+        consumed.insert(k.as_str());
+    }
+
+    let mut all_keys: BTreeSet<&str> = BTreeSet::new();
+    for c in components {
+        for k in c.parameters.keys() {
+            all_keys.insert(k.as_str());
+        }
+    }
+
+    // Sorted by fill rate descending, so the column most likely to be a real mapping
+    // miss is first and a truncating reader still sees it. `BTreeSet` gives a stable
+    // name order to break ties, so two runs of one board produce the same file.
+    let mut unmapped: Vec<serde_json::Value> = all_keys
+        .into_iter()
+        .filter(|k| !consumed.contains(k))
+        .map(|k| {
+            serde_json::json!({
+                "column": k,
+                "fill_rate": (fill(k) * 1000.0).round() / 1000.0,
+            })
+        })
+        .collect();
+    unmapped.sort_by(|a, b| {
+        let fa = a["fill_rate"].as_f64().unwrap_or(0.0);
+        let fb = b["fill_rate"].as_f64().unwrap_or(0.0);
+        fb.partial_cmp(&fa).unwrap_or(std::cmp::Ordering::Equal)
+    });
+
     serde_json::json!({
         "fields": fields,
         "distributors": mapping.distributors,
+        "unmapped_columns": unmapped,
     })
 }
 
@@ -907,5 +971,47 @@ mod tests {
         let idx = cols.iter().position(|c| *c == "Alternate MPN").unwrap();
         let row: Vec<&str> = csv.lines().nth(1).unwrap().split(',').collect();
         assert_eq!(row[idx], "TMK325B7226MMHP");
+    }
+
+    /// B5. The reader has always had a "a well-filled column mapped to nothing" check
+    /// and it could never fire, because this key was never written. Assert the three
+    /// things that check needs: the column appears, its fill rate is right, and a
+    /// column that IS consumed does not appear.
+    #[test]
+    fn mapping_report_names_the_columns_it_did_not_consume() {
+        let components = vec![
+            comp("C1", "100n", "0402", "capacitor", &[
+                ("MPN", "CC0402KRX7R7BB104"),
+                ("Tol.", "10%"),
+                ("Internal Stock Code", "UV-0001"),
+            ]),
+            comp("C2", "1u", "0402", "capacitor", &[
+                ("MPN", "CC0402MRX5R5BB105"),
+                ("Internal Stock Code", "UV-0002"),
+            ]),
+        ];
+        let mapping = resolve_mapping(&components);
+        let report = mapping_report(&mapping, &components);
+        let unmapped = report["unmapped_columns"].as_array().expect("unmapped_columns");
+
+        let by_name = |name: &str| -> Option<f64> {
+            unmapped
+                .iter()
+                .find(|u| u["column"] == serde_json::json!(name))
+                .and_then(|u| u["fill_rate"].as_f64())
+        };
+
+        // A fully-populated column nothing understood — exactly the case the reader's
+        // GAP exists for, and exactly the case that has been invisible until now.
+        assert_eq!(by_name("Internal Stock Code"), Some(1.0));
+        // Half-filled, and reported as such rather than being thresholded away here:
+        // "well filled" is the review's policy, not the extractor's.
+        assert_eq!(by_name("Tol."), Some(0.5));
+        // MPN was consumed, so it must NOT be reported as unmapped. Without this the
+        // test would pass on a function that simply listed every column.
+        assert_eq!(by_name("MPN"), None);
+        // Sorted by fill rate, descending, so a truncating reader sees the worst first.
+        let rates: Vec<f64> = unmapped.iter().filter_map(|u| u["fill_rate"].as_f64()).collect();
+        assert!(rates.windows(2).all(|w| w[0] >= w[1]), "not sorted by fill rate: {rates:?}");
     }
 }

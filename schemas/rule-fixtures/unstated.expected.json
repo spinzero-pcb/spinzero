@@ -1,0 +1,20 @@
+{
+  "profile": "default",
+  "comment": "The SAME BOM as clean.csv, reviewed with no end application stated. `default` is not a profile a user can pick — it is the absence of an answer, and `config_for` gives it the strictest setting of every rule (SpinZero plan §4). So a board that is clean for a commercial application is NOT clean when nobody has said what it is for, and this fixture is the pair that makes that visible: clean.expected.json forbids these four rules, this one requires them. If the two ever agree, the inversion has been undone.",
+  "expect_rules": [
+    "bom.missing_aecq",
+    "bom.missing_msl",
+    "bom.missing_compliance"
+  ],
+  "forbid_rules": [
+    "bom.duplicate_refdes",
+    "bom.unannotated_refdes",
+    "bom.invalid_refdes_format",
+    "bom.invalid_quantity",
+    "bom.missing_sourcing_id",
+    "bom.invalid_datasheet",
+    "bom.placeholder_part_number",
+    "bom.lifecycle_status",
+    "bom.dnp_marker_in_text"
+  ]
+}

@@ -128,9 +128,19 @@ describe("bomCheckStore", () => {
     useProjectStore.setState({ project: { project_dir: "C:/p", class: "space" } as never });
     expect(currentBomProfile()).toBe("industrial");
 
-    // A hand-edited project.json must not put an unknown profile in front of the rules.
+    // A hand-edited project.json must not put an unknown profile in front of the
+    // rules. It folds onto `commercial`, NOT onto `default` — `default` now means
+    // "nobody said" and runs the strictest rules, and a project.json with a typo in
+    // it is not the same thing as an unanswered question. See `bomProfileForClass`.
     useProjectStore.setState({ project: { project_dir: "C:/p", class: "nonsense" } as never });
-    expect(currentBomProfile()).toBe("default");
+    expect(currentBomProfile()).toBe("commercial");
+
+    // The general/hobby class and an explicitly commercial one are one rule set, and
+    // neither is the unstated profile.
+    useProjectStore.setState({ project: { project_dir: "C:/p", class: "general" } as never });
+    expect(currentBomProfile()).toBe("commercial");
+    useProjectStore.setState({ project: { project_dir: "C:/p", class: "commercial" } as never });
+    expect(currentBomProfile()).toBe("commercial");
   });
 
   it("summarizes a run for the toast", () => {

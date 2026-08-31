@@ -10,7 +10,13 @@
 use serde_json::{json, Value};
 
 /// The profiles the UI offers, in the order it offers them.
-pub const PROFILES: &[&str] = &["default", "industrial", "medical", "automotive"];
+///
+/// `default` is deliberately NOT here, and that is the whole point of this list.
+/// It is the profile that means *nobody said*, and `config_for` gives it the
+/// strictest setting of every rule — see below. A profile a user can pick is a
+/// profile a user has answered for; `default` is the absence of an answer, and the
+/// absence of an answer must not be the absence of checks.
+pub const PROFILES: &[&str] = &["commercial", "industrial", "medical", "automotive"];
 
 /// Deep-merge `over` onto `base`: objects merge key-wise, everything else replaces.
 /// Same semantics as `run_bom.py::_deep_merge`, so a profile states only its deltas.
@@ -31,14 +37,29 @@ pub fn merge(base: &Value, over: &Value) -> Value {
     }
 }
 
-/// Full config for a profile name (`default` when unknown).
+/// Full config for a profile name.
+///
+/// **An unknown or unstated profile gets `strictest()`, not the base table.** This
+/// inverted in SpinZero plan §4. It used to fall back to `defaults()`, which is the
+/// LEAST strict configuration there is — so a review nobody had answered the "what is
+/// this board for" question for ran the loosest rule set we ship, and said nothing
+/// about it. That is the wrong direction to fail in: a missed AEC-Q gap on a board
+/// that turned out to be automotive costs a re-spin, while an AEC-Q finding on a
+/// hobby board costs one dismissal.
+///
+/// The four names in `PROFILES` are answers, and each gets exactly the rules its
+/// end application needs. `commercial` carries what used to be the bare `defaults()`
+/// rule table, unchanged — so nothing about an explicitly commercial board's review
+/// has moved; the name for it has.
 pub fn config_for(profile: &str) -> Value {
     let base = defaults();
     match profile.trim().to_lowercase().as_str() {
+        "commercial" => base,
         "industrial" => merge(&base, &industrial()),
         "medical" => merge(&base, &medical()),
         "automotive" => merge(&base, &automotive()),
-        _ => base,
+        // "default", "", and anything we do not recognise.
+        _ => merge(&base, &strictest()),
     }
 }
 
@@ -208,6 +229,52 @@ fn automotive() -> Value {
     })
 }
 
+
+/// The unstated profile: the strictest setting of every rule the four named profiles
+/// touch, merged over the base table.
+///
+/// Composed as the per-rule maximum across `industrial`, `medical` and `automotive`
+/// rather than written by hand, conceptually — each line below says which profile it
+/// came from, so adding a stricter setting to one of those profiles and forgetting
+/// this one is a visible omission rather than an invisible one. The test
+/// `strictest_is_at_least_as_strict_as_every_named_profile` is what actually enforces
+/// that, because a comment cannot.
+///
+/// Note what this does NOT do: it does not invent a severity no profile asks for, and
+/// it does not enable a rule that is off everywhere. `bom.dnp_but_has_sourcing` stays
+/// off, because a DNP line carrying sourcing data is the normal way to express a build
+/// option and no end application changes that. Strictest means the union of what our
+/// profiles ask for, not the maximum the schema permits.
+fn strictest() -> Value {
+    json!({
+      "rules": {
+        // medical + automotive: the four fields a traceable BOM must carry.
+        "bom.missing_required_field": { "severity": "CRITICAL",
+                                        "params": { "required_fields": ["value", "footprint", "manufacturer", "mpn"] } },
+        // all three named profiles raise this from MINOR.
+        "bom.distributor_pn_only_no_mpn": { "severity": "MAJOR" },
+        // medical: the regulatory dossier must cite a datasheet per part.
+        "bom.missing_datasheet": { "enabled": true, "severity": "MINOR" },
+        // medical + automotive: MSL on everything, not just the moisture-sensitive
+        // designator prefixes.
+        "bom.missing_msl": { "severity": "MAJOR",
+                             "params": { "applies_to_all": true, "applies_to_prefixes": [] } },
+        // medical + automotive: an EOL/NRND part blocks production.
+        "bom.lifecycle_status": { "severity": "CRITICAL" },
+        // automotive: the rule is OFF by default and ON here. This is the single
+        // loudest consequence of the inversion, and it is the intended one — an
+        // unstated board that turns out to be automotive is exactly the board whose
+        // AEC-Q gaps must not have been silently skipped. It rides at MAJOR, as it
+        // does in the automotive profile: turning the rule on is not re-ranking it.
+        "bom.missing_aecq": { "enabled": true, "severity": "MAJOR",
+                              "params": { "missing_severity": "MAJOR" } },
+        // medical + automotive: RoHS and REACH both required, both critical.
+        "bom.missing_compliance": { "severity": "CRITICAL",
+                                    "params": { "required": ["rohs", "reach"] } }
+      }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -229,7 +296,81 @@ mod tests {
     }
 
     #[test]
-    fn unknown_profile_falls_back_to_default() {
-        assert_eq!(config_for("nonsense"), defaults());
+    fn an_unstated_profile_gets_the_strictest_rules_not_the_loosest() {
+        // The inversion (SpinZero plan §4). This assertion used to read
+        // `config_for("nonsense") == defaults()`, i.e. an unanswered question got the
+        // loosest rule set we ship and said nothing about it.
+        let unstated = config_for("nonsense");
+        assert_ne!(unstated, defaults(), "an unstated profile must not be the base table");
+        assert_eq!(unstated, config_for("default"), "`default` IS the unstated profile");
+        assert_eq!(unstated, config_for(""), "so is an empty string");
+
+        // The named answer for an ordinary commercial board is what `defaults()` was.
+        // Nothing about an explicitly commercial review has moved.
+        assert_eq!(config_for("commercial"), defaults());
+
+        // The loudest single consequence, asserted so it cannot be a surprise later:
+        // AEC-Q is OFF for a commercial board and ON when nobody has said.
+        assert_eq!(defaults()["rules"]["bom.missing_aecq"]["enabled"], json!(false));
+        assert_eq!(unstated["rules"]["bom.missing_aecq"]["enabled"], json!(true));
+    }
+
+    /// `strictest()` is written by hand, so nothing stops it drifting behind a profile
+    /// that gets a stricter setting later. This is what stops that: for every rule any
+    /// named profile touches, the unstated profile must be at least as strict.
+    ///
+    /// "At least as strict" is three separate things, and all three are checked —
+    /// enabled beats disabled, a higher severity beats a lower one, and a `params`
+    /// widening (more required fields, `applies_to_all`) must be carried too.
+    #[test]
+    fn strictest_is_at_least_as_strict_as_every_named_profile() {
+        const RANK: &[&str] = &["INFO", "MINOR", "MAJOR", "CRITICAL", "BLOCKER"];
+        let rank = |s: &Value| -> usize {
+            s.as_str().and_then(|t| RANK.iter().position(|r| *r == t)).unwrap_or(0)
+        };
+        let unstated = config_for("default");
+
+        for profile in PROFILES {
+            let cfg = config_for(profile);
+            let rules = cfg["rules"].as_object().expect("rules");
+            for (rule_id, spec) in rules {
+                let mine = &unstated["rules"][rule_id];
+                if spec["enabled"] == json!(true) {
+                    assert_eq!(
+                        mine["enabled"],
+                        json!(true),
+                        "{profile} enables {rule_id} but the unstated profile does not"
+                    );
+                }
+                assert!(
+                    rank(&mine["severity"]) >= rank(&spec["severity"]),
+                    "{rule_id}: {profile} is {} but the unstated profile is only {}",
+                    spec["severity"],
+                    mine["severity"]
+                );
+                // A params widening the unstated profile failed to carry would make it
+                // nominally strict and materially looser — `required_fields` and
+                // `applies_to_all` are exactly the two that decide how much is checked.
+                if let Some(req) = spec["params"]["required_fields"].as_array() {
+                    let ours = mine["params"]["required_fields"].as_array().cloned().unwrap_or_default();
+                    for f in req {
+                        assert!(ours.contains(f), "{rule_id}: {profile} requires {f} and the unstated profile does not");
+                    }
+                }
+                if spec["params"]["applies_to_all"] == json!(true) {
+                    assert_eq!(
+                        mine["params"]["applies_to_all"],
+                        json!(true),
+                        "{rule_id}: {profile} applies to all parts and the unstated profile does not"
+                    );
+                }
+                if let Some(req) = spec["params"]["required"].as_array() {
+                    let ours = mine["params"]["required"].as_array().cloned().unwrap_or_default();
+                    for f in req {
+                        assert!(ours.contains(f), "{rule_id}: {profile} requires compliance field {f} and the unstated profile does not");
+                    }
+                }
+            }
+        }
     }
 }

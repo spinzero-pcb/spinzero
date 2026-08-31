@@ -1,5 +1,5 @@
 {
-  "profile": "default",
+  "profile": "commercial",
   "comment": "C1 has a placeholder MPN; C2 is sourced by LCSC only; U1 has a manufacturer but no MPN; C2's LCSC code breaks the C-digits pattern; R3's datasheet is a local Windows path.",
   "expect_rules": [
     "bom.placeholder_part_number",

@@ -30,9 +30,15 @@ export function projectClassLabel(v: string | null | undefined): string {
 }
 
 /** The six project classes onto the four rule profiles `bom_rules::config::PROFILES`
- *  ships. `commercial` has no stricter rule set than the general one, and `space`
- *  reads the hi-rel expectations the industrial profile encodes — mapping them down
- *  is what lets the app ask the question once instead of twice. */
+ *  ships. `space` reads the hi-rel expectations the industrial profile encodes, and
+ *  `general` maps to `commercial` — mapping them down is what lets the app ask the
+ *  question once instead of twice.
+ *
+ *  Nothing here may return `default`. That profile now means **nobody said** and runs
+ *  the strictest setting of every rule; the app always has a project class, so it has
+ *  always been an answer, and returning the unstated profile for an answered question
+ *  would flood a hobby board with AEC-Q findings. `general` and `commercial` are the
+ *  same rule set and always were — the old comment on this function said so. */
 export function bomProfileForClass(v: string | null | undefined): BomProfile {
   switch (v) {
     case "automotive":
@@ -43,6 +49,6 @@ export function bomProfileForClass(v: string | null | undefined): BomProfile {
     case "space":
       return "industrial";
     default:
-      return "default";
+      return "commercial";
   }
 }

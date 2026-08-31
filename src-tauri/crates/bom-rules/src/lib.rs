@@ -10,8 +10,8 @@
 //! ```no_run
 //! use bom_rules::{config, load, run};
 //! let rows = load::parse_csv("Reference,Value\nR1,10k\n");
-//! let (items, mapping) = load::items_from_rows(&rows, &config::config_for("default"));
-//! let doc = run(&items, "default", &mapping);
+//! let (items, mapping) = load::items_from_rows(&rows, &config::config_for("commercial"));
+//! let doc = run(&items, "commercial", &mapping);
 //! assert_eq!(doc.schema_version, "1.1");
 //! ```
 
@@ -553,7 +553,7 @@ mod tests {
                    R1,10k,R_0402_1005Metric,1,Yageo,RC0402FR-0710KL,Active,Yes\n\
                    R2,10k,R_0402_1005Metric,1,Yageo,RC0402FR-0710KL,Active,Yes\n\
                    C1,100nF,C_0402_1005Metric,1,Murata,GRM155R61A104KA01D,Active,Yes\n";
-        let doc = doc_for(csv, "default");
+        let doc = doc_for(csv, "commercial");
         assert!(doc.findings.is_empty(), "unexpected: {:?}", doc.findings);
         assert!(doc.bom_audit.iter().all(|a| a.result == "OK"));
         assert_eq!(doc.stats.item_count, 3);
@@ -569,7 +569,7 @@ mod tests {
                    R1,10k,R_0402_1005Metric,1,Yageo,RC0402FR-0710KL,,,\n\
                    R2,10k,R_0402_1005Metric,1,Yageo,RC0402FR-0710KL,,,\n\
                    C1,100nF,C_0402_1005Metric,1,Murata,GRM155R61A104KA01D,,,\n";
-        let doc = doc_for(csv, "default");
+        let doc = doc_for(csv, "commercial");
 
         for f in &doc.findings {
             let text = format!("{} {}", f.title, f.detail);
@@ -605,7 +605,7 @@ mod tests {
         let csv = "Reference,Value,Footprint,Quantity,Manufacturer,MPN\n\
                    R1,10k,R_0402_1005Metric,1,Yageo,RC0402FR-0710KL\n\
                    C1,100nF,C_0402_1005Metric,1,Murata,GRM155R61A104KA01D\n";
-        let doc = doc_for(csv, "default");
+        let doc = doc_for(csv, "commercial");
         assert!(
             doc.findings
                 .iter()
@@ -630,7 +630,7 @@ mod tests {
                    R1,10k,R_0402_1005Metric,1,Yageo,RC0402FR-0710KL,\n\
                    R90,,R_0402_1005Metric,1,Yageo,RC0402FR-0710KL,DNP\n\
                    R91,,R_0402_1005Metric,1,Yageo,RC0402FR-0710KL,DNP\n";
-        let doc = doc_for(csv, "default");
+        let doc = doc_for(csv, "commercial");
 
         let folded: Vec<&Finding> = doc
             .findings
@@ -677,7 +677,7 @@ mod tests {
         let csv = "Reference,Value,Footprint,Quantity,Manufacturer,MPN,DNP\n\
                    C31,22uF,C_1210_3225Metric_5mil,1,Samsung,CL32Y226KAVVPJE,\n\
                    C32,22uF,C_1210_3225Metric_6mil,1,Samsung,CL32Y226KAVVPJE,DNP\n";
-        let doc = doc_for(csv, "default");
+        let doc = doc_for(csv, "commercial");
 
         let spanning: Vec<&Finding> = doc
             .findings
@@ -699,7 +699,7 @@ mod tests {
         let csv = "Reference,Value,Footprint,MPN\n\
                    R1,10k,R_0402,C1\n\
                    R1,10k,R_0402,C1\n";
-        let doc = doc_for(csv, "default");
+        let doc = doc_for(csv, "commercial");
         assert!(!doc.findings.is_empty());
         assert_eq!(doc.findings[0].id, "B01");
         let ranks: Vec<u8> = doc
@@ -773,8 +773,8 @@ mod tests {
     #[test]
     fn fingerprints_are_stable_across_runs_and_unique_per_defect() {
         let csv = "Reference,Value,Footprint,MPN\nR1,10k,R_0402,TBD\nR2,10k,R_0402,TBD\n";
-        let a = doc_for(csv, "default");
-        let b = doc_for(csv, "default");
+        let a = doc_for(csv, "commercial");
+        let b = doc_for(csv, "commercial");
         let fa: Vec<&str> = a.findings.iter().map(|f| f.fingerprint.as_str()).collect();
         let fb: Vec<&str> = b.findings.iter().map(|f| f.fingerprint.as_str()).collect();
         assert_eq!(fa, fb, "fingerprints must be deterministic");
@@ -792,7 +792,7 @@ mod tests {
     #[test]
     fn document_matches_the_published_schema_shape() {
         let csv = "Reference,Value,Footprint,MPN\nR1,10k,R_0402,TBD\n";
-        let doc = doc_for(csv, "default");
+        let doc = doc_for(csv, "commercial");
         let v = serde_json::to_value(&doc).expect("serializes");
         assert_eq!(v["schema_version"], "1.1");
         assert_eq!(v["pipeline"], "bom-rules");

@@ -161,9 +161,16 @@ export interface MappingView {
 }
 
 /** End-application profiles, in the order the picker offers them. Mirrors
- *  `bom_rules::config::PROFILES`; the label is what the user sees. */
+ *  `bom_rules::config::PROFILES`; the label is what the user sees.
+ *
+ *  `default` is deliberately absent, and this is the visible half of a rule change:
+ *  it is no longer a profile meaning "general", it is the profile meaning **nobody
+ *  said**, and `config_for` gives it the strictest setting of every rule. The picker
+ *  must therefore never offer it — offering it would present the strictest review as
+ *  the neutral one. What used to be "General" is now `commercial`, with the same
+ *  rules it always had. */
 export const BOM_PROFILES = [
-  { id: "default", label: "General" },
+  { id: "commercial", label: "Commercial" },
   { id: "industrial", label: "Industrial" },
   { id: "medical", label: "Medical" },
   { id: "automotive", label: "Automotive" },
@@ -171,8 +178,19 @@ export const BOM_PROFILES = [
 
 export type BomProfile = (typeof BOM_PROFILES)[number]["id"];
 
-export function isBomProfile(v: unknown): v is BomProfile {
-  return typeof v === "string" && BOM_PROFILES.some((p) => p.id === v);
+/** The unstated profile. Not selectable, not offered, and strictest — see
+ *  `BOM_PROFILES`. Named rather than spelled "default" at each use so a search for
+ *  it finds every place the concept appears. */
+export const UNSTATED_BOM_PROFILE = "default";
+
+/** Accepted, which is a wider set than offered: projects created before the rename
+ *  have `"default"` persisted, and a stored value must keep resolving rather than
+ *  failing validation and silently becoming something else. */
+export function isBomProfile(v: unknown): v is BomProfile | typeof UNSTATED_BOM_PROFILE {
+  return (
+    typeof v === "string" &&
+    (v === UNSTATED_BOM_PROFILE || BOM_PROFILES.some((p) => p.id === v))
+  );
 }
 
 export const SEVERITY_ORDER: FindingSeverity[] = ["Important", "Observation"];
