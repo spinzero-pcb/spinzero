@@ -20,7 +20,7 @@
   "tools": [
     {
       "name": "spinzero_start_review",
-      "description": "Start a SpinZero review. Give it a KiCad project directory or a prepared review bundle directory; a raw project is extracted for you. This runs the whole deterministic layer inside the server — bundle validation, distributor lookups, EVERY datasheet on the BOM (fetched AND searched for the topics a BOM review turns on, so the passages come to you with each batch), the public rule pack, and a field-by-field cross-check of every row against the distributor record — then hands you the first batch of parts to verify. Expect it to take a minute or two on a real board. Nothing else in this toolset works until you call it. PRIVACY: the schematic, BOM and layout never leave this machine; part numbers go out only for distributor and datasheet lookups. If this server has improvement telemetry switched on, the result of this call says so in `telemetry` and names exactly what would be sent — relay that sentence to the user before you go any further.",
+      "description": "PREPARE a SpinZero review. Give it a KiCad project directory or a prepared review bundle directory; a raw project is extracted for you. THIS REVIEW ASKS YOU A QUESTION BEFORE IT STARTS, and that is not an error: the result carries a `preflight` block with the board's end application and its column mapping. Put both to the user, then call spinzero_confirm_setup, which is what actually starts the pipeline — bundle validation, distributor lookups, EVERY datasheet on the BOM (fetched AND searched for the topics a BOM review turns on, so the passages come to you with each batch), the public rule pack, and a field-by-field cross-check of every row against the distributor record. Expect THAT call to take a minute or two on a real board. Nothing else in this toolset works until you call it. PRIVACY: the schematic, BOM and layout never leave this machine; part numbers go out only for distributor and datasheet lookups. If this server has improvement telemetry switched on, the result of this call says so in `telemetry` and names exactly what would be sent — relay that sentence to the user before you go any further.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -31,12 +31,12 @@
           "profile": {
             "type": "string",
             "enum": [
-              "default",
+              "commercial",
               "industrial",
               "medical",
               "automotive"
             ],
-            "description": "End application profile. Changes which rules and thresholds apply."
+            "description": "End application profile, if the user's own words already said it (\"review my automotive BOM\"). It changes which rules and thresholds apply — most visibly, whether AEC-Q qualification is checked at all. Omit it and the preflight will ask; do not guess it from the board's contents."
           },
           "pipeline": {
             "type": "string",
@@ -60,6 +60,40 @@
         },
         "required": [
           "path"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "spinzero_confirm_setup",
+      "description": "Answer the preflight and START the review. spinzero_start_review only PREPARES one: it extracts the board and reads the column mapping, then stops and asks you two things, because both are inputs where a wrong guess is invisible in the finished report. (1) THE END APPLICATION. It decides whether a missing AEC-Q qualification is a finding at all. Ask the user; do not infer it from the board. If they will not or cannot say, call this with no profile — the review then runs under the strictest setting of every rule and the report states that nobody said, which is honest. Never pass a profile the user did not choose. (2) THE COLUMN MAPPING. Show the user the `preflight.mapping.fields` table — their column next to the field we read it as — and accept a plain yes. This is meant to be cheap to agree to. Read out `preflight.attention` if it is non-empty and nothing else: those are the entries that actually need a decision. Only pass `mapping_overrides` if the user corrects something.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "review_id": {
+            "type": "string",
+            "description": "The id returned by spinzero_start_review."
+          },
+          "profile": {
+            "type": "string",
+            "enum": [
+              "commercial",
+              "industrial",
+              "medical",
+              "automotive"
+            ],
+            "description": "The board's end application, AS THE USER STATED IT. Omit it if they did not: an omitted profile runs the strictest rules and is recorded as unstated, while a guessed one is recorded as their answer and cannot be told apart from one later."
+          },
+          "mapping_overrides": {
+            "type": "object",
+            "description": "Only the corrections. Field name to the column header in the BOM that actually holds it, e.g. {\"mpn\": \"Mfr Part #\", \"alt_mpn\": \"Second source\"}. An empty string means \"this BOM has no such column\" and SUPPRESSES our guess — that is how you correct a wrong match, because otherwise the same guess is simply made again. Field names are the ones in preflight.mapping.fields.",
+            "additionalProperties": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "review_id"
         ],
         "additionalProperties": false
       }
