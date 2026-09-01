@@ -144,7 +144,7 @@
     },
     {
       "name": "spinzero_finish",
-      "description": "Close the review. Assembles the findings document from your accepted submissions and writes it into the project's review drop-box, where SpinZero imports it as review comments. Returns where it landed, what it says, and what it did NOT cover.",
+      "description": "Close the review. Assembles the findings from your accepted submissions and writes TWO files into the project's review drop-box: `review.html`, one self-contained page the user opens in any browser and can forward to somebody who has never installed SpinZero, and the findings document SpinZero itself imports as review comments. Returns where both landed, what the review says, and what it did NOT cover. Give the user the HTML path — the report is the deliverable, and re-narrating its contents at length is worse than pointing at it.",
       "inputSchema": {
         "type": "object",
         "properties": {
