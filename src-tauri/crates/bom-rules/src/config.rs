@@ -16,7 +16,40 @@ use serde_json::{json, Value};
 /// strictest setting of every rule — see below. A profile a user can pick is a
 /// profile a user has answered for; `default` is the absence of an answer, and the
 /// absence of an answer must not be the absence of checks.
-pub const PROFILES: &[&str] = &["commercial", "industrial", "medical", "automotive"];
+/// WHY AUTOMOTIVE IS TWO ANSWERS AND NOT ONE.
+///
+/// "Automotive" is not a grade. AEC-Q200 qualification comes in application tiers, and
+/// a part can carry it while its own manufacturer excludes it from the circuits that
+/// keep a car on the road: Murata's GRT series is AEC-Q200 and says, on page 1, "It is
+/// not appropriate for use in applications critical to passenger safety and car driving
+/// function (e.g. ABS, AIRBAG). Please use the GCM series." Taiyo Yuden codes the same
+/// distinction into the second character of the part number. Whether that exclusion is
+/// a Critical finding or no finding at all depends entirely on which half of the car
+/// the board is in, and one `automotive` profile could not ask.
+///
+/// So the review asks. A head unit and a brake controller are different questions with
+/// different right answers, and the reviewer was previously forced to file the
+/// restriction at Low confidence naming the question it could not resolve.
+pub const PROFILES: &[&str] = &[
+    "commercial",
+    "industrial",
+    "medical",
+    "automotive-comfort",
+    "automotive-safety",
+];
+
+/// How each profile id reads to a human. The UI and the preflight show these; nothing
+/// matches on them.
+pub fn profile_label(profile: &str) -> &'static str {
+    match profile.trim().to_lowercase().as_str() {
+        "commercial" => "Commercial",
+        "industrial" => "Industrial",
+        "medical" => "Medical",
+        "automotive-comfort" => "Automotive Infotainment, body and chassis",
+        "automotive-safety" => "Automotive Powertrain/Safety",
+        _ => "Unstated",
+    }
+}
 
 /// Deep-merge `over` onto `base`: objects merge key-wise, everything else replaces.
 /// Same semantics as `run_bom.py::_deep_merge`, so a profile states only its deltas.
@@ -57,7 +90,14 @@ pub fn config_for(profile: &str) -> Value {
         "commercial" => base,
         "industrial" => merge(&base, &industrial()),
         "medical" => merge(&base, &medical()),
-        "automotive" => merge(&base, &automotive()),
+        "automotive-comfort" => merge(&base, &automotive_comfort()),
+        "automotive-safety" => merge(&base, &automotive_safety()),
+        // The old single id, kept so a pinned script or a saved project setting does not
+        // silently become an unstated review. It resolves to the STRICTER half: a board
+        // we know is automotive and do not know is comfort-only is a board whose
+        // driving-function findings must not have been skipped, which is the same
+        // direction the unstated fallback below already fails in.
+        "automotive" => merge(&base, &automotive_safety()),
         // "default", "", and anything we do not recognise.
         _ => merge(&base, &strictest()),
     }
@@ -207,9 +247,14 @@ fn medical() -> Value {
     })
 }
 
-/// ECU modules, ADAS sensors, EV BMS, body control: AEC-Q100/Q101/Q200 required,
-/// IATF 16949 traceability, MSL on all parts, NRND/EOL blocks production.
-fn automotive() -> Value {
+/// Head units, clusters, infotainment, body and chassis: AEC-Q required, IATF 16949
+/// traceability, MSL on all parts, NRND/EOL blocks production.
+///
+/// This is what the single `automotive` profile was, unchanged. A part qualified only
+/// for the infotainment/comfort tier is CORRECT here, which is the whole reason the
+/// split exists — this half of the car is what the GRT series and Taiyo Yuden's
+/// category-`C` codes are built for.
+fn automotive_comfort() -> Value {
     json!({
       "rules": {
         "bom.missing_required_field": { "severity": "CRITICAL",
@@ -218,8 +263,8 @@ fn automotive() -> Value {
         "bom.missing_msl": { "severity": "MAJOR",
                              "params": { "applies_to_all": true, "applies_to_prefixes": [] } },
         "bom.lifecycle_status": { "severity": "CRITICAL" },
-        // Both AEC-Q findings ride at MAJOR here too — the profile turns the rule ON,
-        // it does not re-rank it. A CRITICAL on either would send someone re-sourcing
+        // Both AEC-Q findings ride at MAJOR here — the profile turns the rule ON, it
+        // does not re-rank it. A CRITICAL on either would send someone re-sourcing
         // silicon that an IATF traceability gap, not a failed part, is behind.
         "bom.missing_aecq": { "enabled": true, "severity": "MAJOR",
                               "params": { "missing_severity": "MAJOR" } },
@@ -227,6 +272,30 @@ fn automotive() -> Value {
                                     "params": { "required": ["rohs", "reach"] } }
       }
     })
+}
+
+/// ECU modules, ADAS sensors, EV BMS, brake and steering control: everything
+/// `automotive_comfort` asks for, and an unqualified part blocks the build.
+///
+/// The two deltas, and the reasoning for each:
+///
+///   * `bom.missing_aecq` rises to CRITICAL. On a comfort board an absent qualification
+///     is usually a BOM that never had the column; on a driving-function board it is a
+///     part that may not be there at all, and the cost of being wrong is a recall
+///     rather than a re-source.
+///   * `application_tier` says which tier the board demands. Nothing in the rule pack
+///     can decode a grade suffix — that needs the ordering matrix out of the datasheet,
+///     which is the judgment pass's job — so this parameter is what carries the answer
+///     to the reviewer. Without it the reviewer knew a part was infotainment-tier and
+///     could not know whether that mattered, so the honest filing was Low confidence
+///     naming the question. Now the question has an answer.
+fn automotive_safety() -> Value {
+    let mut cfg = automotive_comfort();
+    cfg["rules"]["bom.missing_aecq"] = json!({
+      "enabled": true, "severity": "CRITICAL",
+      "params": { "missing_severity": "CRITICAL", "application_tier": "powertrain_safety" }
+    });
+    cfg
 }
 
 
@@ -264,10 +333,12 @@ fn strictest() -> Value {
         // automotive: the rule is OFF by default and ON here. This is the single
         // loudest consequence of the inversion, and it is the intended one — an
         // unstated board that turns out to be automotive is exactly the board whose
-        // AEC-Q gaps must not have been silently skipped. It rides at MAJOR, as it
-        // does in the automotive profile: turning the rule on is not re-ranking it.
-        "bom.missing_aecq": { "enabled": true, "severity": "MAJOR",
-                              "params": { "missing_severity": "MAJOR" } },
+        // AEC-Q gaps must not have been silently skipped. CRITICAL, matching
+        // `automotive_safety`, because strictest is the per-rule maximum across the
+        // named profiles and that is now the maximum.
+        "bom.missing_aecq": { "enabled": true, "severity": "CRITICAL",
+                              "params": { "missing_severity": "CRITICAL",
+                                          "application_tier": "powertrain_safety" } },
         // medical + automotive: RoHS and REACH both required, both critical.
         "bom.missing_compliance": { "severity": "CRITICAL",
                                     "params": { "required": ["rohs", "reach"] } }
@@ -281,7 +352,7 @@ mod tests {
 
     #[test]
     fn profile_overrides_only_its_deltas() {
-        let auto = config_for("automotive");
+        let auto = config_for("automotive-comfort");
         let rules = &auto["rules"];
         // Overridden by the profile …
         assert_eq!(rules["bom.missing_aecq"]["enabled"], json!(true));
@@ -293,6 +364,46 @@ mod tests {
         );
         // … and untouched rules keep their default state.
         assert_eq!(rules["bom.duplicate_refdes"]["severity"], json!("BLOCKER"));
+    }
+
+    #[test]
+    fn the_two_automotive_halves_differ_only_where_the_tier_matters() {
+        let comfort = config_for("automotive-comfort");
+        let safety = config_for("automotive-safety");
+        assert_ne!(comfort, safety, "a split that changes nothing is not a split");
+
+        // The one rule that moves, and the parameter that tells the judgment pass which
+        // question it is answering. Everything else about an automotive review is the
+        // same on both halves of the car.
+        assert_eq!(comfort["rules"]["bom.missing_aecq"]["severity"], json!("MAJOR"));
+        assert_eq!(safety["rules"]["bom.missing_aecq"]["severity"], json!("CRITICAL"));
+        assert_eq!(
+            safety["rules"]["bom.missing_aecq"]["params"]["application_tier"],
+            json!("powertrain_safety")
+        );
+        assert!(comfort["rules"]["bom.missing_aecq"]["params"]["application_tier"].is_null());
+
+        for rule in ["bom.lifecycle_status", "bom.missing_compliance", "bom.missing_msl"] {
+            assert_eq!(comfort["rules"][rule], safety["rules"][rule], "{rule} must not differ");
+        }
+    }
+
+    #[test]
+    fn the_retired_automotive_id_resolves_to_the_stricter_half() {
+        // A pinned script or a saved project setting saying `automotive` must not become
+        // an unstated review, and must not quietly get the looser of the two answers.
+        assert_eq!(config_for("automotive"), config_for("automotive-safety"));
+    }
+
+    #[test]
+    fn every_offered_profile_has_a_label() {
+        for profile in PROFILES {
+            assert_ne!(
+                profile_label(profile),
+                "Unstated",
+                "{profile} is offered to a user with no name to show them"
+            );
+        }
     }
 
     #[test]

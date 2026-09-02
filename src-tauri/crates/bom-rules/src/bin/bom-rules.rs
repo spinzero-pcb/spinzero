@@ -86,7 +86,7 @@ fn main() -> ExitCode {
 const USAGE: &str = "bom-rules --bom <file.csv> [--profile <name>] [--out <findings.json>]
 
 Runs the deterministic BOM rule pack and emits findings.json v1.0.
-Profiles: commercial | industrial | medical | automotive
+Profiles: commercial | industrial | medical | automotive-comfort | automotive-safety
 With no --profile, or an unrecognised one, the rules run UNSTATED: the strictest
 setting of every rule, because an unanswered `what is this board for` must not be
 the loosest review we can give. Say `--profile commercial` for an ordinary board.

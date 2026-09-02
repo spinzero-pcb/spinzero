@@ -1,0 +1,11 @@
+{
+  "profile": "automotive-safety",
+  "comment": "The SAME BOM as automotive-comfort.csv, reviewed for the powertrain/safety half of the car. U1's absent AEC-Q qualification is a CRITICAL here rather than a MAJOR: on a driving-function board an unqualified part is a part that may not belong there at all, and the cost of being wrong is a recall rather than a re-source. If this fixture and its comfort pair ever produce identical documents, the split has been undone.",
+  "expect_rules": [
+    "bom.missing_aecq",
+    "bom.lifecycle_status",
+    "bom.missing_compliance"
+  ],
+  "expect_severities": { "bom.missing_aecq": "Critical", "bom.lifecycle_status": "Critical" },
+  "forbid_rules": ["bom.missing_msl", "bom.missing_sourcing_id"]
+}

@@ -41,8 +41,12 @@ export function projectClassLabel(v: string | null | undefined): string {
  *  same rule set and always were — the old comment on this function said so. */
 export function bomProfileForClass(v: string | null | undefined): BomProfile {
   switch (v) {
+    // The app's project class does not say which half of the car, and guessing the
+    // looser half is the one direction that can hide a driving-function finding. So an
+    // "automotive" project gets the safety rules until someone says otherwise, which
+    // matches how `config_for` resolves the retired id.
     case "automotive":
-      return "automotive";
+      return "automotive-safety";
     case "medical":
       return "medical";
     case "industrial":

@@ -1,4 +1,4 @@
-// findings.json — the one review contract, mirroring schemas/findings-1.1.json.
+// findings.json — the one review contract, mirroring schemas/findings-1.2.json.
 //
 // Every review producer emits this document: the free deterministic BOM check
 // (Rust `bom-rules`, confidence "Unvalidated") today, the paid detailed review
@@ -6,13 +6,24 @@
 // comments in bomcheck.rs, matched by `fingerprint` — and this file is what the
 // BOM tab renders the run summary from.
 //
-// Keep in sync with schemas/findings-1.1.json and src-tauri/crates/bom-rules.
+// Keep in sync with schemas/findings-1.2.json and src-tauri/crates/bom-rules.
 
 import type { Comment } from "./types";
 
-/** Two levels, deliberately. "Important" = act before this ships; "Observation" =
+/** Two levels, deliberately. "Critical" = act before this ships; "Non-critical" =
  *  worth knowing, not a blocker. How SURE the reviewer is lives in `confidence`. */
-export type FindingSeverity = "Important" | "Observation";
+export type FindingSeverity = "Critical" | "Non-critical";
+/** What findings-1.0 and 1.1 called the same two levels. Documents in a user's project
+ *  folder outlive the rename, so every reader normalises through `severityOf` rather
+ *  than comparing `f.severity` directly. */
+export type LegacyFindingSeverity = "Important" | "Observation";
+
+/** One finding's severity in current vocabulary, whatever version wrote it. */
+export function severityOf(f: { severity: string }): FindingSeverity {
+  if (f.severity === "Important") return "Critical";
+  if (f.severity === "Observation") return "Non-critical";
+  return f.severity === "Critical" ? "Critical" : "Non-critical";
+}
 /** "High" = verified against a datasheet/distributor/KB record; "Low" = plausible but
  *  unverified, so the engineer must confirm it; "Unvalidated" = a raw rule hit no
  *  validation pass has looked at (the free tier). */
@@ -82,7 +93,7 @@ export interface FindingsDoc {
  *  but somebody else's model doing the judging, and a reader is entitled to know that
  *  before they trust it. `prompt_pack` is the other half — two reviews of the same
  *  board that disagree are explained by a content version far more often than by a
- *  regression. Mirrors `$defs/execution` in `schemas/findings-1.1.json`. */
+ *  regression. Mirrors `$defs/execution` in `schemas/findings-1.2.json`. */
 export interface Execution {
   surface: "local" | "mcp" | "hosted";
   /** What the client reported itself as. Never verified — read it as a claim. */
@@ -173,8 +184,20 @@ export const BOM_PROFILES = [
   { id: "commercial", label: "Commercial" },
   { id: "industrial", label: "Industrial" },
   { id: "medical", label: "Medical" },
-  { id: "automotive", label: "Automotive" },
+  // Automotive is two answers, because AEC-Q200 is not one grade: a part can carry it
+  // and still be excluded by its own manufacturer from braking and steering. Which of
+  // those two facts is a Critical finding depends on which half of the car this board
+  // is in, and one option could not ask. Mirrors `bom_rules::config::PROFILES`.
+  { id: "automotive-comfort", label: "Automotive Infotainment, body and chassis" },
+  { id: "automotive-safety", label: "Automotive Powertrain/Safety" },
 ] as const;
+
+/** The single `automotive` id these two replaced. A project that stored it keeps
+ *  resolving, to the STRICTER half: a board we know is automotive and do not know is
+ *  comfort-only must not have its driving-function findings skipped. */
+export const RETIRED_BOM_PROFILES: Record<string, BomProfile> = {
+  automotive: "automotive-safety",
+};
 
 export type BomProfile = (typeof BOM_PROFILES)[number]["id"];
 
@@ -189,17 +212,24 @@ export const UNSTATED_BOM_PROFILE = "default";
 export function isBomProfile(v: unknown): v is BomProfile | typeof UNSTATED_BOM_PROFILE {
   return (
     typeof v === "string" &&
-    (v === UNSTATED_BOM_PROFILE || BOM_PROFILES.some((p) => p.id === v))
+    (v === UNSTATED_BOM_PROFILE ||
+      BOM_PROFILES.some((p) => p.id === v) ||
+      v in RETIRED_BOM_PROFILES)
   );
 }
 
-export const SEVERITY_ORDER: FindingSeverity[] = ["Important", "Observation"];
+/** A stored profile id in current vocabulary. Unstated stays unstated. */
+export function resolveBomProfile(v: string): BomProfile | typeof UNSTATED_BOM_PROFILE {
+  return RETIRED_BOM_PROFILES[v] ?? (isBomProfile(v) ? v : UNSTATED_BOM_PROFILE);
+}
+
+export const SEVERITY_ORDER: FindingSeverity[] = ["Critical", "Non-critical"];
 
 /** Findings per severity, highest first — the summary strip's data. */
 export function severityCounts(doc: FindingsDoc): { severity: FindingSeverity; n: number }[] {
   return SEVERITY_ORDER.map((severity) => ({
     severity,
-    n: doc.findings.filter((f) => f.severity === severity).length,
+    n: doc.findings.filter((f) => severityOf(f) === severity).length,
   })).filter((s) => s.n > 0);
 }
 

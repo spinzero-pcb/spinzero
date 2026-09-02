@@ -1,0 +1,360 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://spinzero.app/schemas/findings-1.2.json",
+  "title": "SpinZero findings.json",
+  "description": "The one output contract every SpinZero review producer emits: the free in-app deterministic checks (confidence 'Unvalidated'), the paid review engine, and any future CLI/CI surface. Consumers ingest it through a single path (findings -> review comments).",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "pipeline",
+    "findings"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "1.2"
+    },
+    "engine_version": {
+      "type": "string",
+      "description": "Version of the producer that emitted this document (rule pack / prompt pack)."
+    },
+    "pipeline": {
+      "type": "string",
+      "description": "Which review produced this. 'bom-rules' = free local deterministic checks; 'bom-detailed' = the paid LLM pipeline.",
+      "examples": [
+        "bom-rules",
+        "bom-detailed"
+      ]
+    },
+    "profile": {
+      "type": "string",
+      "description": "End-application profile the rules were configured with.",
+      "examples": [
+        "default",
+        "industrial",
+        "medical",
+        "automotive"
+      ]
+    },
+    "generated_ts": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/finding"
+      }
+    },
+    "bom_audit": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/auditEntry"
+      }
+    },
+    "stats": {
+      "$ref": "#/$defs/stats"
+    },
+    "run_health": {
+      "type": "array",
+      "description": "Stages that did not fully run. Only non-clean stages appear, so a non-empty array means the result is incomplete and says why. Consumers should SHOW this: a validation stage killed by a provider error otherwise reaches the engineer as unexplained low-confidence findings.",
+      "items": {
+        "$ref": "#/$defs/runHealthEntry"
+      }
+    },
+    "execution": {
+      "$ref": "#/$defs/execution"
+    },
+    "column_mapping": {
+      "$ref": "#/$defs/column_mapping"
+    }
+  },
+  "$defs": {
+    "execution": {
+      "type": "object",
+      "description": "WHICH SURFACE produced this review, and with WHICH CONTENT. Two different readers need it. An engineer needs to know a clean report was reasoned by their own agent's model under the SpinZero harness rather than by the hosted pipeline — the workflow, the evidence and the validation were ours, the judgment was not. And anyone comparing two reviews of the same board needs to know whether the model, the rule pack or the prompt changed between them: without `prompt_pack`, a content update is indistinguishable from a regression.",
+      "additionalProperties": false,
+      "properties": {
+        "surface": {
+          "enum": [
+            "local",
+            "mcp",
+            "hosted"
+          ],
+          "description": "Which execution surface drove the reasoning stages. 'local' = SpinZero's own tool loop against SpinZero's keys; 'mcp' = the customer's model through the SpinZero MCP harness; 'hosted' = the hosted review service."
+        },
+        "model_reported": {
+          "type": "string",
+          "description": "What the client said it was running as. REPORTED, never verified — an MCP client can say anything, and this field exists to be read as a claim rather than as a fact."
+        },
+        "prompt_pack": {
+          "type": "string",
+          "description": "Which prompt content was in force: 'builtin/<hash>' for the prompts compiled into the build, 'pack/<version>' for a delivered content pack. A prompt edit changes findings, so a report that cannot name its prompts cannot be explained.",
+          "examples": [
+            "builtin/9f2a1c4b7e01",
+            "pack/2026.08.27-1"
+          ]
+        },
+        "rule_pack": {
+          "type": "string",
+          "description": "Version of the deterministic rule pack that produced the candidates, as the runner reported it.",
+          "examples": [
+            "bom-rules/0.4.2"
+          ]
+        },
+        "allow_low_coverage": {
+          "type": "boolean",
+          "description": "Set when the datasheet coverage gate was deliberately overridden for this run. The report's silence about the un-evidenced parts is then absence of evidence, not evidence of absence."
+        }
+      }
+    },
+    "severity": {
+      "enum": [
+        "Critical",
+        "Non-critical"
+      ],
+      "description": "Two levels, deliberately. 'Critical' = act before this design ships; 'Non-critical' = worth knowing, not a blocker. How SURE the reviewer is lives in `confidence`, not here — that split is why the old five-level scale (which mixed 'Question' into severity) is gone. Renamed in 1.2 from 'Important'/'Observation': every finding claims to be important, so the word read as emphasis rather than as a gate, and 'Observation' read as a remark when the thing it labelled was often a BOM-wide process gap. A 1.0 or 1.1 document carries the old two words, and readers accept both."
+    },
+    "confidence": {
+      "enum": [
+        "High",
+        "Low",
+        "Unvalidated"
+      ],
+      "description": "'High' = verified against a datasheet, distributor record or KB entry; 'Low' = plausible but unverified, so the engineer must confirm it; 'Unvalidated' = a raw deterministic-rule hit that no validation pass has looked at — what the free tier emits."
+    },
+    "finding": {
+      "type": "object",
+      "required": [
+        "id",
+        "section",
+        "severity",
+        "confidence",
+        "title",
+        "fingerprint"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Document-local id (B01, B02 …). Not stable across runs — use `fingerprint` for identity."
+        },
+        "section": {
+          "type": "string",
+          "examples": [
+            "BOM · Sourcing"
+          ]
+        },
+        "severity": {
+          "$ref": "#/$defs/severity"
+        },
+        "confidence": {
+          "$ref": "#/$defs/confidence"
+        },
+        "rule_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Deterministic rule that produced this; null for judgment findings."
+        },
+        "title": {
+          "type": "string"
+        },
+        "detail": {
+          "type": "string"
+        },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "fix": {
+          "type": "string"
+        },
+        "anchors": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/anchor"
+          }
+        },
+        "fingerprint": {
+          "type": "string",
+          "description": "blake3(rule_id | anchor set | normalized predicate), truncated. The dedupe key: a re-run updates the existing comment instead of re-filing, and a fingerprint that disappears auto-resolves its comment."
+        }
+      }
+    },
+    "anchor": {
+      "type": "object",
+      "required": [
+        "type"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "enum": [
+            "bom_row",
+            "bom"
+          ],
+          "description": "'bom_row' anchors to reference designators; 'bom' is a document-level finding with no single row."
+        },
+        "refdes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "mpn": {
+          "type": "string"
+        }
+      }
+    },
+    "auditEntry": {
+      "type": "object",
+      "required": [
+        "item",
+        "result"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "item": {
+          "type": "string"
+        },
+        "result": {
+          "enum": [
+            "OK",
+            "GAP",
+            "TRUNCATED"
+          ]
+        },
+        "note": {
+          "type": "string"
+        },
+        "ref": {
+          "type": "string",
+          "description": "Cross-link to a finding id."
+        }
+      }
+    },
+    "runHealthEntry": {
+      "type": "object",
+      "required": [
+        "stage",
+        "status"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "stage": {
+          "type": "string",
+          "description": "Stage id, as used in the producer's progress events.",
+          "examples": [
+            "fp_validation",
+            "judgment_pass"
+          ]
+        },
+        "status": {
+          "enum": [
+            "degraded",
+            "failed"
+          ],
+          "description": "'degraded' = the stage ran but covered less than it should; 'failed' = it produced nothing."
+        },
+        "detail": {
+          "type": "string",
+          "description": "One sentence naming the real cause — a provider error, a cost cap, a timeout."
+        }
+      }
+    },
+    "stats": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "item_count": {
+          "type": "integer"
+        },
+        "finding_count": {
+          "type": "integer"
+        },
+        "duration_ms": {
+          "type": "integer"
+        },
+        "tokens": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "stage_timings": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      }
+    },
+    "column_mapping": {
+      "type": "object",
+      "description": "Which BOM column the review read each field from, and which tier of the resolution supplied it. Optional: the free tier does not emit it. Present so a wrong column is diagnosable from the report itself rather than by re-reading the BOM, the mapping sidecar and the resolver side by side. `via` is the tier: `confirmed` is the user's own answer to the review's preflight question, `canonical` is our own extractor's header, `alternate` is another spelling we recognise, and `borrowed` means the field had no column of its own and took a related one's.",
+      "required": [
+        "fields"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "fields": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "field"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "field": {
+                "type": "string"
+              },
+              "column": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "via": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "enum": [
+                  "confirmed",
+                  "canonical",
+                  "alternate",
+                  "borrowed",
+                  null
+                ]
+              }
+            }
+          }
+        },
+        "unmapped_columns": {
+          "type": "array",
+          "description": "Columns in the BOM no field claimed, with the fraction of rows that fill them.",
+          "items": {
+            "type": "object",
+            "required": [
+              "column"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "column": {
+                "type": "string"
+              },
+              "fill_rate": {
+                "type": "number"
+              }
+            }
+          }
+        },
+        "profile_stated": {
+          "type": "boolean",
+          "description": "False when nobody said what the board is for, so the review ran under the strictest setting of every rule. A reader has to know that before deciding whether an AEC-Q or MSL finding applies to this board at all."
+        }
+      }
+    }
+  }
+}

@@ -30,15 +30,15 @@ import { ReviewProgress } from "./review/ReviewProgress";
  *  the rail's scale rather than in the middle. Mirrors `comment_severity` in
  *  `bomcheck.rs` — change both together. */
 const SEVERITY_ROLE: Record<FindingSeverity, CommentSeverity> = {
-  Important: "critical",
-  Observation: "info",
+  Critical: "critical",
+  "Non-critical": "info",
 };
 
 /** One chip per findings severity, labelled in the findings vocabulary. Clicking one
  *  filters the rail by the comment severity it maps to. */
 const SEVERITY_LABEL: Record<FindingSeverity, string> = {
-  Important: "Important",
-  Observation: "Observation",
+  Critical: "Critical",
+  "Non-critical": "Non-critical",
 };
 
 export function BomCheckBar() {

@@ -20,7 +20,7 @@
   "tools": [
     {
       "name": "spinzero_start_review",
-      "description": "PREPARE a SpinZero review. Give it a KiCad project directory or a prepared review bundle directory; a raw project is extracted for you. THIS REVIEW ASKS YOU A QUESTION BEFORE IT STARTS, and that is not an error: the result carries a `preflight` block with the board's end application and its column mapping. Put both to the user, then call spinzero_confirm_setup, which is what actually starts the pipeline — bundle validation, distributor lookups, EVERY datasheet on the BOM (fetched AND searched for the topics a BOM review turns on, so the passages come to you with each batch), the public rule pack, and a field-by-field cross-check of every row against the distributor record. Expect THAT call to take a minute or two on a real board. Nothing else in this toolset works until you call it. PRIVACY: the schematic, BOM and layout never leave this machine; part numbers go out only for distributor and datasheet lookups. If this server has improvement telemetry switched on, the result of this call says so in `telemetry` and names exactly what would be sent — relay that sentence to the user before you go any further.",
+      "description": "PREPARE a SpinZero review. Give it a KiCad project directory or a prepared review bundle directory; a raw project is extracted for you. THIS REVIEW ASKS YOU A QUESTION BEFORE IT STARTS, and that is not an error: the result carries a `preflight` block with the board's end application and its column mapping. SHOW `preflight.mapping.table` TO THE USER VERBATIM — it is a formatted table, print it as-is rather than describing it — and ASK which end application the board is for. Then call spinzero_confirm_setup, which is what actually starts the pipeline — bundle validation, distributor lookups, EVERY datasheet on the BOM (fetched AND searched for the topics a BOM review turns on, so the passages come to you with each batch), the public rule pack, and a field-by-field cross-check of every row against the distributor record. Expect THAT call to take a minute or two on a real board. Nothing else in this toolset works until you call it. PRIVACY: the schematic, BOM and layout never leave this machine; part numbers go out only for distributor and datasheet lookups. If this server has improvement telemetry switched on, the result of this call says so in `telemetry` and names exactly what would be sent — relay that sentence to the user before you go any further.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -34,7 +34,8 @@
               "commercial",
               "industrial",
               "medical",
-              "automotive"
+              "automotive-comfort",
+              "automotive-safety"
             ],
             "description": "End application profile, if the user's own words already said it (\"review my automotive BOM\"). It changes which rules and thresholds apply — most visibly, whether AEC-Q qualification is checked at all. Omit it and the preflight will ask; do not guess it from the board's contents."
           },
@@ -80,7 +81,8 @@
               "commercial",
               "industrial",
               "medical",
-              "automotive"
+              "automotive-comfort",
+              "automotive-safety"
             ],
             "description": "The board's end application, AS THE USER STATED IT. Omit it if they did not: an omitted profile runs the strictest rules and is recorded as unstated, while a guessed one is recorded as their answer and cannot be told apart from one later."
           },
@@ -333,6 +335,56 @@
           "query"
         ],
         "additionalProperties": false
+      }
+    },
+    {
+      "name": "spinzero_datasheet_map",
+      "description": "MAP a part's datasheet: every table, plot, figure and text block in it, with a ref, a page number and enough of a preview to choose by — table header rows, plot axis labels, figure callouts. It does NOT return the content; it tells you what is in the document and what to ask for. Then call spinzero_datasheet_blocks with the refs you want, several at a time. USE THIS when the answer lives in a STRUCTURE: an ordering-code matrix where the grade is a row and the packaging is a column, an absolute-maximum table whose cell means nothing without its headers, a derating curve. Prefer spinzero_datasheet (keyword search) when a sentence would settle it — 'is AEC-Q200 mentioned at all'. The map is small; the document is not. Reading the map first is how you avoid pulling 40k tokens of MLCC datasheet to find one temperature range.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "review_id": {
+            "type": "string",
+            "description": "The id returned by spinzero_start_review."
+          },
+          "mpn": {
+            "type": "string",
+            "description": "Manufacturer part number, exactly as it appears in the BOM."
+          }
+        },
+        "required": [
+          "review_id",
+          "mpn"
+        ]
+      }
+    },
+    {
+      "name": "spinzero_datasheet_blocks",
+      "description": "Fetch the CONTENT of datasheet blocks named by spinzero_datasheet_map: whole tables cell by cell, plot series as real (x, y) points, figure callout lists. Ask for several refs at once — that is the intended use, not a shortcut. Refs look like \"b7\" (a block from the map) or \"p3\" (the raw text layer of page 3). Use a page ref when a block looks wrong or truncated, or when the value you need is in a spec block the parser did not recover as a table — it is lattice-only and a borderless block comes back as loose text. Everything returned is the document's own text with its page number, so anything you cite here is something an engineer can open the PDF and check.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "review_id": {
+            "type": "string",
+            "description": "The id returned by spinzero_start_review."
+          },
+          "mpn": {
+            "type": "string",
+            "description": "Manufacturer part number, exactly as it appears in the BOM."
+          },
+          "refs": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Block refs from the map (\"b7\") or page refs (\"p3\"). Up to 16."
+          }
+        },
+        "required": [
+          "review_id",
+          "mpn",
+          "refs"
+        ]
       }
     },
     {

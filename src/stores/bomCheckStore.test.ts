@@ -32,7 +32,7 @@ function outcome(partial: Partial<CheckOutcome> = {}): CheckOutcome {
   };
 }
 
-const finding = (severity: "Important" | "Observation", fingerprint: string) => ({
+const finding = (severity: "Critical" | "Non-critical", fingerprint: string) => ({
   id: "B01",
   section: "BOM · Integrity",
   severity,
@@ -57,7 +57,7 @@ describe("bomCheckStore", () => {
       calls.push({ cmd, args });
       if (cmd === "run_bom_check")
         return outcome({
-          findings: doc({ findings: [finding("Important", "abc123")] }),
+          findings: doc({ findings: [finding("Critical", "abc123")] }),
           filed: 1,
         });
       if (cmd === "list_comments") return [];
@@ -69,9 +69,12 @@ describe("bomCheckStore", () => {
     useProjectStore.setState({ project: { project_dir: "C:/p", class: "automotive" } as never });
     await useBomCheckStore.getState().run();
 
+    // An "automotive" project class does not say which half of the car, so it resolves
+    // to the safety rules: guessing the looser half is the one direction that can hide
+    // a driving-function finding. See `bomProfileForClass`.
     expect(calls).toContainEqual({
       cmd: "run_bom_check",
-      args: { profile: "automotive" },
+      args: { profile: "automotive-safety" },
     });
     const state = useBomCheckStore.getState();
     expect(state.running).toBe(false);
@@ -146,7 +149,7 @@ describe("bomCheckStore", () => {
   it("summarizes a run for the toast", () => {
     const out = outcome({
       findings: doc({
-        findings: [finding("Important", "a"), finding("Observation", "b")],
+        findings: [finding("Critical", "a"), finding("Non-critical", "b")],
       }),
       filed: 1,
       auto_resolved: 2,
@@ -154,7 +157,7 @@ describe("bomCheckStore", () => {
     });
     expect(runTitle(out)).toBe("BOM check: 2 issues found");
     const msg = runMessage(out);
-    expect(msg).toContain("1 important");
+    expect(msg).toContain("1 critical");
     expect(msg).toContain("1 new comment");
     expect(msg).toContain("2 auto-resolved");
     expect(msg).toContain("House Code");

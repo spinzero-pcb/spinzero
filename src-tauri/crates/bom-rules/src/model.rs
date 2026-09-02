@@ -9,38 +9,45 @@ use crate::re;
 
 /// Findings-schema severity — two levels, deliberately.
 ///
-/// `Important` = act before this ships; `Observation` = worth knowing, not a blocker.
+/// `Critical` = act before this ships; `Non-critical` = worth knowing, not a blocker.
 /// How sure the reviewer is lives in `confidence`, not here.
+///
+/// The two were called `Important` and `Observation`, and both names undersold what
+/// they meant. "Important" is what every finding claims to be, so it read as emphasis
+/// rather than as a gate; "Observation" reads as a remark, which is not what "your BOM
+/// tracks no RoHS on any of 87 rows" is. `Critical`/`Non-critical` says the same thing
+/// as a decision an engineer can act on.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Severity {
-    Important,
-    Observation,
+    Critical,
+    NonCritical,
 }
 
 impl Severity {
     /// Accepts the config vocabulary (BLOCKER/CRITICAL/MAJOR/MINOR/INFO), the schema
-    /// values, and the retired five-level words so a hand-edited profile or an old
-    /// document still loads. Unknown text degrades to `Observation` rather than
-    /// failing a run — a bad profile must never break the check.
+    /// values, and the retired words — including `IMPORTANT` and `OBSERVATION` — so a
+    /// hand-edited profile or a document written before the rename still loads. Unknown
+    /// text degrades to `Non-critical` rather than failing a run: a bad profile must
+    /// never break the check.
     pub fn parse(raw: &str) -> Severity {
         match raw.trim().to_ascii_uppercase().as_str() {
-            "BLOCKER" | "CRITICAL" | "MAJOR" | "IMPORTANT" => Severity::Important,
-            _ => Severity::Observation,
+            "BLOCKER" | "CRITICAL" | "MAJOR" | "IMPORTANT" => Severity::Critical,
+            _ => Severity::NonCritical,
         }
     }
 
     pub fn as_str(self) -> &'static str {
         match self {
-            Severity::Important => "Important",
-            Severity::Observation => "Observation",
+            Severity::Critical => "Critical",
+            Severity::NonCritical => "Non-critical",
         }
     }
 
-    /// Sort rank — Important first, matching the schema's severity order.
+    /// Sort rank -- Critical first, matching the schema's severity order.
     pub fn rank(self) -> u8 {
         match self {
-            Severity::Important => 0,
-            Severity::Observation => 1,
+            Severity::Critical => 0,
+            Severity::NonCritical => 1,
         }
     }
 }

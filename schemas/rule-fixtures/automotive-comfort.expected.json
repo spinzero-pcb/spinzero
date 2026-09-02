@@ -1,0 +1,11 @@
+{
+  "profile": "automotive-comfort",
+  "comment": "Profile behaviour for the infotainment/body-and-chassis half of the car. U1 is not AEC-Q qualified and is NRND -- both only matter (or only reach this severity) under an automotive profile. REACH is required there, and no column carries it. Paired with automotive-safety.expected.json over the SAME BOM: the two must disagree about bom.missing_aecq and agree about everything else, which is what makes the split visible.",
+  "expect_rules": [
+    "bom.missing_aecq",
+    "bom.lifecycle_status",
+    "bom.missing_compliance"
+  ],
+  "expect_severities": { "bom.missing_aecq": "Critical", "bom.lifecycle_status": "Critical" },
+  "forbid_rules": ["bom.missing_msl", "bom.missing_sourcing_id"]
+}

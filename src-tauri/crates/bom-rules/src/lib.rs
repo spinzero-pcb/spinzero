@@ -1,7 +1,7 @@
 //! Deterministic BOM checks — the free tier of the SpinZero review.
 //!
 //! One input (BOM rows as they exist in the source), one output (`findings.json`
-//! v1.1, `schemas/findings-1.1.json`). The paid review engine emits the *same*
+//! v1.2, `schemas/findings-1.2.json`). The paid review engine emits the *same*
 //! document with validated confidences, so the app ingests both through a single
 //! path and a re-run updates comments by `fingerprint` instead of re-filing them.
 //!
@@ -12,7 +12,7 @@
 //! let rows = load::parse_csv("Reference,Value\nR1,10k\n");
 //! let (items, mapping) = load::items_from_rows(&rows, &config::config_for("commercial"));
 //! let doc = run(&items, "commercial", &mapping);
-//! assert_eq!(doc.schema_version, "1.1");
+//! assert_eq!(doc.schema_version, "1.2");
 //! ```
 
 pub mod config;
@@ -230,7 +230,7 @@ pub fn run(items: &[BomItem], profile: &str, mapping: &load::MappingReport) -> F
     // tracks nothing, which reads as a design defect and isn't one.
     if items.is_empty() {
         return FindingsDoc {
-            schema_version: "1.1".into(),
+            schema_version: "1.2".into(),
             engine_version: format!("bom-rules/{}", env!("CARGO_PKG_VERSION")),
             pipeline: "bom-rules".into(),
             profile: profile.to_string(),
@@ -262,7 +262,7 @@ pub fn run(items: &[BomItem], profile: &str, mapping: &load::MappingReport) -> F
             .and_then(|c| c.get("severity"))
             .and_then(|v| v.as_str())
             .map(Severity::parse)
-            .unwrap_or(Severity::Observation);
+            .unwrap_or(Severity::NonCritical);
         let params = cfg
             .and_then(|c| c.get("params"))
             .cloned()
@@ -284,7 +284,7 @@ pub fn run(items: &[BomItem], profile: &str, mapping: &load::MappingReport) -> F
             Err(_) => raws.push((
                 rule.id(),
                 rule.section(),
-                Raw::new(Severity::Observation, format!("Rule execution error: {}", rule.id()))
+                Raw::new(Severity::NonCritical, format!("Rule execution error: {}", rule.id()))
                     .detail(
                         "This check could not run on this BOM; the rest of the review is \
                          unaffected. Please report the BOM shape that triggered it."
@@ -331,7 +331,7 @@ pub fn run(items: &[BomItem], profile: &str, mapping: &load::MappingReport) -> F
         .collect();
 
     FindingsDoc {
-        schema_version: "1.1".into(),
+        schema_version: "1.2".into(),
         engine_version: format!("bom-rules/{}", env!("CARGO_PKG_VERSION")),
         pipeline: "bom-rules".into(),
         profile: profile.to_string(),
@@ -429,7 +429,7 @@ fn fold_dnp_only(
     lines.dedup();
 
     let mut note = Raw::new(
-        Severity::Observation,
+        Severity::NonCritical,
         format!(
             "{} note{} on do-not-populate lines",
             lines.len(),
@@ -716,7 +716,7 @@ mod tests {
     fn declared_non_aecq_and_unrecorded_aecq_are_separate_findings() {
         // The split exists so L1 — whose datasheet says "Qualified to AEC-Q200." but
         // whose BOM cell is empty — is not reported as "declared not qualified"
-        // alongside D1's explicit NO. Both ride at Important: same severity category,
+        // alongside D1's explicit NO. Both ride at Critical: same severity category,
         // different claims, different wording, different fix.
         let csv = "Reference,Value,Footprint,Quantity,Manufacturer,MPN,AEC-Q,MSL,RoHS,REACH,Lifecycle\n\
                    D1,SS2150,D_SMA,1,MCC,SS2150-LTP,NO,1,Yes,Yes,Active\n\
@@ -734,7 +734,7 @@ mod tests {
             .iter()
             .find(|f| f.title.contains("declared"))
             .expect("a declared-not-qualified finding");
-        assert_eq!(declared.severity, "Important");
+        assert_eq!(declared.severity, "Critical");
         assert!(declared.anchors.iter().any(|a| a.refdes.iter().any(|r| r == "D1")));
         assert!(
             !declared.anchors.iter().any(|a| a.refdes.iter().any(|r| r == "L1")),
@@ -745,7 +745,7 @@ mod tests {
             .iter()
             .find(|f| f.title.contains("no AEC-Q status recorded"))
             .expect("an unrecorded-status finding");
-        assert_eq!(unrecorded.severity, "Important", "a blank cell is a data gap, not a failed part");
+        assert_eq!(unrecorded.severity, "Critical", "a blank cell is a data gap, not a failed part");
         assert_eq!(
             declared.severity, unrecorded.severity,
             "both AEC-Q findings share one severity category"
@@ -794,7 +794,7 @@ mod tests {
         let csv = "Reference,Value,Footprint,MPN\nR1,10k,R_0402,TBD\n";
         let doc = doc_for(csv, "commercial");
         let v = serde_json::to_value(&doc).expect("serializes");
-        assert_eq!(v["schema_version"], "1.1");
+        assert_eq!(v["schema_version"], "1.2");
         assert_eq!(v["pipeline"], "bom-rules");
         let f = &v["findings"][0];
         for key in ["id", "section", "severity", "confidence", "title", "fingerprint"] {

@@ -73,10 +73,15 @@ pub struct CheckOutcome {
 /// review inbox lands on the colour it was written for instead of on "info".
 fn comment_severity(severity: &str) -> &'static str {
     match severity {
+        // findings v1.2.
+        "Critical" => "critical",
+        "Non-critical" => "info",
+        // v1.1's two words for the same two levels. Named rather than left to the
+        // fallback: `Non-critical` and an unrecognised value both landing on "info" by
+        // accident is how a future third level would silently render as a remark.
         "Important" => "critical",
         "Observation" => "info",
-        // Legacy (findings v1.0).
-        "Critical" => "critical",
+        // Legacy (findings v1.0), whose scale had five levels.
         "Major" => "major",
         "Medium" => "minor",
         _ => "info",
@@ -391,10 +396,16 @@ pub fn archive_inbox(project_dir: &Path, name: &str) -> Result<(), String> {
 pub fn validated_doc(value: serde_json::Value) -> Result<FindingsDoc, String> {
     let doc: FindingsDoc =
         serde_json::from_value(value).map_err(|e| format!("not a findings.json document: {e}"))?;
-    if doc.schema_version != "1.1" && doc.schema_version != "1.0" {
+    // Every version we have ever written, because these documents live in the user's
+    // project folder and a review from six months ago must still open. 1.2 renamed the
+    // severity words; `Severity::parse` still accepts the 1.0/1.1 spellings, so an old
+    // document renders rather than failing to load.
+    const SUPPORTED: &[&str] = &["1.0", "1.1", "1.2"];
+    if !SUPPORTED.contains(&doc.schema_version.as_str()) {
         return Err(format!(
-            "findings schema_version {} is not supported by this app (expected 1.1 or 1.0)",
-            doc.schema_version
+            "findings schema_version {} is not supported by this app (expected one of {})",
+            doc.schema_version,
+            SUPPORTED.join(", ")
         ));
     }
     if doc.pipeline == "bom-rules" {
