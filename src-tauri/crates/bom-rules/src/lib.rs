@@ -713,6 +713,49 @@ mod tests {
     }
 
     #[test]
+    fn a_per_row_gap_is_one_finding_per_row_not_one_naming_every_row() {
+        // A finding lands in a comment box beside ONE BOM row. A candidate naming four
+        // parts lands on the first of them and reads there as a claim about three
+        // parts that are not in it, and there is no way to close it for one part.
+        let csv = "Reference,Value,Footprint,Quantity,Manufacturer,MPN,AEC-Q,MSL,RoHS,REACH,Lifecycle\n\
+                   D1,SS2150,D_SMA,1,MCC,SS2150-LTP,NO,1,Yes,Yes,Active\n\
+                   D2,RB168,D_SMA,1,ROHM,RB168MM-40TR,NO,1,Yes,Yes,Active\n\
+                   U1,MCU,QFP,1,ST,STM32F103C8T6,NO,,Yes,Yes,Active\n\
+                   U2,GATE,SOIC,1,TI,UCC27201,NO,,Yes,Yes,Active\n";
+        let doc = doc_for(csv, "automotive-safety");
+
+        let declared: Vec<&Finding> = doc
+            .findings
+            .iter()
+            .filter(|f| f.title.contains("declared not AEC-Q qualified"))
+            .collect();
+        assert_eq!(declared.len(), 4, "one per row: {declared:?}");
+        for f in &declared {
+            let refs: Vec<&String> = f.anchors.iter().flat_map(|a| a.refdes.iter()).collect();
+            assert_eq!(refs.len(), 1, "a per-row finding anchors to its own row only: {f:?}");
+            // …and says nothing about the other three parts.
+            let body = format!("{} {}", f.title, f.detail);
+            let others = ["SS2150-LTP", "RB168MM-40TR", "STM32F103C8T6", "UCC27201"]
+                .iter()
+                .filter(|mpn| body.contains(**mpn))
+                .count();
+            assert_eq!(others, 1, "a finding names one MPN: {body}");
+        }
+
+        let msl: Vec<&Finding> = doc
+            .findings
+            .iter()
+            .filter(|f| f.rule_id.as_deref() == Some("bom.missing_msl"))
+            .collect();
+        assert_eq!(msl.len(), 2, "U1 and U2 each get their own MSL finding: {msl:?}");
+
+        // Distinct rows, distinct fingerprints, so four comments update four comments.
+        let prints: std::collections::BTreeSet<&str> =
+            declared.iter().map(|f| f.fingerprint.as_str()).collect();
+        assert_eq!(prints.len(), 4, "one fingerprint per row");
+    }
+
+    #[test]
     fn declared_non_aecq_and_unrecorded_aecq_are_separate_findings() {
         // The split exists so L1 — whose datasheet says "Qualified to AEC-Q200." but
         // whose BOM cell is empty — is not reported as "declared not qualified"

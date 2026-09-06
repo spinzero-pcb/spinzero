@@ -132,44 +132,29 @@ impl Rule for LifecycleStatus {
     }
 }
 
-/// The part list a grouped finding carries in its description: one line per
-/// (part, note), designators riding along for the lookup.
-///
-/// Listed by part, not by designator: what gets qualified or populated is an MPN, and
-/// one MPN usually spans many rows. `note` is the per-part remark ("AEC-Q: (blank)");
-/// pass an empty string when the gap itself is the whole story.
-fn listed_by_part(hits: &[(&BomItem, String)]) -> String {
-    let mut by_part: Vec<(String, String, Vec<String>)> = Vec::new();
-    for (item, note) in hits {
-        let part = if item.mpn().trim().is_empty() {
-            item.label().to_string()
-        } else {
-            item.mpn().trim().to_string()
-        };
-        let refdes = item.label().to_string();
-        match by_part.iter_mut().find(|(p, n, _)| p == &part && n == note) {
-            Some((_, _, refs)) => refs.push(refdes),
-            None => by_part.push((part, note.clone(), vec![refdes])),
-        }
+/// What to call one BOM row in a finding title: its MPN where it has one, otherwise
+/// its designators. A per-row finding names the part it is about and nothing else.
+fn part_label(item: &BomItem) -> String {
+    if item.mpn().trim().is_empty() {
+        item.label().to_string()
+    } else {
+        item.mpn().trim().to_string()
     }
-    by_part
+}
+
+/// Every designator on one row, so the finding anchors to all the placements it
+/// covers and not only to the first of them.
+fn row_refs(item: &BomItem) -> Vec<String> {
+    let refs: Vec<String> = item
+        .refs
         .iter()
-        .map(|(part, note, refs)| {
-            // One part can span dozens of rows; the designators are a lookup aid, not
-            // the point, so the line stays readable.
-            let shown = refs.len().min(8);
-            let mut list = refs[..shown].join(", ");
-            if refs.len() > shown {
-                list.push_str(&format!(", +{} more", refs.len() - shown));
-            }
-            if note.is_empty() {
-                format!("  • {part} ({list})")
-            } else {
-                format!("  • {part} — {note} ({list})")
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
+        .map(|r| r.trim().to_string())
+        .filter(|r| !r.is_empty())
+        .collect();
+    if refs.is_empty() && !item.reference.trim().is_empty() {
+        return vec![item.reference.trim().to_string()];
+    }
+    refs
 }
 
 /// MSL (J-STD-020) absent on moisture-sensitive parts — the assembly house needs it
@@ -246,34 +231,28 @@ impl Rule for MissingMsl {
         if missing.is_empty() {
             return Vec::new();
         }
-        // One review point for the whole gap, same shape as AEC-Q: the decision
-        // ("populate the MSL level for these parts") is identical for every row, so N
-        // comments would be N times the noise. The BOM marks every covered row.
-        let refs: Vec<String> = missing
+        // ONE ROW, ONE FINDING. This used to be a single candidate naming every
+        // affected row. That lands on the first of them and reads there as a claim
+        // about parts that are not in it, and the engineer working row by row cannot
+        // close it for one part without closing it for all of them. The gap is per
+        // row, so the finding is too.
+        missing
             .iter()
-            .map(|item| item.reference.clone())
-            .filter(|r| !r.is_empty())
-            .collect();
-        let hits: Vec<(&BomItem, String)> =
-            missing.iter().map(|item| (*item, String::new())).collect();
-        let listed = listed_by_part(&hits);
-        vec![Raw::new(
-            ctx.severity,
-            if missing.len() == 1 {
-                "Missing MSL rating".to_string()
-            } else {
-                format!("{} parts have no MSL rating", missing.len())
-            },
-        )
-        .detail(format!(
-            "{} of {} moisture-sensitive part(s) have no MSL rating; the assembly house needs \
-             it for storage and bake-before-reflow handling.\n\nNo MSL rating:\n{listed}",
-            missing.len(),
-            scoped.len()
-        ))
-        .fix("Populate the MSL level (J-STD-020 level 1–6) for these parts.")
-        .refdes(refs)
-        .key("missing_msl")]
+            .map(|item| {
+                Raw::new(
+                    ctx.severity,
+                    format!("{} has no MSL rating", part_label(item)),
+                )
+                .detail(
+                    "This moisture-sensitive part leaves the MSL column blank; the assembly \
+                     house needs the level for storage and bake-before-reflow handling."
+                        .to_string(),
+                )
+                .fix("Record this part's MSL level (J-STD-020 level 1 to 6) from its datasheet.")
+                .refdes(row_refs(item))
+                .key("missing_msl")
+            })
+            .collect()
     }
 }
 
@@ -365,78 +344,46 @@ impl Rule for MissingAecq {
 
         let mut out = Vec::new();
 
-        // One review point per class, listing every affected part: the reviewer's
-        // decision is the same for all of them, so N identical comments would only be
-        // N times the noise. The BOM marks every covered row, so the reviewer still
-        // sees each one in place.
-        if !declared.is_empty() {
-            let refs: Vec<String> = declared
-                .iter()
-                .map(|(item, _)| item.reference.clone())
-                .filter(|r| !r.is_empty())
-                .collect();
-            let labelled: Vec<(&BomItem, String)> = declared
-                .iter()
-                .map(|(item, value)| (*item, format!("AEC-Q: {value}")))
-                .collect();
-            let listed = listed_by_part(&labelled);
+        // ONE ROW, ONE FINDING, for the same reason the MSL rule files per row: a
+        // candidate naming four parts lands on the first of them, carries three other
+        // MPNs into a comment box beside a row they have nothing to do with, and
+        // cannot be closed for one part at a time.
+        for (item, value) in &declared {
             out.push(
                 Raw::new(
                     ctx.severity,
-                    if declared.len() == 1 {
-                        "Part declared not AEC-Q qualified".to_string()
-                    } else {
-                        format!("{} parts declared not AEC-Q qualified", declared.len())
-                    },
+                    format!("{} is declared not AEC-Q qualified", part_label(item)),
                 )
                 .detail(format!(
-                    "{} of {} populated parts carry an explicit negative AEC-Q status in an \
-                     automotive design.\n\nDeclared not qualified:\n{listed}",
-                    declared.len(),
-                    populated.len()
+                    "The BOM's own AEC-Q column reads '{value}' for this row on an automotive \
+                     design, so the part is stated to be unqualified rather than undocumented."
                 ))
                 .fix(
-                    "Use AEC-Q-qualified equivalents, or record an approved exception with the \
-                     qualification grade.",
+                    "Move to an AEC-Q qualified equivalent, or record an approved exception with \
+                     the qualification grade.",
                 )
-                .refdes(refs)
+                .refdes(row_refs(item))
                 .key("aecq_declared_negative"),
             );
         }
 
-        if !blank.is_empty() {
-            let refs: Vec<String> = blank
-                .iter()
-                .map(|item| item.reference.clone())
-                .filter(|r| !r.is_empty())
-                .collect();
-            let labelled: Vec<(&BomItem, String)> = blank
-                .iter()
-                .map(|item| (*item, "AEC-Q: (blank)".to_string()))
-                .collect();
-            let listed = listed_by_part(&labelled);
+        for item in &blank {
             out.push(
                 Raw::new(
                     ctx.missing_sev(Severity::NonCritical),
-                    format!(
-                        "{} part{} have no AEC-Q status recorded",
-                        blank.len(),
-                        if blank.len() == 1 { "" } else { "s" }
-                    ),
+                    format!("{} has no AEC-Q status recorded", part_label(item)),
                 )
-                .detail(format!(
-                    "{} of {} populated parts leave the AEC-Q column empty in an automotive \
-                     design. Empty means UNKNOWN, not unqualified — several of these are \
-                     usually qualified parts with an undocumented field, and the datasheet \
-                     settles it either way.\n\nNo AEC-Q status recorded:\n{listed}",
-                    blank.len(),
-                    populated.len()
-                ))
+                .detail(
+                    "This row leaves the AEC-Q column empty on an automotive design. Empty \
+                     means UNKNOWN, not unqualified: the part may well be qualified with the \
+                     field simply undocumented, and its datasheet settles it either way."
+                        .to_string(),
+                )
                 .fix(
-                    "Confirm each part's AEC-Q grade against its datasheet and record it; escalate \
-                     only the parts the datasheet shows are not qualified.",
+                    "Confirm this part's AEC-Q grade against its datasheet and record it; \
+                     escalate only if the datasheet shows it is not qualified.",
                 )
-                .refdes(refs)
+                .refdes(row_refs(item))
                 .key("aecq_not_recorded"),
             );
         }
