@@ -362,6 +362,12 @@ pub struct Design {
     pub theme: crate::theme::Theme,
     /// Project drawing defaults (line width, text size) from the `.kicad_pro`.
     pub drawing: crate::theme::Drawing,
+    /// Source-tool block: which front-end produced this bundle, the compile
+    /// settings it honoured, and what it could not resolve. Absent for KiCad,
+    /// which has no analogue for the compile options and reports its gaps in the
+    /// BOM mapping report instead.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub source: Option<serde_json::Value>,
 }
 
 /// Assemble the design model for a single (root) schematic sheet.
@@ -424,7 +430,6 @@ pub fn build_design_multi(
     pcb_pad_net: &BTreeMap<(String, String), String>,
 ) -> Design {
     let mut components = Vec::new();
-    let mut indexes = Indexes::default();
 
     // Collect fragments from every sheet. Each fragment carries its sheet instance
     // (`Frag::sheet`), so the merged net's `by_sheet` keeps a correct per-instance
@@ -439,6 +444,51 @@ pub fn build_design_multi(
         ));
         frags.extend(netlist::fragments(sch, &sheet.sheet_path, &sheet.sheet_path_uuids));
     }
+    // Merge fragments into nets across the whole hierarchy, then adopt KiCad's
+    // canonical net names from the board (when present) so the schematic, the
+    // PCB, and the project's net-class rules all share one namespace — the basis
+    // for cross-probing and correct net-class colouring.
+    let mut merged = netlist::merge_frags(frags);
+    rename_nets_from_pcb(&mut merged, pcb_pad_net);
+
+    // Bus aliases gathered across every sheet, deduped + sorted so the JSON stays
+    // byte-deterministic. Surfaced as review context only — never synthesised into
+    // `nets` (member names are bus-local and reused across buses, so a bare-name
+    // union would silently short unrelated nets).
+    let mut bus_aliases: Vec<BusAliasInfo> = sheets
+        .iter()
+        .flat_map(|(_, sch)| sch.bus_aliases.iter())
+        .map(|a| BusAliasInfo { name: a.name.clone(), members: a.members.clone() })
+        .collect();
+    bus_aliases.sort_by(|a, b| (&a.name, &a.members).cmp(&(&b.name, &b.members)));
+    bus_aliases.dedup();
+
+    assemble(
+        project_name,
+        project_path,
+        &format!("{project_name}.kicad_pro"),
+        sheets.iter().map(|(s, _)| s.clone()).collect(),
+        components,
+        merged,
+        bus_aliases,
+    )
+}
+
+/// Assemble the design model from an already-built component list and net list.
+///
+/// Shared by both front-ends: everything here is the *output* contract — the
+/// indexes, the uid numbering, the net-class seeding — and neither source may
+/// have its own copy of it.
+pub fn assemble(
+    project_name: &str,
+    project_path: &str,
+    project_filename: &str,
+    sheets: Vec<SheetInfo>,
+    mut components: Vec<Component>,
+    merged: Vec<netlist::Net>,
+    bus_aliases: Vec<BusAliasInfo>,
+) -> Design {
+    let mut indexes = Indexes::default();
     // designator -> sheet, for net source_sheets.
     let comp_sheet: BTreeMap<String, String> = components
         .iter()
@@ -448,13 +498,6 @@ pub fn build_design_multi(
         .iter()
         .filter_map(|c| c.bbox.map(|b| (c.designator.clone(), b)))
         .collect();
-
-    // Merge fragments into nets across the whole hierarchy, then adopt KiCad's
-    // canonical net names from the board (when present) so the schematic, the
-    // PCB, and the project's net-class rules all share one namespace — the basis
-    // for cross-probing and correct net-class colouring.
-    let mut merged = netlist::merge_frags(frags);
-    rename_nets_from_pcb(&mut merged, pcb_pad_net);
 
     let mut net_name_to_classes = BTreeMap::new();
     let mut component_to_nets: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
@@ -522,27 +565,15 @@ pub fn build_design_multi(
         .map(|(k, v)| (k, v.into_iter().collect()))
         .collect();
 
-    // Bus aliases gathered across every sheet, deduped + sorted so the JSON stays
-    // byte-deterministic. Surfaced as review context only — never synthesised into
-    // `nets` (member names are bus-local and reused across buses, so a bare-name
-    // union would silently short unrelated nets).
-    let mut bus_aliases: Vec<BusAliasInfo> = sheets
-        .iter()
-        .flat_map(|(_, sch)| sch.bus_aliases.iter())
-        .map(|a| BusAliasInfo { name: a.name.clone(), members: a.members.clone() })
-        .collect();
-    bus_aliases.sort_by(|a, b| (&a.name, &a.members).cmp(&(&b.name, &b.members)));
-    bus_aliases.dedup();
-
     Design {
         schema: crate::DESIGN_SCHEMA.to_string(),
         generator: crate::GENERATOR.to_string(),
         project: ProjectInfo {
             name: project_name.to_string(),
-            filename: format!("{project_name}.kicad_pro"),
+            filename: project_filename.to_string(),
             path: project_path.to_string(),
         },
-        sheets: sheets.iter().map(|(s, _)| s.clone()).collect(),
+        sheets,
         components,
         nets,
         net_name_to_classes,
@@ -552,6 +583,7 @@ pub fn build_design_multi(
         // file gives drawing defaults) — both default to empty here.
         theme: crate::theme::Theme::default(),
         drawing: crate::theme::Drawing::default(),
+        source: None,
     }
 }
 

@@ -1,0 +1,388 @@
+//! Altium components projected into `design::Component`.
+//!
+//! The output structs are the ones the KiCad path fills, so a schema change
+//! breaks both builders at once. Only the *sources* of the fields differ.
+
+use std::collections::BTreeMap;
+
+use eda_parse_altium::sch::{self, Component as SchComponent, Param, SchDoc, UNIT};
+
+use crate::design::{Bbox, Classification, Component, Hierarchy};
+
+/// Parameter key carrying the source-truth `ComponentKind`.
+pub const KIND_PARAM: &str = "altium_component_kind";
+
+/// Which channel a sheet placement is, when its document is placed more than
+/// once. Both mechanisms Altium offers produce this — a `REPEAT(...)` sheet
+/// symbol and, as in the corpus, simply placing the same child document twice.
+#[derive(Debug, Clone)]
+pub struct Channel {
+    /// 1-based index in placement order.
+    pub index: i64,
+    /// The placement's display name, e.g. `Gate_Drv_HS`.
+    pub name: String,
+    /// `ChannelDesignatorFormatString` from the project.
+    pub format: String,
+}
+
+impl Channel {
+    /// The placed designator for a base designator on this channel.
+    ///
+    /// Without this every channel of a repeated block collapses onto one
+    /// designator and the BOM loses a whole channel's parts. The board's own
+    /// text records show the synthesised names (`C31_1`, `C31_2`), which is what
+    /// this reproduces.
+    pub fn designator(&self, base: &str) -> String {
+        self.format
+            .replace("$Component", base)
+            .replace("$ChannelIndex", &self.index.to_string())
+    }
+
+    /// Suffix a local net name picks up on this channel.
+    pub fn net_suffix(&self) -> String {
+        format!("_{}", self.index)
+    }
+}
+
+/// Resolve a field that may be an expression.
+///
+/// A value beginning `=` is a parameter reference (`Comment==Value`,
+/// `Text==SheetNumber`) resolved against component, sheet and project
+/// parameters. When it resolves empty we fall back to the literal text, which is
+/// what Altium itself displays.
+pub fn evaluate(text: &str, component: &[Param], sheet: &BTreeMap<String, String>) -> String {
+    let Some(name) = text.strip_prefix('=') else {
+        return text.to_string();
+    };
+    let name = name.trim();
+    let from_component = component
+        .iter()
+        .find(|p| p.name.eq_ignore_ascii_case(name))
+        .map(|p| p.text.clone());
+    let resolved = from_component
+        .or_else(|| {
+            sheet
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case(name))
+                .map(|(_, v)| v.clone())
+        })
+        .unwrap_or_default();
+    if resolved.is_empty() || resolved.starts_with('=') {
+        text.to_string()
+    } else {
+        resolved
+    }
+}
+
+/// Pins of the placement actually drawn: the current part, in the active display
+/// mode. A symbol with several display modes stores every mode's pins, so taking
+/// them all double-counts every terminal.
+pub fn placed_pins(c: &SchComponent) -> impl Iterator<Item = &sch::Pin> {
+    c.pins.iter().filter(move |p| {
+        p.display_mode == c.display_mode && (p.part_id == c.current_part_id || p.part_id == -1)
+    })
+}
+
+/// Sheet-level parameters as a name -> text map, for expression resolution.
+pub fn sheet_params(sch: &SchDoc) -> BTreeMap<String, String> {
+    sch.parameters
+        .iter()
+        .map(|p| (p.name.clone(), p.text.clone()))
+        .collect()
+}
+
+/// Altium's Y-up sheet coordinates as a bundle bbox: millimetres, Y-down.
+fn bbox_mm(min: sch::Pt, max: sch::Pt, sheet_height: i64) -> Bbox {
+    let mm = |v: i64| eda_parse_altium::units::sch_mm(0, v);
+    let r = |v: f64| (v * 1000.0).round() / 1000.0;
+    // Flip about the sheet height, so the max corner becomes the top edge.
+    let (y0, y1) = (sheet_height - max.y, sheet_height - min.y);
+    Bbox {
+        x: r(mm(min.x)),
+        y: r(mm(y0)),
+        w: r(mm(max.x - min.x)),
+        h: r(mm(y1 - y0)),
+    }
+}
+
+/// Build the component list for one sheet instance.
+///
+/// Multi-part components — one physical part placed as several records sharing a
+/// designator — are grouped into one component with the union of their pins, the
+/// way KiCad units are handled. Their extra placement uuids are returned
+/// alongside so the caller can index every one of them back to the designator.
+pub fn build_components_on(
+    sch: &SchDoc,
+    sheet_path: &str,
+    sheet_path_uuids: &str,
+    channel: Option<&Channel>,
+) -> (Vec<Component>, Vec<(String, String)>) {
+    let params = sheet_params(sch);
+    let mut out: Vec<Component> = Vec::new();
+    // designator -> index in `out`, for grouping the parts of one component.
+    let mut at: BTreeMap<String, usize> = BTreeMap::new();
+    let mut extra_svg_ids: Vec<(String, String)> = Vec::new();
+
+    for c in &sch.components {
+        let base = c.designator.trim().to_string();
+        if base.is_empty() {
+            continue;
+        }
+        let designator = match channel {
+            Some(ch) => ch.designator(&base),
+            None => base.clone(),
+        };
+        let pins: Vec<&sch::Pin> = placed_pins(c).collect();
+        if let Some(&i) = at.get(&designator) {
+            // Another part of a component already seen: union the pins and the
+            // extent, keep the first placement's identity.
+            let existing = &mut out[i];
+            existing.classification.pin_count += distinct_pins(&pins);
+            if let (Some(b), Some((min, max))) = (existing.bbox, c.bbox) {
+                existing.bbox = Some(union(b, bbox_mm(min, max, sch.sheet.height)));
+            }
+            for (k, v) in parameters_of(c, &params) {
+                existing.parameters.entry(k).or_insert(v);
+            }
+            if !c.uuid.is_empty() {
+                extra_svg_ids.push((c.uuid.clone(), designator.clone()));
+            }
+            continue;
+        }
+
+        let prefix = crate::design::prefix_of(&designator);
+        let pin_count = distinct_pins(&pins);
+        at.insert(designator.clone(), out.len());
+        out.push(Component {
+            designator: designator.clone(),
+            svg_id: c.uuid.clone(),
+            // Altium's "Comment" is KiCad's "Value", and it is routinely an
+            // expression pointing at another parameter.
+            value: evaluate(c.param("Comment").unwrap_or(""), &c.parameters, &params),
+            footprint: c.footprint.clone(),
+            library_ref: library_ref(c),
+            description: c.description.clone(),
+            hierarchy: Hierarchy {
+                base_designator: base.clone(),
+                channel: channel.map(|c| c.name.clone()),
+                channel_index: channel.map(|c| c.index),
+                sheet: sheet_path.to_string(),
+                sheet_path: sheet_path.to_string(),
+                sheet_path_uuids: sheet_path_uuids.to_string(),
+            },
+            classification: Classification {
+                prefix: prefix.clone(),
+                kind: crate::design::classify(&prefix, pin_count).to_string(),
+                pin_count,
+            },
+            parameters: parameters_of(c, &params),
+            bbox: c.bbox.map(|(min, max)| bbox_mm(min, max, sch.sheet.height)),
+        });
+    }
+    out.sort_by(|a, b| a.designator.cmp(&b.designator));
+    (out, extra_svg_ids)
+}
+
+fn distinct_pins(pins: &[&sch::Pin]) -> u32 {
+    let mut nums: Vec<&str> = pins.iter().map(|p| p.number.as_str()).collect();
+    nums.sort_unstable();
+    nums.dedup();
+    nums.len() as u32
+}
+
+fn union(a: Bbox, b: Bbox) -> Bbox {
+    let (x0, y0) = (a.x.min(b.x), a.y.min(b.y));
+    let (x1, y1) = ((a.x + a.w).max(b.x + b.w), (a.y + a.h).max(b.y + b.h));
+    Bbox { x: x0, y: y0, w: x1 - x0, h: y1 - y0 }
+}
+
+/// `LibReference`, qualified by the source library when the file names one.
+fn library_ref(c: &SchComponent) -> String {
+    if c.source_library.is_empty() || c.source_library == "*" {
+        c.library_ref.clone()
+    } else {
+        format!("{}:{}", c.source_library, c.library_ref)
+    }
+}
+
+/// Every parameter of the component, expression-resolved, plus the two flags the
+/// shared BOM code reads.
+///
+/// `kicad_in_bom` is the bundle's existing contract key for BOM inclusion, so
+/// `bom.rs` runs unchanged; `altium_component_kind` carries the source truth
+/// next to it. Hidden parameters are kept (KiCad hidden properties are too) —
+/// they are just not drawn.
+fn parameters_of(c: &SchComponent, sheet: &BTreeMap<String, String>) -> BTreeMap<String, String> {
+    let mut m: BTreeMap<String, String> = BTreeMap::new();
+    for p in &c.parameters {
+        if p.name.is_empty() {
+            continue;
+        }
+        m.insert(p.name.clone(), evaluate(&p.text, &c.parameters, sheet));
+    }
+    m.insert(KIND_PARAM.into(), c.kind.as_str().into());
+    m.insert("kicad_in_bom".into(), c.kind.in_bom().to_string());
+    // Altium expresses "not fitted" through project variants, not a per-symbol
+    // flag, and variants are not applied yet — so DNP is left explicitly false
+    // and the diagnostics block says the project defines variants.
+    m.insert("kicad_dnp".into(), "false".into());
+    m.insert("kicad_on_board".into(), "true".into());
+    m
+}
+
+/// Millimetre conversion for a raw schematic coordinate, for callers building
+/// geometry from the same model.
+pub fn mm(v: i64) -> f64 {
+    eda_parse_altium::units::sch_mm(v / UNIT, v % UNIT)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use eda_parse_altium::sch::{ComponentKind, Pt};
+
+    fn param(name: &str, text: &str) -> Param {
+        Param { name: name.into(), text: text.into(), hidden: false, uuid: String::new() }
+    }
+
+    fn comp(designator: &str, params: Vec<Param>, kind: ComponentKind) -> SchComponent {
+        SchComponent {
+            library_ref: "R".into(),
+            description: "Resistor".into(),
+            designator: designator.into(),
+            designator_uuid: "D".into(),
+            part_count: 1,
+            current_part_id: 1,
+            display_mode: 0,
+            kind,
+            at: Pt::default(),
+            uuid: format!("U-{designator}"),
+            source_library: "PCBLibraryData.SVNDbLib".into(),
+            database_table: "TPartsAll".into(),
+            footprint: "RESC1608X55N".into(),
+            pins: Vec::new(),
+            parameters: params,
+            bbox: None,
+        }
+    }
+
+    fn doc(components: Vec<SchComponent>) -> SchDoc {
+        SchDoc { components, ..SchDoc::default() }
+    }
+
+    /// Corner case 5: a field whose text is `=Name` is a parameter reference.
+    /// Reading it literally puts `=Value` in the BOM's value column.
+    #[test]
+    fn expression_fields_resolve_against_parameters() {
+        let params = vec![param("Value", "10k"), param("Comment", "=Value")];
+        let sheet = BTreeMap::from([("Revision".to_string(), "B".to_string())]);
+        assert_eq!(evaluate("=Value", &params, &sheet), "10k");
+        assert_eq!(evaluate("=Revision", &params, &sheet), "B", "sheet params resolve too");
+        assert_eq!(evaluate("=Missing", &params, &sheet), "=Missing", "empty falls back");
+        assert_eq!(evaluate("plain", &params, &sheet), "plain");
+    }
+
+    #[test]
+    fn component_value_comes_from_the_evaluated_comment() {
+        let d = doc(vec![comp("R1", vec![param("Value", "10k"), param("Comment", "=Value")], ComponentKind::Standard)]);
+        let (out, _) = build_components_on(&d, "/", "/", None);
+        assert_eq!(out[0].value, "10k");
+        assert_eq!(out[0].library_ref, "PCBLibraryData.SVNDbLib:R");
+        assert_eq!(out[0].footprint, "RESC1608X55N");
+        assert_eq!(out[0].hierarchy.sheet_path_uuids, "/");
+    }
+
+    /// Corner case 13 reaching the BOM: a graphical decoration must not become a
+    /// BOM line, and the shared `bom.rs` reads `kicad_in_bom` to decide.
+    #[test]
+    fn component_kind_drives_bom_inclusion() {
+        let d = doc(vec![
+            comp("R1", vec![], ComponentKind::Standard),
+            comp("LOGO1", vec![], ComponentKind::Graphical),
+            comp("MP1", vec![], ComponentKind::Mechanical),
+        ]);
+        let (out, _) = build_components_on(&d, "/", "/", None);
+        let kind = |dsg: &str| {
+            let c = out.iter().find(|c| c.designator == dsg).unwrap();
+            (
+                c.parameters["kicad_in_bom"].clone(),
+                c.parameters[KIND_PARAM].clone(),
+            )
+        };
+        assert_eq!(kind("R1"), ("true".into(), "standard".into()));
+        assert_eq!(kind("LOGO1"), ("false".into(), "graphical".into()));
+        assert_eq!(kind("MP1"), ("true".into(), "mechanical".into()));
+    }
+
+    /// One physical part placed as several records is one component, with its
+    /// pins unioned — not several BOM lines.
+    #[test]
+    fn multi_part_placements_group_into_one_component() {
+        let pin = |n: &str, part: i64| sch::Pin {
+            number: n.into(),
+            name: n.into(),
+            description: String::new(),
+            electrical: 4,
+            conglomerate: 32,
+            length: 10,
+            at: Pt::default(),
+            part_id: part,
+            display_mode: 0,
+            uuid: format!("p{n}"),
+            hidden_net_name: String::new(),
+        };
+        let mut a = comp("U1", vec![], ComponentKind::Standard);
+        a.pins = vec![pin("1", 1), pin("2", 1)];
+        let mut b = comp("U1", vec![], ComponentKind::Standard);
+        b.current_part_id = 2;
+        b.uuid = "U-U1-part2".into();
+        b.pins = vec![pin("3", 2), pin("4", 2)];
+        let (out, extra) = build_components_on(&doc(vec![a, b]), "/", "/", None);
+        assert_eq!(out.len(), 1, "one designator, one component");
+        assert_eq!(out[0].classification.pin_count, 4);
+        assert_eq!(out[0].classification.kind, "ic");
+        assert_eq!(extra, vec![("U-U1-part2".to_string(), "U1".to_string())]);
+    }
+
+    /// A document placed twice is two channels, and each channel's parts carry
+    /// their own designator — else the BOM loses a whole channel.
+    #[test]
+    fn channel_placements_get_their_own_designators() {
+        let ch = |i| Channel {
+            index: i,
+            name: format!("Gate_Drv_{i}"),
+            format: "$Component_$ChannelIndex".into(),
+        };
+        let d = doc(vec![comp("C31", vec![], ComponentKind::Standard)]);
+        let (a, _) = build_components_on(&d, "/A/", "/a/", Some(&ch(1)));
+        let (b, _) = build_components_on(&d, "/B/", "/b/", Some(&ch(2)));
+        assert_eq!(a[0].designator, "C31_1");
+        assert_eq!(b[0].designator, "C31_2");
+        assert_eq!(a[0].hierarchy.base_designator, "C31");
+        assert_eq!(a[0].hierarchy.channel_index, Some(1));
+        assert_eq!(ch(1).net_suffix(), "_1");
+    }
+
+    /// A symbol drawn in several display modes stores every mode's pins; only
+    /// the active mode's are on the sheet.
+    #[test]
+    fn alternate_display_modes_do_not_double_count_pins() {
+        let pin = |n: &str, mode: i64| sch::Pin {
+            number: n.into(),
+            name: n.into(),
+            description: String::new(),
+            electrical: 4,
+            conglomerate: 32,
+            length: 10,
+            at: Pt::default(),
+            part_id: 1,
+            display_mode: mode,
+            uuid: format!("p{n}m{mode}"),
+            hidden_net_name: String::new(),
+        };
+        let mut c = comp("R1", vec![], ComponentKind::Standard);
+        c.pins = vec![pin("1", 0), pin("2", 0), pin("1", 1), pin("2", 1), pin("1", 2), pin("2", 2)];
+        let (out, _) = build_components_on(&doc(vec![c]), "/", "/", None);
+        assert_eq!(out[0].classification.pin_count, 2);
+    }
+}

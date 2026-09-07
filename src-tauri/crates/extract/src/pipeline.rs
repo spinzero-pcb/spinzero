@@ -306,6 +306,9 @@ fn slug(s: &str) -> String {
 /// Schematic/PCB SVG rendering is layered in next; the manifest's SVG lists are
 /// empty until then, which the app tolerates.
 pub fn run_design(project: &Path, out_dir: &Path, emit: &mut dyn FnMut(Msg)) -> Result<(), String> {
+    if crate::altium::is_altium_project(project) {
+        return run_design_altium(project, out_dir, emit);
+    }
     let (name, sheets) = load_hierarchy(project, emit)?;
     let refs: Vec<(SheetInfo, &Schematic)> =
         sheets.iter().map(|s| (s.info.clone(), &s.sch)).collect();
@@ -581,9 +584,99 @@ fn read_pcb_pad_net(pcb_path: &Path) -> BTreeMap<(String, String), String> {
     map
 }
 
+/// Run the `design` command for an Altium project.
+///
+/// Everything after the model is the KiCad path's code: the same `Design`
+/// struct, the same manifest, the same writer. Only the front half differs.
+/// SVGs, board geometry and the schematic geometry are M2/M3, so the manifest
+/// carries no SVG entries yet — which the app tolerates.
+fn run_design_altium(
+    project: &Path,
+    out_dir: &Path,
+    emit: &mut dyn FnMut(Msg),
+) -> Result<(), String> {
+    let free_document = !project
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.eq_ignore_ascii_case("PrjPcb"))
+        .unwrap_or(false);
+    let (name, options, sheets, unresolved) = crate::altium::load_hierarchy(project, emit)?;
+    let filename = project
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_string();
+    let (mut model, source) = crate::altium::build_design(
+        &name,
+        &project.to_string_lossy(),
+        &filename,
+        &sheets,
+        &options,
+        unresolved,
+        free_document,
+    );
+    emit(Msg::Progress(format!(
+        "compile options: {} scope, sheet-entry names {}, port names {}",
+        source.compile.hierarchy_mode,
+        onoff(source.compile.allow_sheet_entry_net_names),
+        onoff(source.compile.allow_port_net_names),
+    )));
+    let u = &source.unresolved;
+    emit(Msg::Progress(format!(
+        "unresolved: {} missing sheets, {} entries without a port, {} ports without an entry,          {} unconnected pins, {} buses, {} directives, {} regions not applied",
+        u.missing_sheets.len(),
+        u.sheet_entries_without_port.len(),
+        u.ports_without_sheet_entry.len(),
+        u.unconnected_pins,
+        u.buses_not_expanded,
+        u.directives_not_applied,
+        u.compile_mask_candidates_not_applied,
+    )));
+    model.source = serde_json::to_value(&source).ok();
+
+    std::fs::create_dir_all(out_dir).map_err(|e| e.to_string())?;
+    let design_file = format!("{name}_design.json");
+    let json = serde_json::to_string_pretty(&model).map_err(|e| e.to_string())?;
+    std::fs::write(out_dir.join(&design_file), json).map_err(|e| e.to_string())?;
+    emit(Msg::Artifact(design_file.clone()));
+
+    let manifest = Manifest {
+        schema: crate::MANIFEST_SCHEMA.to_string(),
+        design_json: design_file,
+        schematic_svgs: Vec::new(),
+        pcb_svgs: Vec::new(),
+        pcb_geometry: None,
+        schematic_geometry: None,
+    };
+    std::fs::write(
+        out_dir.join("design_review_manifest.json"),
+        serde_json::to_string_pretty(&manifest).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())?;
+    emit(Msg::Artifact("design_review_manifest.json".to_string()));
+    emit(Msg::Progress(format!(
+        "design: {} sheets, {} components, {} nets",
+        model.sheets.len(),
+        model.components.len(),
+        model.nets.len()
+    )));
+    Ok(())
+}
+
+fn onoff(b: bool) -> &'static str {
+    if b { "on" } else { "off" }
+}
+
 /// Parse a project's full hierarchy into the component list (shared by `bom`),
 /// so subsheet parts are not missing from the BOM.
 pub fn load_components(project: &Path) -> Result<(String, Vec<Component>), String> {
+    if crate::altium::is_altium_project(project) {
+        let mut sink = |_: Msg| {};
+        let (name, opts, sheets, _u) = crate::altium::load_hierarchy(project, &mut sink)?;
+        let mut components = crate::altium::build_components(&sheets, &opts);
+        components.sort_by(|a, b| a.designator.cmp(&b.designator));
+        return Ok((name, components));
+    }
     let mut sink = |_: Msg| {};
     let (name, sheets) = load_hierarchy(project, &mut sink)?;
     let mut components = Vec::new();

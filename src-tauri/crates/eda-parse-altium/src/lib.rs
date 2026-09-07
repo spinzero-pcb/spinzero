@@ -9,6 +9,7 @@ pub mod cfb;
 pub mod doc;
 pub mod prj;
 pub mod record;
+pub mod sch;
 pub mod units;
 
 #[cfg(test)]
@@ -17,3 +18,4 @@ mod test_support;
 pub use doc::{Doc, Kind};
 pub use prj::{CompileOptions, HierarchyMode, Project};
 pub use record::TextRecord;
+pub use sch::SchDoc;
