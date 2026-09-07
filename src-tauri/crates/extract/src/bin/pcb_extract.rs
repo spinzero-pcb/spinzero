@@ -5,12 +5,14 @@
 //!
 //!   pcb-extract design <project> -o <out_dir>
 //!   pcb-extract bom    <project> --format grouped-csv|grouped-json -o <out_dir>
+//!   pcb-extract dump   <file.SchDoc|.PcbDoc> [--full] [--stream <n>] [--head <n>]
 //!   pcb-extract validate --golden <bundle_dir> --input <project>
 //!   pcb-extract --version
 
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+use extract::altium::dump::Level;
 use extract::pipeline::{run_bom, run_design, Msg};
 
 fn main() -> ExitCode {
@@ -24,6 +26,7 @@ fn main() -> ExitCode {
     match args.first().map(String::as_str) {
         Some("design") => cmd_design(&args[1..]),
         Some("bom") => cmd_bom(&args[1..]),
+        Some("dump") => cmd_dump(&args[1..]),
         Some("validate") => {
             eprintln!("pcb-extract: '{}' is not implemented yet", args[0]);
             ExitCode::from(2)
@@ -33,7 +36,7 @@ fn main() -> ExitCode {
             ExitCode::from(2)
         }
         None => {
-            eprintln!("usage: pcb-extract <design|bom|validate> ...  (try --version)");
+            eprintln!("usage: pcb-extract <design|bom|dump|validate> ...  (try --version)");
             ExitCode::from(2)
         }
     }
@@ -69,6 +72,40 @@ fn cmd_design(args: &[String]) -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("design failed: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// `pcb-extract dump <file.SchDoc|.PcbDoc> [--full] [--stream <name>]`
+///
+/// Debug view of an Altium document: streams, record counts by type, and with
+/// `--full` every decoded record. Development tool — no bundle output.
+fn cmd_dump(args: &[String]) -> ExitCode {
+    let mut file: Option<PathBuf> = None;
+    let mut level = Level::Summary;
+    let mut stream: Option<String> = None;
+    let mut head = 48usize;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--full" => level = Level::Full,
+            "--stream" | "-s" => stream = it.next().cloned(),
+            "--head" => head = it.next().and_then(|v| v.parse().ok()).unwrap_or(head),
+            _ => file = Some(PathBuf::from(a)),
+        }
+    }
+    let Some(file) = file else {
+        eprintln!("usage: pcb-extract dump <file.SchDoc|.PcbDoc> [--full] [--stream <name>]");
+        return ExitCode::from(2);
+    };
+    match extract::altium::dump::dump_head(&file, level, stream.as_deref(), head) {
+        Ok(v) => {
+            println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default());
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("dump failed: {e}");
             ExitCode::FAILURE
         }
     }

@@ -1,0 +1,8 @@
+[package]
+name = "eda-parse-altium"
+version = "0.0.1"
+edition = "2021"
+description = "Read-only reader for Altium Designer project, schematic and board files (CFB container + record model)"
+license = "GPL-3.0-or-later"
+
+[dependencies]

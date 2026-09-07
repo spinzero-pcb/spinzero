@@ -6,6 +6,7 @@
 //! app (replacing the external importer subprocess) and via the `pcb-extract`
 //! binary used by the review skills.
 
+pub mod altium;
 pub mod bom;
 pub mod design;
 pub mod geom;
