@@ -7,7 +7,8 @@ repos consume them rather than each defining their own shape.
 
 | File | What it pins |
 |---|---|
-| `findings-1.1.json` | `findings.json` — the one output contract every review producer emits. |
+| `findings-1.2.json` | `findings.json` — the one output contract every review producer emits. |
+| `findings-1.1.json` | The version before `column_mapping` and `execution`. Kept for readers. |
 | `findings-1.0.json` | The retired five-level severity / four-level confidence version. No producer emits it; kept so a document already sitting in a project's review inbox still reads. |
 | `bundle-1.0.json` | The review bundle — every file a detailed review may upload, and by omission everything it may not. |
 | `mcp-tools-1.0.json` | The MCP harness's tool surface: what a customer's own agent may call, in what order, and how a refusal is phrased. |

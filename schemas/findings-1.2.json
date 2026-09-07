@@ -182,6 +182,13 @@
         "fingerprint": {
           "type": "string",
           "description": "blake3(rule_id | anchor set | normalized predicate), truncated. The dedupe key: a re-run updates the existing comment instead of re-filing, and a fingerprint that disappears auto-resolves its comment."
+        },
+        "supersedes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Fingerprints this finding used to have, under an earlier content pack. A prompt or severity change moves a fingerprint, and the fingerprint is which comment thread the finding lands in — so a content update would strand the replies on a thread nobody updates again and file a fresh one beside it. A pack that moves an identity ships the mapping, and a re-review carries the old names here: update the thread found under any of them, and its identity becomes `fingerprint` from now on. Absent for every finding whose identity did not move."
         }
       }
     },
