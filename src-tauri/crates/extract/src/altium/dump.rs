@@ -50,7 +50,11 @@ pub fn dump_head(
         // The board's string table: `Texts6` references it by index, and it is
         // where the placed (channel-suffixed) designators actually live.
         "wide_strings": wide.len(),
-        "wide_strings_sample": wide.iter().take(8).map(|(i, s)| json!([i, s])).collect::<Vec<_>>(),
+        "wide_strings_sample": wide
+            .iter()
+            .take(if level == Level::Full { usize::MAX } else { 8 })
+            .map(|(i, s)| json!([i, s]))
+            .collect::<Vec<_>>(),
         "streams": streams,
     }))
 }
@@ -60,8 +64,8 @@ fn dump_stream(doc: &Doc, name: &str, level: Level, head: usize) -> Value {
     let raws = doc.records(name);
     let mut text = 0usize;
     let mut binary = 0usize;
-    // Record-type histogram: `RECORD=n` for text records, the leading type byte
-    // for binary ones. This is the fixture the format spike checks in.
+    // Record-type histogram: the `RECORD=` value for text records (a number on a
+    // schematic, a name on a board), the leading type byte for binary ones. This is the fixture the format spike checks in.
     let mut types: std::collections::BTreeMap<String, usize> = Default::default();
     let mut records = Vec::new();
     for r in &raws {
@@ -69,7 +73,7 @@ fn dump_stream(doc: &Doc, name: &str, level: Level, head: usize) -> Value {
             Mode::Text => {
                 text += 1;
                 let t = TextRecord::parse(&r.payload);
-                let key = match t.record_type() {
+                let key = match t.record_kind() {
                     Some(n) => format!("text:{n}"),
                     None => "text:-".to_string(),
                 };
@@ -100,11 +104,14 @@ fn dump_stream(doc: &Doc, name: &str, level: Level, head: usize) -> Value {
                         "kind": r.kind,
                         "len": r.payload.len(),
                         "blocks": r.extra.len() + 1,
-                        "head": hex(&r.payload[..r.payload.len().min(64)]),
+                        "block_lens": std::iter::once(r.payload.len())
+                            .chain(r.extra.iter().map(Vec::len))
+                            .collect::<Vec<_>>(),
+                        "head": hex(&r.payload[..r.payload.len().min(head)]),
                         "tail_blocks": r
                             .extra
                             .iter()
-                            .map(|b| hex(&b[..b.len().min(32)]))
+                            .map(|b| hex(&b[..b.len().min(head)]))
                             .collect::<Vec<_>>(),
                     }));
                 }

@@ -79,7 +79,9 @@ fn corpus_histogram_is_stable() {
         std::fs::write(&fixture, &got).expect("write fixture");
         return;
     }
-    let want = std::fs::read_to_string(&fixture).unwrap_or_default();
+    // `core.autocrlf` rewrites the checked-out fixture, so the comparison is on
+    // the LINES, not the bytes — otherwise a checkout alone fails this test.
+    let want = std::fs::read_to_string(&fixture).unwrap_or_default().replace("\r\n", "\n");
     if want.is_empty() {
         eprintln!("skipping: no fixture (run with SPINZERO_BLESS_FIXTURES=1)");
         return;

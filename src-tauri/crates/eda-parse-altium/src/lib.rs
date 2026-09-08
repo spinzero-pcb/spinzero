@@ -7,6 +7,7 @@
 
 pub mod cfb;
 pub mod doc;
+pub mod pcb;
 pub mod prj;
 pub mod record;
 pub mod sch;
@@ -16,6 +17,7 @@ pub mod units;
 mod test_support;
 
 pub use doc::{Doc, Kind};
+pub use pcb::PcbDoc;
 pub use prj::{CompileOptions, HierarchyMode, Project};
 pub use record::TextRecord;
 pub use sch::SchDoc;

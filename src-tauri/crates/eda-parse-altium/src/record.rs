@@ -30,7 +30,8 @@ pub struct Raw {
     pub mode: Mode,
     /// Byte offset of the payload inside the stream — useful for diagnostics.
     pub offset: usize,
-    /// Record type byte, for block-framed records only.
+    /// Record type byte: the leading byte of a binary record's payload under
+    /// either framing. `None` for a text record.
     pub kind: Option<u8>,
     /// The record body. Under block framing this is the FIRST block, which is
     /// the fixed-layout part every primitive has.
@@ -108,7 +109,13 @@ fn walk_prefixed(stream: &[u8]) -> Option<Vec<Raw>> {
         out.push(Raw {
             mode,
             offset: start,
-            kind: None,
+            // A prefixed binary record leads with its type byte, the same way a
+            // block-framed one does; reading it keeps the histogram able to tell
+            // one binary record from another.
+            kind: match mode {
+                Mode::Binary => payload.first().copied(),
+                Mode::Text => None,
+            },
             payload: payload.to_vec(),
             extra: Vec::new(),
         });
@@ -170,8 +177,22 @@ impl TextRecord {
             let Some(eq) = chunk.iter().position(|&b| b == b'=') else {
                 continue;
             };
-            let key = decode(&unescape_pipes(&chunk[..eq]));
-            let val = decode(&unescape_pipes(&chunk[eq + 1..]));
+            // Un-escaping runs in the domain the pair is written in. A `%UTF8%`
+            // pair spells the escape character as its UTF-8 encoding (`C2 A6`),
+            // so un-escaping its BYTES writes `0x7C` into the middle of a
+            // multi-byte sequence and the decode falls back to a mojibake
+            // `Â|`. The pair's own prefix says which domain it is.
+            let (key, val) = if is_utf8_pair(chunk) {
+                (
+                    unescape_pipes_chars(&decode_utf8(&chunk[..eq])),
+                    unescape_pipes_chars(&decode_utf8(&chunk[eq + 1..])),
+                )
+            } else {
+                (
+                    decode(&unescape_pipes(&chunk[..eq])),
+                    decode(&unescape_pipes(&chunk[eq + 1..])),
+                )
+            };
             let up = key.to_ascii_uppercase();
             rec.index.entry(up).or_insert(rec.fields.len());
             rec.fields.push((key, val));
@@ -201,13 +222,26 @@ impl TextRecord {
         self.get(key)?.trim().parse().ok()
     }
 
-    /// Field parsed as a float, tolerating a trailing unit suffix (`43328.34mil`).
+    /// Field parsed as a float, tolerating a trailing unit suffix
+    /// (`43328.34mil`) and scientific notation.
+    ///
+    /// A board writes plain decimals with units, but a *rotation* arrives as
+    /// ` 1.80000000000000E+0002`. Stopping at the `E` reads that as 1.8 — a
+    /// silent 178-degree error on every rotated footprint — so the exponent is
+    /// part of the number, while a `mil` suffix still is not.
     pub fn f(&self, key: &str) -> Option<f64> {
         let v = self.get(key)?.trim();
-        let num: String = v
-            .chars()
-            .take_while(|c| c.is_ascii_digit() || *c == '.' || *c == '-' || *c == '+')
-            .collect();
+        let mut num = String::new();
+        for (i, c) in v.char_indices() {
+            let exponent = (c == 'e' || c == 'E')
+                && !num.is_empty()
+                && matches!(after_exponent(v, i), Some(d) if d.is_ascii_digit());
+            if c.is_ascii_digit() || c == '.' || c == '-' || c == '+' || exponent {
+                num.push(c);
+            } else {
+                break;
+            }
+        }
         num.parse().ok()
     }
 
@@ -229,6 +263,22 @@ impl TextRecord {
     pub fn record_type(&self) -> Option<i64> {
         self.i("RECORD")
     }
+
+    /// The `RECORD=` value verbatim.
+    ///
+    /// A schematic numbers its record types (`RECORD=34`); a board NAMES them
+    /// (`RECORD=Board`, `RECORD=AdvancedPlacerOptions`). Reading only the number
+    /// collapses every board text stream to "untyped", which is what
+    /// [`record_type`](Self::record_type) does and why the histogram uses this.
+    pub fn record_kind(&self) -> Option<&str> {
+        self.raw("RECORD")
+    }
+}
+
+/// The first character after an exponent marker at byte `at`, skipping its sign
+/// — what tells `1.8E+0002` (a number) from a unit suffix.
+fn after_exponent(v: &str, at: usize) -> Option<char> {
+    v[at + 1..].chars().find(|c| *c != '+' && *c != '-')
 }
 
 /// Undo Altium's byte-level pipe escaping. This runs before character decoding:
@@ -260,6 +310,43 @@ pub fn unescape_pipes(bytes: &[u8]) -> Vec<u8> {
         }
     }
     out
+}
+
+/// True when a `KEY=VALUE` chunk is written in the `%UTF8%` domain.
+fn is_utf8_pair(chunk: &[u8]) -> bool {
+    chunk.len() >= 6 && chunk[..6].eq_ignore_ascii_case(b"%UTF8%")
+}
+
+/// Undo the same escaping over CHARACTERS, for a `%UTF8%` pair whose escape
+/// characters arrive as their UTF-8 encodings rather than as raw bytes.
+///
+/// The rules are [`unescape_pipes`]'s, one domain up. A field carrying both
+/// spellings proves they mean the same thing: the corpus writes
+/// `SwapIDPart=<8E>&<8E>` and `%UTF8%SwapIDPart=<C2 A6>&<C2 A6>` on the same
+/// pin, and both are the value `|&|`.
+pub fn unescape_pipes_chars(text: &str) -> String {
+    if !text.contains(['\u{8E}', '\u{A6}']) {
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\u{8E}' if chars.peek() == Some(&'\u{8E}') => {
+                out.push('\u{8E}');
+                chars.next();
+            }
+            '\u{8E}' | '\u{A6}' => out.push('|'),
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// Decode bytes known to be in the `%UTF8%` domain, lossily rather than
+/// erroring: one bad field must not cost the record.
+fn decode_utf8(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes).into_owned()
 }
 
 /// Decode record bytes to text. UTF-8 when the bytes are valid UTF-8 (which is
@@ -336,6 +423,22 @@ mod tests {
         assert_eq!(r.raw("DESCRIPTION"), Some("NTC 100°C"), "Latin-1 fallback decodes too");
     }
 
+    /// Corner cases 2 and 4 together. The escape character in a `%UTF8%` pair
+    /// arrives as `C2 A6`, not as a bare `A6`, so un-escaping its bytes would
+    /// split the sequence and leave `Â|`. Found by the §8.3 differential: every
+    /// pin on the corpus carries both spellings of the same `SwapIDPart`.
+    #[test]
+    fn unescapes_a_utf8_pair_in_the_character_domain() {
+        let mut payload = b"|SwapIDPart=".to_vec();
+        payload.extend_from_slice(&[0x8E, b'&', 0x8E]);
+        payload.extend_from_slice(b"|%UTF8%SwapIDPart=");
+        payload.extend_from_slice("\u{a6}&\u{a6}".as_bytes()); // C2 A6 & C2 A6
+        payload.extend_from_slice(b"|\0");
+        let r = TextRecord::parse(&payload);
+        assert_eq!(r.raw("SwapIDPart"), Some("|&|"), "the 8-bit spelling");
+        assert_eq!(r.get("SwapIDPart"), Some("|&|"), "and the UTF-8 one agrees");
+    }
+
     #[test]
     fn reads_numbers_units_and_booleans() {
         let r = TextRecord::parse(b"|X=43328.3462mil|N=-7|ON=T|OFF=F|\0");
@@ -344,6 +447,16 @@ mod tests {
         assert!(r.b("ON"));
         assert!(!r.b("OFF"));
         assert!(!r.b("MISSING"));
+    }
+
+    /// A rotation arrives in scientific notation. Stopping at the `E` reads
+    /// `1.80000000000000E+0002` as 1.8 and rotates every part 178 degrees wrong.
+    #[test]
+    fn floats_read_scientific_notation_but_not_unit_suffixes() {
+        let r = TextRecord::parse(b"|ROTATION= 1.80000000000000E+0002|H=43.3071mil|SMALL=1.5E-2| ");
+        assert_eq!(r.f("ROTATION"), Some(180.0));
+        assert_eq!(r.f("H"), Some(43.3071), "`mil` is a suffix, not an exponent");
+        assert_eq!(r.f("SMALL"), Some(0.015));
     }
 
     #[test]

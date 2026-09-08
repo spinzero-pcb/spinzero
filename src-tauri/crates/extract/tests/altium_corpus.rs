@@ -355,3 +355,158 @@ fn altium_design_json_is_byte_deterministic() {
     let _ = std::fs::remove_dir_all(&a);
     let _ = std::fs::remove_dir_all(&b);
 }
+
+/// Every corpus board produces a `pcb/geometry.json` the renderer can consume:
+/// the schema and units the KiCad path writes, a closed `role` vocabulary, and
+/// every index inside its table. A dangling layer or net index is the failure
+/// mode that draws a board with primitives silently missing.
+#[test]
+fn board_geometry_is_internally_consistent() {
+    let Some(root) = corpus() else {
+        eprintln!("skipping: no Altium corpus");
+        return;
+    };
+    const ROLES: &[&str] =
+        &["copper", "silkscreen", "mask", "fab", "courtyard", "paste", "edge", "user"];
+    for (i, d) in designs(&root).iter().enumerate() {
+        let name = d.project.file_name().unwrap().to_string_lossy().into_owned();
+        let (dir, _model) = extract(d, &format!("geom{i}"));
+        let manifest: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.join("design_review_manifest.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            manifest["pcb_geometry"], "pcb/geometry.json",
+            "{name}: the manifest does not point at the board geometry"
+        );
+        let g: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.join("pcb/geometry.json")).expect("geometry.json"),
+        )
+        .unwrap();
+        assert_eq!(g["schema"], "extract.pcb.geometry.a0", "{name}");
+        assert_eq!(g["units"], "mm", "{name}");
+
+        let layers = g["layers"].as_array().unwrap();
+        let nets = g["nets"].as_array().unwrap();
+        let comps = g["components"].as_array().unwrap();
+        assert!(!layers.is_empty(), "{name}: no layers");
+        assert_eq!(nets[0], "", "{name}: index 0 must stay the no-net sentinel");
+        for l in layers {
+            let role = l["role"].as_str().unwrap();
+            assert!(ROLES.contains(&role), "{name}: unknown role {role}");
+            assert!(!l["name"].as_str().unwrap().is_empty(), "{name}: unnamed layer");
+        }
+        let copper = layers.iter().filter(|l| l["role"] == "copper").count();
+        assert!(copper >= 2, "{name}: {copper} copper layers");
+        assert!(
+            layers.iter().any(|l| l["role"] == "edge"),
+            "{name}: no edge layer, so the board outline has nowhere to live"
+        );
+
+        let layer_ok = |v: &serde_json::Value| (v.as_u64().unwrap() as usize) < layers.len();
+        let net_ok = |v: &serde_json::Value| (v.as_u64().unwrap() as usize) < nets.len();
+        for key in ["seg", "arc"] {
+            let t = &g["tracks"][key];
+            for v in t["layer"].as_array().unwrap() {
+                assert!(layer_ok(v), "{name}: track on a layer that is not in the table");
+            }
+            for v in t["net"].as_array().unwrap() {
+                assert!(net_ok(v), "{name}: track on a net that is not in the table");
+            }
+        }
+        for p in g["pads"].as_array().unwrap() {
+            assert!(net_ok(&p["net"]), "{name}: pad on an unknown net");
+            let comp = p["comp"].as_i64().unwrap();
+            assert!(comp >= -1 && comp < comps.len() as i64, "{name}: pad on an unknown component");
+            let on = p["layers"].as_array().unwrap();
+            assert!(!on.is_empty(), "{name}: pad on no layer at all");
+            for v in on {
+                assert!(layer_ok(v), "{name}: pad on an unknown layer");
+            }
+        }
+        for v in g["vias"].as_array().unwrap() {
+            assert!(net_ok(&v["net"]), "{name}: via on an unknown net");
+            assert!(v["drill"].as_f64().unwrap() > 0.0, "{name}: via with no hole");
+            // Equal is allowed: one corpus board really does place a via with
+            // no annular ring, which is a finding about that board and not a
+            // decoding error.
+            assert!(
+                v["size"].as_f64().unwrap() >= v["drill"].as_f64().unwrap(),
+                "{name}: via hole is larger than its pad"
+            );
+            for l in v["layers"].as_array().unwrap() {
+                assert!(layer_ok(l), "{name}: via on an unknown layer");
+            }
+        }
+        for z in g["zones"].as_array().unwrap() {
+            assert!(layer_ok(&z["layer"]) && net_ok(&z["net"]), "{name}: zone index out of range");
+        }
+        for x in g["graphics"].as_array().unwrap() {
+            assert!(layer_ok(&x["layer"]), "{name}: graphic on an unknown layer");
+        }
+        // A component's own special strings MUST resolve — a board that prints
+        // `.DESIGNATOR` on every part is the visible form of corner case 7.
+        // Document-level ones this build has no value for (a drill legend, a
+        // print date) are drawn as they stand and counted in `unresolved`.
+        for t in g["texts"].as_array().unwrap() {
+            assert!(layer_ok(&t["layer"]), "{name}: text on an unknown layer");
+            let text = t["text"].as_str().unwrap().to_ascii_uppercase();
+            assert!(
+                !matches!(text.as_str(), ".DESIGNATOR" | ".COMMENT" | ".NAME" | ".VALUE"),
+                "{name}: a component special string reached the board: {text}"
+            );
+        }
+        assert!(
+            _model["source"]["unresolved"]["board_unresolved_specials"].is_number(),
+            "{name}: the bundle does not say how many special strings it left standing"
+        );
+
+        // The extent has to contain what it describes, or the viewer opens on
+        // empty space.
+        let bbox: Vec<f64> = g["bbox"].as_array().unwrap().iter().map(|v| v.as_f64().unwrap()).collect();
+        assert!(bbox[2] > 1.0 && bbox[3] > 1.0, "{name}: degenerate bbox {bbox:?}");
+        for c in comps {
+            let (x, y) = (c["x"].as_f64().unwrap(), c["y"].as_f64().unwrap());
+            assert!(
+                x >= bbox[0] && x <= bbox[0] + bbox[2] && y >= bbox[1] && y <= bbox[1] + bbox[3],
+                "{name}: {} is placed outside the board extent",
+                c["ref"]
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+/// Every pad, via and placed footprint the board file carries reaches the
+/// geometry document. A silently dropped primitive is the whole failure mode of
+/// a binary-record reader, and the record count is the one number that catches
+/// it without a second implementation.
+#[test]
+fn board_geometry_keeps_every_pad_via_and_footprint() {
+    let Some(root) = corpus() else {
+        eprintln!("skipping: no Altium corpus");
+        return;
+    };
+    for (i, d) in designs(&root).iter().enumerate() {
+        let name = d.board.file_name().unwrap().to_string_lossy().into_owned();
+        let doc = Doc::open(&d.board).expect("board opens");
+        let expected = [
+            ("pads", doc.records("Pads6").len()),
+            ("vias", doc.records("Vias6").len()),
+            ("components", doc.text_records("Components6").len()),
+        ];
+        let (dir, _model) = extract(d, &format!("counts{i}"));
+        let g: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.join("pcb/geometry.json")).expect("geometry.json"),
+        )
+        .unwrap();
+        for (key, want) in expected {
+            assert_eq!(
+                g[key].as_array().unwrap().len(),
+                want,
+                "{name}: {key} in the geometry do not match the record count"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

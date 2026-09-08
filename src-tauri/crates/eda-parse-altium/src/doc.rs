@@ -117,8 +117,8 @@ impl Doc {
 }
 
 /// A stream's record-type histogram: how many records, and how many of each
-/// type. Text records are keyed by their `RECORD=` number, binary ones by their
-/// type byte. This is the format spike's checkable output — a framing or
+/// type. Text records are keyed by their `RECORD=` value — a number on a
+/// schematic, a name on a board — and binary ones by their type byte. This is the format spike's checkable output — a framing or
 /// decoding regression moves a count.
 pub fn histogram_text(doc: &Doc) -> String {
     let mut out = String::new();
@@ -136,7 +136,7 @@ pub fn histogram_text(doc: &Doc) -> String {
         let mut types: BTreeMap<String, usize> = BTreeMap::new();
         for r in &recs {
             let key = match r.mode {
-                Mode::Text => match TextRecord::parse(&r.payload).record_type() {
+                Mode::Text => match TextRecord::parse(&r.payload).record_kind() {
                     Some(n) => format!("text:{n}"),
                     None => "text:-".to_string(),
                 },

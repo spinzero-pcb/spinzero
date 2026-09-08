@@ -453,10 +453,12 @@ fn name_group(
         };
         return (format!("unconnected-({}-{}Pad{})", t.designator, part, t.pin), "pin".into());
     }
-    // Altium auto-names an unnamed net `NET<designator>_<pin>` after its first
-    // terminal, and that is the name the board carries. Using KiCad's
-    // `Net-(REF-PadN)` form here would disagree with every board net.
-    (format!("NET{}_{}", t.designator, t.pin), "pin".into())
+    // Altium auto-names an unnamed net `Net<designator>_<pin>` after its first
+    // terminal, and that is the name the board carries — `NetC19_2`, not
+    // `NETC19_2`, which is what the §8.3 differential and the board's own
+    // `Nets6` table both say. Using KiCad's `Net-(REF-PadN)` form here would
+    // disagree with every board net.
+    (format!("Net{}_{}", t.designator, t.pin), "pin".into())
 }
 
 /// Consolidate net names that differ only in case.
@@ -563,6 +565,25 @@ mod tests {
         let who: Vec<_> = mid.terminals.iter().map(|t| t.designator.as_str()).collect();
         assert_eq!(who, vec!["R1", "R2"]);
         assert_eq!(mid.graphical.wires, vec!["w1".to_string()]);
+    }
+
+    /// An unnamed net takes Altium's own auto-name, spelled the way the board's
+    /// `Nets6` table spells it: `NetC19_2`, not `NETC19_2`. Ours disagreed with
+    /// every auto-named board net in case until the plan §8.3 differential said
+    /// so.
+    #[test]
+    fn an_unnamed_net_is_named_the_way_the_board_names_it() {
+        let sch = SchDoc {
+            components: vec![
+                comp("C19", vec![pin("2", "~", p(100, 100), 32)]),
+                comp("R4", vec![pin("1", "~", p(100, 140), 32)]),
+            ],
+            wires: vec![Wire { pts: vec![p(100, 100), p(100, 140)], uuid: "w1".into() }],
+            ..SchDoc::default()
+        };
+        let n = nets(&sch, &CompileOptions::board_project());
+        let names: Vec<&str> = n.iter().map(|n| n.name.as_str()).collect();
+        assert_eq!(names, vec!["NetC19_2"]);
     }
 
     /// Corner case 16: labels outrank power ports by default, and

@@ -1,0 +1,1692 @@
+#!/usr/bin/env python3
+"""The plan §8.3 differential: our Altium front-end against the reference parser.
+
+`docs/altium-extraction-plan.md` §8.3 ends every phase with a differential run
+against a mature independent implementation of the same formats, because the §10
+corner cases are exactly the class of bug our own tests cannot find — we would be
+asserting the same wrong belief in the code and in the test.
+
+The reference stays a **development-time oracle**: available locally, never
+vendored, never a build dependency, never shipped.  This harness drives its CLI
+(and, for M0 only, `ref_probe.py` inside its interpreter) and diffs a normalised
+comparison document against ours.
+
+Both sides are normalised the same way, and normalisation absorbs only the
+differences we *intend* (plan §7): units, our neutral vocabularies, our field
+names, sorted collections, `%UTF8%` key folding.  What survives is a real
+disagreement, and every one of them resolves to exactly one of the plan's three
+triage outcomes — our bug, an intended divergence, or a difference in the
+reference.  Nothing here decides that; it only reports.
+
+Configuration, all optional, all environment (the reference's location is
+configured locally rather than written into the repo):
+
+    SPINZERO_ALTIUM_REFERENCE         reference CLI            (default: altium-cruncher on PATH)
+    SPINZERO_ALTIUM_REFERENCE_PYTHON  interpreter that can import the reference
+                                      (default: the CLI's own venv, then this one)
+    SPINZERO_ALTIUM_CORPUS            corpus root              (default: D:\\git_repo\\reference_designs)
+    SPINZERO_PCB_EXTRACT              our CLI                  (default: the release build)
+
+Usage:
+
+    python scripts/altium-diff/differential.py                 # M0 and M1, whole corpus
+    python scripts/altium-diff/differential.py --phase m0
+    python scripts/altium-diff/differential.py --design EVAL_FFXMR12MM1H
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+from contextlib import contextmanager
+from pathlib import Path
+from typing import Any, Iterable
+
+REPO = Path(__file__).resolve().parents[2]
+DEFAULT_CORPUS = Path(r"D:\git_repo\reference_designs")
+DEFAULT_EXTRACT = REPO / "src-tauri" / "target" / "release" / "pcb-extract.exe"
+if not DEFAULT_EXTRACT.exists():  # non-Windows dev box
+    DEFAULT_EXTRACT = REPO / "src-tauri" / "target" / "release" / "pcb-extract"
+
+# How many examples of one difference class are printed before the rest are
+# counted.  A differential that prints 4000 lines does not get triaged.
+EXAMPLES = 6
+
+
+# --------------------------------------------------------------------------- #
+# configuration
+# --------------------------------------------------------------------------- #
+
+
+class Config:
+    def __init__(self, args: argparse.Namespace) -> None:
+        self.corpus = Path(
+            args.corpus or os.environ.get("SPINZERO_ALTIUM_CORPUS") or DEFAULT_CORPUS
+        )
+        self.extract = Path(
+            args.extract or os.environ.get("SPINZERO_PCB_EXTRACT") or DEFAULT_EXTRACT
+        )
+        self.reference = (
+            args.reference
+            or os.environ.get("SPINZERO_ALTIUM_REFERENCE")
+            or shutil.which("altium-cruncher")
+            or "altium-cruncher"
+        )
+        self.reference_python = (
+            os.environ.get("SPINZERO_ALTIUM_REFERENCE_PYTHON") or self._guess_python()
+        )
+        self.out = Path(args.out) if args.out else REPO / "output" / "altium-diff"
+        self.oracle = Path(
+            args.oracle or os.environ.get("SPINZERO_ALTIUM_ORACLE") or self.out / "oracle"
+        )
+        self.oracle_mode = (
+            "build" if args.build_oracle else "offline" if args.offline else "use"
+        )
+        self.reference_version = "unknown"
+
+    def _guess_python(self) -> str:
+        """The reference CLI's own interpreter, so `import altium_monkey` works.
+
+        A uv tool install puts the executable in `<venv>/Scripts` (or `bin`)
+        beside the interpreter; a shim on PATH is followed to its real home.
+        """
+        exe = Path(self.reference)
+        for candidate in (exe.parent / "python.exe", exe.parent / "python"):
+            if candidate.exists():
+                return str(candidate)
+        for root in (
+            Path.home() / "AppData/Roaming/uv/tools/altium-cruncher",
+            Path.home() / ".local/share/uv/tools/altium-cruncher",
+        ):
+            for candidate in (root / "Scripts/python.exe", root / "bin/python"):
+                if candidate.exists():
+                    return str(candidate)
+        return sys.executable
+
+    def check(self) -> list[str]:
+        problems = []
+        if self.oracle_mode == "offline" and not self.oracle.is_dir():
+            problems.append(
+                f"no recorded oracle corpus at {self.oracle}"
+                " — run once with --build-oracle"
+            )
+        if not self.corpus.is_dir():
+            problems.append(f"corpus not found: {self.corpus} (set SPINZERO_ALTIUM_CORPUS)")
+        if not Path(self.extract).exists():
+            problems.append(
+                f"pcb-extract not found: {self.extract}"
+                " (cargo build -p extract --bin pcb-extract --release)"
+            )
+        try:
+            proc = subprocess.run(
+                [self.reference, "version"],
+                capture_output=True,
+                timeout=120,
+                check=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+            # Every recorded answer is stamped with this, so an upgraded
+            # reference makes the corpus stale instead of silently disagreeing.
+            self.reference_version = " ".join(
+                line.strip() for line in (proc.stdout or "").splitlines() if line.strip()
+            ) or "unknown"
+        except Exception as exc:
+            problems.append(
+                f"reference CLI not runnable: {self.reference} ({exc})"
+                " — set SPINZERO_ALTIUM_REFERENCE"
+            )
+        probe = subprocess.run(
+            [self.reference_python, "-c", "import altium_monkey"],
+            capture_output=True,
+            timeout=120,
+        )
+        if probe.returncode != 0:
+            problems.append(
+                f"reference library not importable by {self.reference_python}"
+                " — set SPINZERO_ALTIUM_REFERENCE_PYTHON (M0 needs it; M1 does not)"
+            )
+        return problems
+
+
+# --------------------------------------------------------------------------- #
+# corpus discovery — mirrors crates/extract/tests/altium_corpus.rs
+# --------------------------------------------------------------------------- #
+
+
+class Design:
+    def __init__(self, entry: Path, board: Path | None) -> None:
+        self.entry = entry
+        self.board = board
+        self.name = entry.stem
+        # The `.PrjPcb`, or None for a directory that has none. A project-less
+        # design is the one place the two sides disagree about what "the design"
+        # even is; see `compare_m1_design`.
+        self.project = entry if entry.suffix.lower() == ".prjpcb" else None
+
+    @property
+    def documents(self) -> list[Path]:
+        """Every Altium document in the design's directory, sorted."""
+        parent = self.entry.parent
+        docs = [
+            p
+            for p in sorted(parent.iterdir())
+            if p.suffix.lower() in (".schdoc", ".pcbdoc")
+        ]
+        return docs
+
+
+def discover(root: Path) -> list[Design]:
+    projects: list[Path] = []
+    loose_dirs: dict[Path, list[Path]] = {}
+    for path in root.rglob("*"):
+        if not path.is_file():
+            continue
+        suffix = path.suffix.lower()
+        if suffix == ".prjpcb":
+            projects.append(path)
+    project_dirs = {p.parent for p in projects}
+    for path in root.rglob("*.SchDoc"):
+        if path.parent in project_dirs:
+            continue
+        loose_dirs.setdefault(path.parent, []).append(path)
+
+    designs: list[Design] = []
+    for project in sorted(projects):
+        designs.append(Design(project, sibling(project, ".pcbdoc")))
+    # A project-less directory is ONE design however it is entered: enter it
+    # through the schematic whose name is closest to the board's, so the bundle
+    # is named after the design rather than after its disclaimer sheet.
+    for directory, schematics in sorted(loose_dirs.items()):
+        board = sibling(schematics[0], ".pcbdoc")
+        if board is None:
+            continue
+        target = board.stem.lower()
+        schematics.sort(key=lambda s: (-shared_prefix(s.stem.lower(), target), s.name))
+        designs.append(Design(schematics[0], board))
+    return designs
+
+
+def sibling(path: Path, suffix: str) -> Path | None:
+    for candidate in sorted(path.parent.iterdir()):
+        if candidate.suffix.lower() == suffix:
+            return candidate
+    return None
+
+
+def shared_prefix(a: str, b: str) -> int:
+    n = 0
+    for x, y in zip(a, b):
+        if x != y:
+            break
+        n += 1
+    return n
+
+
+# --------------------------------------------------------------------------- #
+# difference reporting
+# --------------------------------------------------------------------------- #
+
+
+class Report:
+    """A flat list of difference classes, each with a count and examples."""
+
+    def __init__(self) -> None:
+        self.classes: dict[str, list[str]] = {}
+        self.counts: dict[str, int] = {}
+        self.notes: list[str] = []
+
+    def add(self, kind: str, example: str) -> None:
+        self.counts[kind] = self.counts.get(kind, 0) + 1
+        bucket = self.classes.setdefault(kind, [])
+        if len(bucket) < EXAMPLES:
+            bucket.append(example)
+
+    def note(self, line: str) -> None:
+        self.notes.append(line)
+
+    @property
+    def total(self) -> int:
+        return sum(self.counts.values())
+
+    def render(self, indent: str = "  ") -> list[str]:
+        out = []
+        for line in self.notes:
+            out.append(f"{indent}. {line}")
+        for kind in sorted(self.counts, key=lambda k: -self.counts[k]):
+            count = self.counts[kind]
+            out.append(f"{indent}! {kind}: {count}")
+            for example in self.classes[kind]:
+                out.append(f"{indent}    {example}")
+            if count > len(self.classes[kind]):
+                out.append(f"{indent}    … and {count - len(self.classes[kind])} more")
+        if not self.counts:
+            out.append(f"{indent}= agrees")
+        return out
+
+    def as_json(self) -> dict[str, Any]:
+        return {
+            "notes": self.notes,
+            "differences": {
+                kind: {"count": self.counts[kind], "examples": self.classes[kind]}
+                for kind in sorted(self.counts)
+            },
+        }
+
+
+def short(value: Any, width: int = 60) -> str:
+    text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+    text = text.replace("\n", "\\n")
+    return text if len(text) <= width else text[: width - 1] + "…"
+
+
+# --------------------------------------------------------------------------- #
+# running the two sides
+# --------------------------------------------------------------------------- #
+
+
+def run(cmd: list[str], cwd: Path | None = None, timeout: int = 1800) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        cmd,
+        cwd=str(cwd) if cwd else None,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=timeout,
+    )
+
+
+def our_dump(cfg: Config, document: Path) -> dict[str, Any] | None:
+    proc = run([str(cfg.extract), "dump", str(document), "--full"])
+    if proc.returncode != 0:
+        return None
+    try:
+        return json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        return None
+
+
+def ref_dump(cfg: Config, document: Path) -> dict[str, Any] | None:
+    probe = Path(__file__).with_name("ref_probe.py")
+    proc = run([cfg.reference_python, str(probe), str(document)])
+    if proc.returncode != 0:
+        return None
+    try:
+        return json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        return None
+
+
+def our_design(cfg: Config, design: Design, out: Path) -> dict[str, Any] | None:
+    proc = run([str(cfg.extract), "design", str(design.entry), "-o", str(out)])
+    if proc.returncode != 0:
+        return None
+    return load_one(out, "_design.json")
+
+
+def ref_design(cfg: Config, design: Design, out: Path) -> dict[str, Any] | None:
+    proc = run(
+        [cfg.reference, "design", design.entry.name, "-o", str(out)],
+        cwd=design.entry.parent,
+    )
+    if proc.returncode != 0:
+        return None
+    return load_one(out, "_design.json")
+
+
+def our_bom(cfg: Config, design: Design, out: Path) -> dict[str, Any] | None:
+    """Our GROUPED BOM, which is the CSV.
+
+    `pcb-extract bom --format grouped-json` is the *flat* document the app
+    ingests — one row per component, because grouping folds onto whichever
+    fields the active preset groups by and the extractor cannot know them. The
+    fab CSV is the one that coalesces identical parts, so that is what the
+    reference's grouped JSON is comparable to.
+    """
+    proc = run(
+        [str(cfg.extract), "bom", str(design.entry), "--format", "grouped-csv", "-o", str(out)]
+    )
+    if proc.returncode != 0:
+        return None
+    for path in sorted(out.rglob("*_bom.csv")):
+        return read_grouped_csv(path)
+    return None
+
+
+def our_geometry(cfg: Config, design: Design, out: Path) -> dict[str, Any] | None:
+    """Our board geometry document, from a full design run."""
+    proc = run([str(cfg.extract), "design", str(design.entry), "-o", str(out)])
+    if proc.returncode != 0:
+        return None
+    path = out / "pcb" / "geometry.json"
+    if not path.exists():
+        return None
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def ref_board(cfg: Config, design: Design, out: Path) -> dict[str, Any] | None:
+    """The reference's parse of the board, reduced to what M2 compares."""
+    if design.board is None:
+        return None
+    proc = run([cfg.reference, "json-dump", str(design.board), "-o", str(out)])
+    if proc.returncode != 0:
+        return None
+    for path in sorted(out.rglob("*.json")):
+        if path.name == "manifest.json":
+            continue
+        return reduce_board(json.loads(path.read_text(encoding="utf-8")))
+    return None
+
+
+def ref_pnp(cfg: Config, design: Design, out: Path) -> dict[str, Any] | None:
+    """Altium's own pick-and-place semantics, which is what a component centroid
+    has to agree with (corner case 23). It needs a project file; a loose
+    document has none, and that comparison is skipped for it."""
+    if design.project is None:
+        return None
+    proc = run(
+        [
+            cfg.reference, "pnp", design.project.name, "--format", "json",
+            "--units", "mm", "--position-mode", "altium-pick-place", "-o", str(out),
+        ],
+        cwd=design.project.parent,
+    )
+    if proc.returncode != 0:
+        return None
+    # A project with variants writes one file per variant; the base one is the
+    # file with no variant in its name.
+    files = sorted(out.glob("*_pnp.json"), key=lambda p: len(p.name))
+    if not files:
+        return None
+    doc = json.loads(files[0].read_text(encoding="utf-8"))
+    return {
+        "placements": {
+            p["designator"]: [p["center_x"], p["center_y"], p.get("rotation", 0.0)]
+            for p in doc.get("placements", [])
+        }
+    }
+
+
+def read_grouped_csv(path: Path) -> dict[str, Any]:
+    import csv
+
+    lines = []
+    with path.open(encoding="utf-8", newline="") as handle:
+        for index, row in enumerate(csv.DictReader(handle), start=1):
+            designators = [d.strip() for d in (row.get("designators") or "").split(",") if d.strip()]
+            lines.append(
+                {
+                    "item": index,
+                    "quantity": int(row.get("quantity") or 0),
+                    "designators": designators,
+                }
+            )
+    return {
+        "lines": lines,
+        "line_count": len(lines),
+        "component_count": sum(len(line["designators"]) for line in lines),
+    }
+
+
+def ref_bom(cfg: Config, design: Design, out: Path) -> dict[str, Any] | None:
+    proc = run(
+        [cfg.reference, "bom", design.entry.name, "--format", "grouped-json", "-o", str(out)],
+        cwd=design.entry.parent,
+    )
+    if proc.returncode != 0:
+        return None
+    return load_one(out, "_bom.json")
+
+
+def load_one(root: Path, ending: str) -> dict[str, Any] | None:
+    for path in sorted(root.rglob("*.json")):
+        if path.name.endswith(ending):
+            return json.loads(path.read_text(encoding="utf-8"))
+    return None
+
+
+
+
+# --------------------------------------------------------------------------- #
+# timing
+# --------------------------------------------------------------------------- #
+#
+# What each side costs to extract one design, which is the other reason the
+# oracle corpus exists. Our side is measured on every run; the reference's time
+# is measured when it is ASKED and recorded beside its answer, so a later run
+# served from the corpus still reports what that answer cost to produce.
+
+
+class Clock:
+    """Wall-clock seconds per named span, for one design."""
+
+    def __init__(self) -> None:
+        self.spans: dict[str, float] = {}
+        self.recorded: set[str] = set()
+        self.unknown: set[str] = set()
+
+    @contextmanager
+    def measure(self, key: str):
+        start = time.perf_counter()
+        try:
+            yield
+        finally:
+            self.add(key, time.perf_counter() - start)
+
+    def add(self, key: str, seconds: float | None, from_corpus: bool = False) -> None:
+        # A recorded answer whose cost was never measured — one carried over from
+        # a reference version that is no longer installed — is counted as
+        # UNKNOWN rather than as zero, so the totals stay honest.
+        if seconds is None:
+            self.unknown.add(key)
+        else:
+            self.spans[key] = self.spans.get(key, 0.0) + seconds
+        if from_corpus:
+            self.recorded.add(key)
+
+    def total(self, prefix: str) -> float:
+        return sum(v for k, v in self.spans.items() if k.startswith(prefix))
+
+    def line(self, side: str, prefix: str) -> str:
+        parts = sorted(
+            (k[len(prefix) :], v) for k, v in self.spans.items() if k.startswith(prefix)
+        )
+        detail = ", ".join(f"{name} {value:.1f}s" for name, value in parts if value >= 0.05)
+        stamp = " [from the corpus]" if any(k.startswith(prefix) for k in self.recorded) else ""
+        missing = sorted(k[len(prefix) :] for k in self.unknown if k.startswith(prefix))
+        if missing:
+            stamp += f" + {', '.join(missing)} not measured"
+        return f"{side} {self.total(prefix):.1f}s ({detail}){stamp}"
+
+    def as_json(self) -> dict[str, Any]:
+        return {
+            "seconds": {k: round(v, 3) for k, v in sorted(self.spans.items())},
+            "ours_total": round(self.total("ours:"), 3),
+            "reference_total": round(self.total("ref:"), 3),
+            "reference_from_corpus": sorted(self.recorded),
+            "not_measured": sorted(self.unknown),
+        }
+
+
+# --------------------------------------------------------------------------- #
+# the oracle corpus
+# --------------------------------------------------------------------------- #
+#
+# Running the reference over the corpus takes minutes per design — it renders
+# every sheet and every board layer on its way to the JSON we actually read. So
+# its answers are recorded ONCE, per document, and kept: that recording is the
+# corpus this differential runs against from then on, and a design added to
+# `reference_designs` joins it by being recorded the same way.
+#
+# What is stored is the REDUCED reference document — the fields the comparison
+# reads — not the bundle. The bundle is tens of megabytes of SVG per design and
+# none of it is compared.
+#
+# Each entry carries the reference's version and the digest of the source file
+# it was read from, so a design that changes, or a reference that is upgraded,
+# makes the entry stale and says so rather than quietly comparing against last
+# year's answer.
+
+
+def digest(path: Path) -> str:
+    """SHA-256 of a source document, so an edited design invalidates its entry."""
+    h = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1 << 20), b""):
+            h.update(block)
+    return h.hexdigest()
+
+
+def reduce_design(design: dict[str, Any]) -> dict[str, Any]:
+    """The parts of the reference's design document the comparison reads."""
+    hierarchy = design.get("schematic_hierarchy") or {}
+    return {
+        "components": [
+            {
+                "designator": c.get("designator"),
+                "value": c.get("value"),
+                "footprint": c.get("footprint"),
+                "library_ref": c.get("library_ref"),
+                "description": c.get("description"),
+                "classification": c.get("classification"),
+                "parameters": c.get("parameters"),
+                "hierarchy": c.get("hierarchy"),
+            }
+            for c in design.get("components", [])
+        ],
+        "nets": [
+            {
+                "name": n.get("name"),
+                "terminals": [
+                    {"designator": t.get("designator"), "pin": t.get("pin")}
+                    for t in n.get("terminals", [])
+                ],
+            }
+            for n in design.get("nets", [])
+        ],
+        "schematic_hierarchy": {
+            "documents": hierarchy.get("documents"),
+            "hierarchy_paths": hierarchy.get("hierarchy_paths"),
+        },
+    }
+
+
+# Kinds of primitive M2 counts per layer. The reference names them the way its
+# own document does; our side derives the same partition from the geometry IR.
+BOARD_KINDS = ("tracks", "arcs", "pads", "vias", "texts", "regions", "fills")
+
+
+def drawn_text(fields: dict[str, Any], document: dict[str, Any]) -> bool:
+    """Whether a board text resolves to something visible."""
+    text = (fields.get("text_content") or "").strip()
+    if not text:
+        return False
+    key = text.lower()
+    if key not in (".designator", ".comment"):
+        return True
+    index = fields.get("component_index")
+    components = document.get("components") or []
+    if index is None or not (0 <= index < len(components)):
+        return False
+    owner = components[index]
+    raw = owner.get("raw_record") or {}
+    if key == ".designator":
+        # A component whose `SOURCEDESIGNATOR` is blank still has a designator
+        # when the board marks one of its texts as such — that is corner case 7
+        # again, and the placeholder resolves to it.
+        return bool(
+            (owner.get("designator") or raw.get("SOURCEDESIGNATOR") or "").strip()
+            or index in designated(document)
+        )
+    return bool((owner.get("comment") or raw.get("COMMENT") or "").strip())
+
+
+def designated(document: dict[str, Any]) -> set[int]:
+    """Components the board marks a designator text for."""
+    cached = document.get("_designated")
+    if cached is None:
+        cached = {
+            t["fields"]["component_index"]
+            for t in document.get("texts") or []
+            if t["fields"].get("is_designator") and (t["fields"].get("text_content") or "").strip()
+            and t["fields"].get("component_index") is not None
+        }
+        document["_designated"] = cached
+    return cached
+
+
+def reduce_board(doc: dict[str, Any]) -> dict[str, Any]:
+    """The parts of the reference's board document the M2 comparison reads.
+
+    Everything is kept in the reference's own units (Altium's 1/10000 mil, and
+    mils for the board origin); the normaliser converts once, on our side.
+    """
+    document = doc.get("document") or {}
+    board = document.get("board") or {}
+    counts: dict[str, int] = {}
+    for kind in BOARD_KINDS:
+        for item in document.get(kind) or []:
+            fields = item.get("fields") or item
+            # A text with nothing to draw is not a primitive we emit (plan §7),
+            # so the reference's count is taken over the texts that resolve to
+            # something. The rule is reproduced here, not our implementation of
+            # it: a blank string, and a `.Designator` / `.Comment` whose owner
+            # has neither, draw nothing in Altium either.
+            if kind == "texts" and not drawn_text(fields, document):
+                continue
+            key = f"{kind}/{fields.get('layer')}"
+            counts[key] = counts.get(key, 0) + 1
+
+    def pad(item: dict[str, Any]) -> list[Any]:
+        f, props = item["fields"], item.get("properties") or {}
+        return [
+            f["x"], f["y"], f["top_width"], f["top_height"],
+            props.get("effective_top_shape", f["top_shape"]),
+            props.get("corner_radius_percentage") or 0,
+            f["hole_size"], f["rotation"], bool(f["is_plated"]),
+            f["designator"], f["net_index"], f["component_index"], f["layer"],
+        ]
+
+    def via(item: dict[str, Any]) -> list[Any]:
+        f = item["fields"]
+        return [f["x"], f["y"], f["diameter"], f["hole_size"], f["net_index"]]
+
+    stack, at = [], 1
+    by_id = {l.get("layer_id"): l for l in board.get("layer_stackup") or []}
+    while at and at not in stack and at in by_id:
+        stack.append(at)
+        at = by_id[at].get("layer_next") or 0
+    # The stackup covers only the 32 copper layers; every layer a primitive can
+    # name is in the board record's flat table, which is the join key the
+    # per-layer counts need.
+    raw = board.get("raw_record") or {}
+    names = {str(i): raw.get(f"LAYER{i}NAME") for i in range(1, 83)}
+    names.update({str(i): l["name"] for i, l in by_id.items() if l.get("name")})
+    return {
+        "origin": [board.get("origin_x"), board.get("origin_y")],
+        "stack": stack,
+        "layer_names": {i: n for i, n in names.items() if n},
+        "counts": counts,
+        "pads": [pad(p) for p in document.get("pads") or []],
+        "vias": [via(v) for v in document.get("vias") or []],
+        "nets": [n.get("name") for n in document.get("nets") or []],
+    }
+
+
+def reduce_bom(bom: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "line_count": bom.get("line_count"),
+        "component_count": bom.get("component_count"),
+        "lines": [
+            {
+                "item": line.get("item"),
+                "quantity": line.get("quantity"),
+                "designators": line.get("designators"),
+            }
+            for line in bom.get("lines", [])
+        ],
+    }
+
+
+class Oracle:
+    """The recorded reference answers, one file per design."""
+
+    def __init__(self, cfg: "Config") -> None:
+        self.root = cfg.oracle
+        self.version = cfg.reference_version
+        self.mode = cfg.oracle_mode  # "use" | "build" | "offline"
+        self.stale: list[str] = []
+        self.kept: list[str] = []
+        self.recorded = 0
+
+    def path(self, design: "Design") -> Path:
+        # Designs can share a stem across directories, so the file is named for
+        # the design and disambiguated by a digest of its path.
+        tag = hashlib.sha256(str(design.entry).encode("utf-8")).hexdigest()[:8]
+        return self.root / f"{safe(design.name)}.{tag}.json"
+
+    def load(self, design: "Design") -> dict[str, Any]:
+        # Even a rebuild loads what is there: `fresh` is what decides whether an
+        # answer is used, and keeping the file lets a failed re-ask fall back.
+        path = self.path(design)
+        if not path.exists():
+            return {}
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return {}
+
+    def save(self, design: "Design", entry: dict[str, Any]) -> None:
+        self.root.mkdir(parents=True, exist_ok=True)
+        self.path(design).write_text(
+            json.dumps(entry, indent=1, ensure_ascii=False), encoding="utf-8"
+        )
+
+    def held(self, entry: dict[str, Any], key: str) -> dict[str, Any] | None:
+        """Whatever is recorded for `key`, fresh or not."""
+        return (entry.get("answers") or {}).get(key)
+
+    def fresh(self, entry: dict[str, Any], key: str, source: Path) -> dict[str, Any] | None:
+        """The recorded answer for `key`, or None when it is missing or stale."""
+        if self.mode == "build":
+            return None
+        held = self.held(entry, key)
+        if not held:
+            return None
+        # The version is stamped per ANSWER, not per design, so an entry can
+        # honestly hold answers from two references — which is what happens when
+        # a new reference stops being able to read a design the old one could.
+        recorded_by = held.get("reference_version") or entry.get("reference_version")
+        if recorded_by != self.version:
+            self.stale.append(f"{key}: recorded by {recorded_by}")
+            return None
+        if held.get("digest") != digest(source):
+            self.stale.append(f"{key}: {source.name} changed since it was recorded")
+            return None
+        return held
+
+    def record(
+        self, entry: dict[str, Any], key: str, source: Path, value: Any, seconds: float
+    ) -> None:
+        entry.setdefault("answers", {})[key] = {
+            "reference_version": self.version,
+            "digest": digest(source),
+            # What the reference took to produce this answer, kept so a run
+            # served from the corpus can still report the reference's cost.
+            "seconds": round(seconds, 3),
+            "value": value,
+        }
+        self.recorded += 1
+
+
+def safe(name: str) -> str:
+    return "".join(c if c.isalnum() or c in "-_." else "_" for c in name)
+
+
+# --------------------------------------------------------------------------- #
+# M0 — framing and decoding
+# --------------------------------------------------------------------------- #
+
+
+def normalise_our_m0(dump: dict[str, Any]) -> dict[str, Any]:
+    streams: dict[str, Any] = {}
+    fields: dict[str, dict[str, str]] = {}
+    framings: dict[str, str] = {}
+    for stream in dump.get("streams", []):
+        name = stream["stream"].lower()
+        framings[name] = stream.get("framing", "?")
+        streams[name] = {
+            "bytes": stream.get("bytes"),
+            "records": stream.get("records"),
+            "text": stream.get("text_records"),
+            "binary": stream.get("binary_records"),
+            "types": stream.get("types", {}),
+        }
+        for index, record in enumerate(stream.get("decoded", [])):
+            if record.get("mode") != "text":
+                continue
+            raw = {k: v for k, v in record.get("fields", [])}
+            if qualifying(raw):
+                fields[f"{name}#{index}"] = fold_utf8(raw)
+    return {"streams": streams, "text_fields": fields, "framings": framings}
+
+
+def qualifying(fields: dict[str, str]) -> bool:
+    for key, value in fields.items():
+        if key.upper().startswith("%UTF8%"):
+            return True
+        if "|" in value or any(ord(ch) > 127 for ch in value):
+            return True
+    return False
+
+
+def fold_utf8(fields: dict[str, str]) -> dict[str, str]:
+    plain: dict[str, str] = {}
+    utf8: dict[str, str] = {}
+    for key, value in fields.items():
+        upper = key.upper()
+        if upper.startswith("UNHANDLED"):
+            # A `|` chunk with no `=`. The reference keeps it under a synthetic
+            # key so it can write the record back; we drop it. Representation.
+            continue
+        if upper.startswith("%UTF8%"):
+            utf8.setdefault(upper[len("%UTF8%") :], value)
+        else:
+            plain.setdefault(upper, value)
+    plain.update(utf8)
+    return plain
+
+
+def compare_m0(ours: dict[str, Any], theirs: dict[str, Any], report: Report) -> None:
+    our_streams = ours["streams"]
+    their_streams = theirs["streams"]
+    framings = ours["framings"]
+
+    for name in sorted(set(our_streams) | set(their_streams)):
+        if name not in our_streams:
+            report.add("stream only the reference sees", name)
+            continue
+        if name not in their_streams:
+            report.add("stream only we see", name)
+            continue
+        mine, yours = our_streams[name], their_streams[name]
+        if "error" in yours:
+            report.note(f"reference could not read {name}: {short(yours['error'])}")
+            continue
+        if mine["bytes"] != yours["bytes"]:
+            report.add(
+                "stream length", f"{name}: ours {mine['bytes']} vs ref {yours['bytes']}"
+            )
+        framing = framings.get(name, "?")
+        if framing.startswith("Blocks"):
+            # A block-framed stream against the reference's prefixed walk is a
+            # representation difference, not a disagreement about content; the
+            # typed primitive counts below are the comparable number.
+            continue
+        if framing == "Flat":
+            # Flat means "not record-framed", so we read nothing from it. That is
+            # right for a raw payload and wrong if the stream really does hold
+            # records — which is exactly what the reference's count says.
+            if yours.get("nonempty") or yours["binary"]:
+                report.add(
+                    "stream we read as Flat that the reference reads as records",
+                    f"{name}: ref {yours['records']} records {short(yours['types'])}",
+                )
+            continue
+        if mine["records"] != yours["records"]:
+            report.add(
+                "record count", f"{name}: ours {mine['records']} vs ref {yours['records']}"
+            )
+        for key in sorted(set(mine["types"]) | set(yours["types"])):
+            a, b = mine["types"].get(key, 0), yours["types"].get(key, 0)
+            if a != b:
+                report.add("record type histogram", f"{name} {key}: ours {a} vs ref {b}")
+
+    # Primitive streams: our Blocks(n) walk against the reference's typed scanner.
+    for stream, count in sorted(theirs.get("primitives", {}).items()):
+        if stream == "__error__":
+            report.note(f"reference primitive parse failed: {short(count)}")
+            continue
+        name = f"{stream}/data"
+        mine = our_streams.get(name)
+        if mine is None:
+            report.add("primitive stream missing on our side", name)
+            continue
+        if mine["records"] != count:
+            report.add(
+                "primitive count", f"{name}: ours {mine['records']} vs ref {count}"
+            )
+
+    compare_field_maps(ours["text_fields"], theirs["text_fields"], report)
+
+
+def compare_field_maps(
+    ours: dict[str, dict[str, str]], theirs: dict[str, dict[str, str]], report: Report
+) -> None:
+    only_ours = set(ours) - set(theirs)
+    only_theirs = set(theirs) - set(ours)
+    for key in sorted(only_ours)[:EXAMPLES]:
+        report.add("decoded record only we flag", key)
+    for key in sorted(only_theirs)[:EXAMPLES]:
+        report.add("decoded record only the reference flags", key)
+    for key in sorted(set(ours) & set(theirs)):
+        mine, yours = ours[key], theirs[key]
+        for field in sorted(set(mine) | set(yours)):
+            a, b = mine.get(field), yours.get(field)
+            if a == b:
+                continue
+            if a is None:
+                report.add("decoded field only the reference has", f"{key} {field}")
+            elif b is None:
+                report.add("decoded field only we have", f"{key} {field}")
+            else:
+                report.add(
+                    "decoded value", f"{key} {field}: ours {short(a)!r} vs ref {short(b)!r}"
+                )
+
+
+# --------------------------------------------------------------------------- #
+# M1 — the design model and the BOM
+# --------------------------------------------------------------------------- #
+
+# Component fields both sides name identically.  `value` is Altium's Comment and
+# `footprint` the current PCB implementation; both sides resolve `=Expression`
+# forms before emitting, so a literal `=Value` here is a disagreement, not noise.
+COMPONENT_FIELDS = ("value", "footprint", "library_ref", "description")
+
+# Parameters we synthesise so an Altium bundle satisfies the shared bundle
+# contract (`bom.rs` reads `kicad_in_bom` whatever the source was). They have no
+# counterpart in the file or in the reference — an intended divergence, §7.
+SYNTHESISED_PARAMETERS = {
+    "ALTIUM_COMPONENT_KIND",
+    "KICAD_DNP",
+    "KICAD_IN_BOM",
+    "KICAD_ON_BOARD",
+}
+
+
+def normalise_components(design: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    out: dict[str, dict[str, Any]] = {}
+    for component in design.get("components", []):
+        designator = component.get("designator") or ""
+        entry = {field: component.get(field) for field in COMPONENT_FIELDS}
+        # We qualify the symbol reference with the library it came from
+        # (`PCBLibraryData.SVNDbLib:CAP-…`); the reference reports the bare
+        # reference. Intended (§7) — compare the part that names the symbol.
+        entry["library_ref"] = (entry["library_ref"] or "").rsplit(":", 1)[-1]
+        classification = component.get("classification") or {}
+        entry["kind"] = classification.get("type")
+        entry["pin_count"] = classification.get("pin_count")
+        parameters = {
+            k.upper(): v
+            for k, v in (component.get("parameters") or {}).items()
+            if k.upper() not in SYNTHESISED_PARAMETERS
+        }
+        entry["parameter_keys"] = sorted(parameters)
+        entry["parameters"] = parameters
+        out[designator] = entry
+    return out
+
+
+def duplicate_designators(design: dict[str, Any]) -> dict[str, int]:
+    """Designators emitted more than once.
+
+    Plan §7 says a multi-part symbol is ONE component with its placements kept
+    for rendering, so a designator appearing twice is a contract violation — and,
+    like a duplicate net name, it hides the disagreement from a comparison keyed
+    by designator, where the last row silently wins.
+    """
+    seen: dict[str, int] = {}
+    for component in design.get("components", []):
+        designator = component.get("designator") or ""
+        seen[designator] = seen.get(designator, 0) + 1
+    return {d: n for d, n in seen.items() if n > 1}
+
+
+def duplicate_net_names(design: dict[str, Any]) -> list[str]:
+    """Net names emitted more than once.
+
+    A net name is the handle every downstream reader uses — the board
+    cross-check, the net classes, a finding that quotes a net. Two nets under one
+    name is a defect on its own, and it also HIDES a naming difference from the
+    comparison below, which is keyed by name.
+    """
+    seen: dict[str, int] = {}
+    for net in design.get("nets", []):
+        if len(net.get("terminals", [])) < 2:
+            continue
+        name = net.get("name") or ""
+        seen[name] = seen.get(name, 0) + 1
+    return sorted(name for name, count in seen.items() if count > 1)
+
+
+def normalise_nets(design: dict[str, Any]) -> dict[str, list[str]]:
+    """Net name -> sorted `DESIGNATOR.PIN` terminals.
+
+    Single-terminal nets are dropped on both sides: the reference does not emit
+    them at all unless `NetlistSinglePinNets` is set, and we emit them under an
+    `unconnected-(…)` name the review skills already read.  An intended
+    divergence (plan §7); the count of what was dropped is reported.
+    """
+    out: dict[str, list[str]] = {}
+    for net in design.get("nets", []):
+        terminals = sorted(
+            f"{t.get('designator')}.{t.get('pin')}" for t in net.get("terminals", [])
+        )
+        if len(terminals) < 2:
+            continue
+        out[net.get("name") or ""] = terminals
+    return out
+
+
+def dropped_single_pin(design: dict[str, Any]) -> int:
+    return sum(1 for net in design.get("nets", []) if len(net.get("terminals", [])) < 2)
+
+
+def compare_m1_design(
+    ours: dict[str, Any], theirs: dict[str, Any], report: Report, design: "Design | None" = None
+) -> None:
+    mine, yours = normalise_components(ours), normalise_components(theirs)
+
+    # A project-less directory is ONE design to us — the loader walks every
+    # schematic beside the entry file — and ONE SHEET to the reference, whose
+    # `design` command takes a single document. The board's component table says
+    # ours is the design; comparing per designator would report every component
+    # on the other sheets as a difference, so the reference's smaller read is
+    # reported once and the comparison continues over what it did read.
+    partial = design is not None and design.project is None and set(yours) < set(mine)
+    if partial:
+        report.note(
+            f"the reference read {len(yours)} of {len(mine)} components: entered through"
+            f" {design.entry.name}, it reads that sheet alone where we read the"
+            " whole project-less directory"
+        )
+    report.note(
+        f"components: ours {len(mine)}, ref {len(yours)}"
+        f"   nets: ours {len(ours.get('nets', []))}, ref {len(theirs.get('nets', []))}"
+        f"   single-pin nets dropped: ours {dropped_single_pin(ours)},"
+        f" ref {dropped_single_pin(theirs)}"
+    )
+
+    if not partial:
+        for designator in sorted(set(mine) - set(yours)):
+            report.add("component only we have", designator)
+    for side, label in ((ours, "we emit"), (theirs, "the reference emits")):
+        for designator, count in sorted(duplicate_designators(side).items()):
+            report.add(f"designator {label} more than once", f"{designator} ({count} rows)")
+
+    for designator in sorted(set(yours) - set(mine)):
+        report.add("component only the reference has", designator)
+    for designator in sorted(set(mine) & set(yours)):
+        a, b = mine[designator], yours[designator]
+        for field in COMPONENT_FIELDS + ("pin_count",):
+            if a[field] != b[field]:
+                report.add(
+                    f"component {field}",
+                    f"{designator}: ours {short(a[field])!r} vs ref {short(b[field])!r}",
+                )
+        if a["kind"] != b["kind"]:
+            # Vocabularies are ours by design (plan §7); reported separately so
+            # a genuine classification difference is not buried in field noise.
+            report.add(
+                "component classification (our vocabulary)",
+                f"{designator}: ours {a['kind']} vs ref {b['kind']}",
+            )
+        missing = set(b["parameter_keys"]) - set(a["parameter_keys"])
+        extra = set(a["parameter_keys"]) - set(b["parameter_keys"])
+        if missing:
+            report.add("parameter keys we lack", f"{designator}: {short(sorted(missing))}")
+        if extra:
+            report.add("parameter keys only we have", f"{designator}: {short(sorted(extra))}")
+        for key in sorted(set(a["parameters"]) & set(b["parameters"])):
+            if a["parameters"][key] != b["parameters"][key]:
+                report.add(
+                    "parameter value",
+                    f"{designator} {key}: ours {short(a['parameters'][key])!r}"
+                    f" vs ref {short(b['parameters'][key])!r}",
+                )
+
+    for name in duplicate_net_names(ours):
+        report.add("net name we emit more than once", name)
+    for name in duplicate_net_names(theirs):
+        report.add("net name the reference emits more than once", name)
+
+    our_nets, their_nets = normalise_nets(ours), normalise_nets(theirs)
+    if not partial:
+        for name in sorted(set(our_nets) - set(their_nets)):
+            report.add("net name only we have", f"{name} ({len(our_nets[name])} terminals)")
+    for name in sorted(set(their_nets) - set(our_nets)):
+        report.add(
+            "net name only the reference has", f"{name} ({len(their_nets[name])} terminals)"
+        )
+    for name in sorted(set(our_nets) & set(their_nets)):
+        a, b = our_nets[name], their_nets[name]
+        if a != b and not (partial and set(b) < set(a)):
+            missing = sorted(set(b) - set(a))
+            extra = sorted(set(a) - set(b))
+            report.add(
+                "net terminal membership",
+                f"{name}: missing {short(missing, 40)} extra {short(extra, 40)}",
+            )
+
+    compare_hierarchy(ours, theirs, report)
+
+
+def compare_hierarchy(ours: dict[str, Any], theirs: dict[str, Any], report: Report) -> None:
+    """The sheet path each component sits on.
+
+    We carry the path on the component (`hierarchy.sheet_path`). The reference
+    puts the sheet's FILENAME there and publishes the path separately, in
+    `schematic_hierarchy.hierarchy_paths` — so the comparable reference value is
+    assembled from that document, and `hierarchy.sheet` is only a fallback for a
+    flat design that has no hierarchy document at all.
+    """
+    mine = {
+        (c.get("designator") or ""): normalise_path(
+            (c.get("hierarchy") or {}).get("sheet_path") or ""
+        )
+        for c in ours.get("components", [])
+    }
+    yours = reference_paths(theirs)
+    if yours is None:
+        return
+
+    shared = set(mine) & set(yours)
+    for designator in sorted(shared):
+        if mine[designator] != yours[designator]:
+            report.add(
+                "hierarchy path",
+                f"{designator}: ours {short(mine[designator])} vs ref {short(yours[designator])}",
+            )
+
+
+def reference_paths(design: dict[str, Any]) -> dict[str, str] | None:
+    """Designator -> sheet path, assembled from the reference's own documents.
+
+    The reference puts a component's SHEET FILENAME on the component and its
+    path in `schematic_hierarchy`: `hierarchy_paths[].levels[]` are the sheet
+    symbols from the root down, and `source_sheet_index` says which document the
+    path leads to. A sheet placed once has one path, so the filename identifies
+    it; a sheet placed twice (a channel) has two and cannot be resolved this way,
+    so those components are left out of the comparison rather than guessed at.
+    """
+    hierarchy = design.get("schematic_hierarchy") or {}
+    paths = hierarchy.get("hierarchy_paths")
+    documents = hierarchy.get("documents")
+    if not paths or not documents:
+        return None
+    filename_of = {
+        doc.get("sheet_index"): str(doc.get("filename") or "") for doc in documents
+    }
+    by_filename: dict[str, set[str]] = {}
+    for path in paths:
+        filename = filename_of.get(path.get("source_sheet_index"), "")
+        spelled = "/" + "/".join(
+            str(level.get("designator") or "").upper() for level in path.get("levels", [])
+        )
+        by_filename.setdefault(filename.lower(), set()).add(spelled)
+
+    out: dict[str, str] = {}
+    for component in design.get("components", []):
+        sheet = str((component.get("hierarchy") or {}).get("sheet") or "").lower()
+        candidates = by_filename.get(sheet, set())
+        if len(candidates) == 1:
+            out[component.get("designator") or ""] = next(iter(candidates))
+    return out
+
+
+def normalise_path(path: str) -> str:
+    parts = [p for p in path.replace("\\", "/").split("/") if p]
+    return "/" + "/".join(Path(p).stem.upper() for p in parts)
+
+
+def compare_m1_bom(
+    ours: dict[str, Any], theirs: dict[str, Any], report: Report, partial: bool = False
+) -> None:
+    """The BOM row set, keyed by the designators a row covers.
+
+    Grouping policy is ours (plan §7), so rows are compared as a *partition of
+    designators*: a row set that partitions the same designators the same way is
+    agreement, whatever the row order or the field spellings.
+    """
+    def rows(bom: dict[str, Any]) -> dict[str, tuple[int, frozenset[str]]]:
+        out = {}
+        for row in bom.get("lines", []):
+            designators = frozenset(row.get("designators") or [])
+            if not designators:
+                continue
+            out[min(designators)] = (row.get("quantity"), designators)
+        return out
+
+    mine, yours = rows(ours), rows(theirs)
+    report.note(
+        f"BOM lines: ours {ours.get('line_count')}, ref {theirs.get('line_count')}"
+        f"   components: ours {ours.get('component_count')}, ref {theirs.get('component_count')}"
+    )
+
+    our_designators = {d for _, group in mine.values() for d in group}
+    their_designators = {d for _, group in yours.values() for d in group}
+    for designator in sorted(their_designators - our_designators):
+        report.add("BOM designator only the reference has", designator)
+    if not partial:
+        for designator in sorted(our_designators - their_designators):
+            report.add("BOM designator only we have", designator)
+
+    for key in sorted(set(mine) & set(yours)):
+        _, a = mine[key]
+        _, b = yours[key]
+        if a != b and not (partial and b < a):
+            report.add(
+                "BOM grouping",
+                f"row {key}: ours {short(sorted(a), 40)} vs ref {short(sorted(b), 40)}",
+            )
+
+
+# --------------------------------------------------------------------------- #
+# driver
+# --------------------------------------------------------------------------- #
+
+
+# Our board geometry is Altium's own space with Y flipped about the workspace
+# height; the normaliser undoes exactly that and nothing else, so a real
+# disagreement about a coordinate still shows up as one.
+WORKSPACE_MM = 2540.0
+UNIT_MM = 0.0254 / 10000.0
+MIL_MM = 0.0254
+# 0.5 um: below what either side rounds to, above the last binary digit of a
+# millimetre round-trip.
+COORD_TOL = 0.0005
+
+# The reference's pad-shape codes against the bundle's. Round is a circle only
+# when its sides are equal, which is the one case the code alone cannot settle.
+REF_SHAPE = {2: 1, 3: 2, 4: 2, 9: 2}
+
+
+def bundle_shape(ref_shape: int, w: float, h: float) -> int:
+    if ref_shape == 1:
+        return 0 if abs(w - h) < 1e-6 else 3
+    return REF_SHAPE.get(ref_shape, 5)
+
+
+def net_name(nets: list[str], index: int) -> str:
+    return nets[index] if 0 <= index < len(nets) else ""
+
+
+def net_index_name(theirs: dict[str, Any], index: Any) -> str:
+    """The reference names a primitive's net by its index into `Nets6`, which is
+    the same table our index 0 reserves a sentinel in front of."""
+    names = theirs.get("nets") or []
+    if index is None or not (0 <= index < len(names)):
+        return ""
+    return names[index] or ""
+
+
+def compare_m2_board(ours: dict[str, Any], theirs: dict[str, Any], report: Report) -> None:
+    """Layer table, per-layer primitive counts, pad and via geometry, and the
+    net a primitive carries (plan section 8.3, M2 row)."""
+    layers = ours.get("layers") or []
+    names = [l.get("name") for l in layers]
+    nets = ours.get("nets") or []
+    ref_names = theirs.get("layer_names") or {}
+
+    # --- the layer table. Only the layers the reference also names are
+    # compared: it describes the copper stack, we describe every layer drawn on.
+    for legacy in theirs.get("stack") or []:
+        name = ref_names.get(str(legacy))
+        if name and name not in names:
+            report.add("stack layer missing from ours", f"{legacy} {name}")
+    stack = [names[i] for i, l in enumerate(layers) if l.get("role") == "copper"]
+    want = [ref_names.get(str(i)) for i in theirs.get("stack") or []]
+    if want and stack[: len(want)] != want:
+        report.add("copper stack order", f"ours {stack[:len(want)]} vs ref {want}")
+
+    # --- per-layer primitive counts, on the kinds both sides name the same way.
+    mine: dict[str, int] = {}
+
+    def bump(kind: str, layer_index: int) -> None:
+        key = f"{kind}/{names[layer_index]}"
+        mine[key] = mine.get(key, 0) + 1
+
+    for index in ours["tracks"]["seg"]["layer"]:
+        bump("tracks", index)
+    for index in ours["tracks"]["arc"]["layer"]:
+        bump("arcs", index)
+    for g in ours["graphics"]:
+        bump({"seg": "tracks", "arc": "arcs", "circle": "arcs"}.get(g["kind"], "poly"), g["layer"])
+    for t in ours["texts"]:
+        bump("texts", t["layer"])
+    named: dict[str, int] = {}
+    for key, count in (theirs.get("counts") or {}).items():
+        kind, _, legacy = key.partition("/")
+        name = ref_names.get(legacy)
+        if kind in ("tracks", "arcs", "texts") and name:
+            named[f"{kind}/{name}"] = count
+    comparable = {k for k in mine if k.split("/", 1)[0] in ("tracks", "arcs", "texts")}
+    for key in sorted(set(named) | comparable):
+        if named.get(key, 0) != mine.get(key, 0):
+            report.add(
+                "primitive count per layer",
+                f"{key}: ours {mine.get(key, 0)} vs ref {named.get(key, 0)}",
+            )
+
+    # --- pads and vias, index by index: both sides keep the stream's own order.
+    theirs_pads = theirs.get("pads") or []
+    ours_pads = ours.get("pads") or []
+    if len(theirs_pads) != len(ours_pads):
+        report.add("pad count", f"ours {len(ours_pads)} vs ref {len(theirs_pads)}")
+    for i, (t, o) in enumerate(zip(theirs_pads, ours_pads)):
+        x, y, w, h, shape, corner, hole, rot, plated, designator, net = t[:11]
+        want_fields = {
+            "x": x * UNIT_MM,
+            "y": WORKSPACE_MM - y * UNIT_MM,
+            "w": w * UNIT_MM,
+            "h": h * UNIT_MM,
+            "drill": hole * UNIT_MM,
+            "angle": -rot,
+        }
+        got = {
+            "x": o["x"], "y": o["y"], "w": o["w"], "h": o["h"],
+            "drill": o.get("drill", 0.0), "angle": o["angle"],
+        }
+        for field, value in want_fields.items():
+            tol = 0.01 if field == "angle" else COORD_TOL
+            if abs(value - got[field]) > tol:
+                report.add(f"pad {field}", f"[{i}] {designator}: ours {got[field]} vs ref {value}")
+        if o["num"] != designator:
+            report.add("pad designator", f"[{i}] ours {o['num']} vs ref {designator}")
+        if o["shape"] != bundle_shape(shape, w, h):
+            report.add("pad shape", f"[{i}] {designator}: ours {o['shape']} vs ref {shape}")
+        if o["shape"] == 2 and abs(o.get("rratio", 0.0) - corner / 200.0) > 1e-6:
+            report.add("pad corner radius", f"[{i}] ours {o.get('rratio')} vs ref {corner}%")
+        if bool(o.get("npth")) != bool(hole > 0 and not plated):
+            report.add("pad plating", f"[{i}] {designator}: ours npth={o.get('npth', False)}")
+        if net_name(nets, o["net"]) != net_index_name(theirs, net):
+            report.add(
+                "pad net",
+                f"[{i}] {designator}: ours {net_name(nets, o['net'])!r}"
+                f" vs ref {net_index_name(theirs, net)!r}",
+            )
+
+    theirs_vias = theirs.get("vias") or []
+    ours_vias = ours.get("vias") or []
+    if len(theirs_vias) != len(ours_vias):
+        report.add("via count", f"ours {len(ours_vias)} vs ref {len(theirs_vias)}")
+    for i, (t, o) in enumerate(zip(theirs_vias, ours_vias)):
+        x, y, diameter, hole, net = t
+        want_fields = {
+            "x": x * UNIT_MM,
+            "y": WORKSPACE_MM - y * UNIT_MM,
+            "size": diameter * UNIT_MM,
+            "drill": hole * UNIT_MM,
+        }
+        for field, value in want_fields.items():
+            if abs(value - o[field]) > COORD_TOL:
+                report.add(f"via {field}", f"[{i}] ours {o[field]} vs ref {value}")
+        if net_name(nets, o["net"]) != net_index_name(theirs, net):
+            report.add("via net", f"[{i}] ours {net_name(nets, o['net'])!r}")
+
+
+def compare_m2_centroids(
+    ours: dict[str, Any], theirs: dict[str, Any], origin: list[Any], report: Report
+) -> None:
+    """A component sits at the centre of its own pads' bounding box, which is
+    what Altium's pick-and-place exports and what corner case 23 is about. The
+    reference reports it relative to the board origin; ours is absolute, so the
+    origin is added back before comparing."""
+    if not origin or origin[0] is None:
+        report.note("no board origin: centroids not compared")
+        return
+    ox, oy = origin[0] * MIL_MM, origin[1] * MIL_MM
+    placed = {c["ref"]: c for c in ours.get("components") or []}
+    for designator, (x, y, rotation) in sorted(theirs.get("placements", {}).items()):
+        c = placed.get(designator)
+        if c is None:
+            report.add("component the reference places and we do not", designator)
+            continue
+        want = (x + ox, WORKSPACE_MM - (y + oy))
+        if abs(c["x"] - want[0]) > 0.06 or abs(c["y"] - want[1]) > 0.06:
+            report.add(
+                "component centroid",
+                f"{designator}: ours ({c['x']:.3f}, {c['y']:.3f})"
+                f" vs ref ({want[0]:.3f}, {want[1]:.3f})",
+            )
+        if abs(((-rotation) - c["angle"] + 180) % 360 - 180) > 0.01:
+            report.add("component rotation", f"{designator}: ours {c['angle']} vs ref {rotation}")
+
+
+def phase_m2(
+    cfg: Config, design: Design, report: Report, oracle: Oracle, entry: dict, clock: Clock
+) -> None:
+    if design.board is None:
+        report.note("no board in this design")
+        return
+    with tempfile.TemporaryDirectory(prefix="altium-diff-m2-") as tmp:
+        root = Path(tmp)
+        with clock.measure("ours:geometry"):
+            ours = our_geometry(cfg, design, root / "ours-geom")
+        theirs = ask(
+            oracle, entry, "m2:board", design.board,
+            lambda: ref_board(cfg, design, root / "ref-board"),
+            clock, "ref:board",
+        )
+        if ours is None:
+            report.add("board geometry we cannot build", design.name)
+            return
+        if not theirs or not theirs.get("pads"):
+            report.add("board the reference cannot read", design.name)
+        else:
+            compare_m2_board(ours, theirs, report)
+
+        pnp = ask(
+            oracle, entry, "m2:pnp", design.board,
+            lambda: ref_pnp(cfg, design, root / "ref-pnp"),
+            clock, "ref:pnp",
+        )
+        if not pnp or not pnp.get("placements"):
+            report.note("the reference produced no pick-and-place for this design")
+        elif theirs:
+            compare_m2_centroids(ours, pnp, theirs.get("origin") or [], report)
+
+
+def phase_m0(
+    cfg: Config, design: Design, report: Report, oracle: Oracle, entry: dict, clock: Clock
+) -> None:
+    for document in design.documents:
+        with clock.measure("ours:m0"):
+            ours = our_dump(cfg, document)
+        theirs = ask(
+            oracle,
+            entry,
+            f"m0:{document.name}",
+            document,
+            lambda: ref_dump(cfg, document),
+            clock,
+            "ref:m0",
+        )
+        if ours is None:
+            report.add("document we cannot read", document.name)
+            continue
+        if theirs is None:
+            report.add("document the reference cannot read", document.name)
+            continue
+        sub = Report()
+        compare_m0(normalise_our_m0(ours), theirs, sub)
+        for kind, count in sub.counts.items():
+            for example in sub.classes[kind]:
+                report.add(f"{kind}", f"[{document.name}] {example}")
+            if count > len(sub.classes[kind]):
+                report.counts[kind] = report.counts.get(kind, 0) + count - len(sub.classes[kind])
+        for note in sub.notes:
+            report.note(f"[{document.name}] {note}")
+
+
+def phase_m1(
+    cfg: Config, design: Design, report: Report, oracle: Oracle, entry: dict, clock: Clock
+) -> None:
+    with tempfile.TemporaryDirectory(prefix="altium-diff-") as tmp:
+        root = Path(tmp)
+        with clock.measure("ours:design"):
+            ours = our_design(cfg, design, root / "ours-design")
+        theirs = ask(
+            oracle,
+            entry,
+            "m1:design",
+            design.entry,
+            lambda: (lambda d: reduce_design(d) if d else None)(
+                ref_design(cfg, design, root / "ref-design")
+            ),
+            clock,
+            "ref:design",
+        )
+        if ours is None:
+            report.add("design we cannot build", design.name)
+        elif not theirs or not theirs.get("components"):
+            report.add("design the reference cannot build", design.name)
+        else:
+            compare_m1_design(ours, theirs, report, design)
+
+        with clock.measure("ours:bom"):
+            our_rows = our_bom(cfg, design, root / "ours-bom")
+        their_rows = ask(
+            oracle,
+            entry,
+            "m1:bom",
+            design.entry,
+            lambda: (lambda b: reduce_bom(b) if b else None)(
+                ref_bom(cfg, design, root / "ref-bom")
+            ),
+            clock,
+            "ref:bom",
+        )
+        if our_rows is None:
+            report.add("BOM we cannot build", design.name)
+        elif not their_rows or not their_rows.get("lines"):
+            report.add("BOM the reference cannot build", design.name)
+        else:
+            partial = design.project is None and their_rows.get(
+                "component_count", 0
+            ) < our_rows.get("component_count", 0)
+            compare_m1_bom(our_rows, their_rows, report, partial)
+
+
+def ask(
+    oracle: Oracle,
+    entry: dict,
+    key: str,
+    source: Path,
+    run_reference,
+    clock: Clock,
+    span: str,
+) -> Any:
+    """One reference answer: from the recorded corpus when it is fresh, else by
+    running the reference and recording what it said, and what it cost.
+
+    `--offline` refuses to run it, which is how a run proves it used the corpus
+    and nothing else.
+    """
+    held = oracle.fresh(entry, key, source)
+    if held is not None:
+        clock.add(span, seconds_of(held), from_corpus=True)
+        return held.get("value")
+    if oracle.mode == "offline":
+        held = oracle.held(entry, key)
+        if held is None:
+            return None
+        clock.add(span, seconds_of(held), from_corpus=True)
+        return held.get("value")
+    start = time.perf_counter()
+    value = run_reference()
+    seconds = time.perf_counter() - start
+    if value is not None:
+        clock.add(span, seconds)
+        oracle.record(entry, key, source, value, seconds)
+        return value
+    # The current reference cannot answer. An older one could, and its answer is
+    # still the best oracle available — coverage should not fall away because the
+    # reference regressed, so the recorded answer is kept and SAID to be old.
+    held = oracle.held(entry, key)
+    if held is None:
+        return None
+    oracle.kept.append(
+        f"{key}: kept the answer recorded by"
+        f" {held.get('reference_version') or 'an earlier reference'};"
+        " the current reference fails on this design"
+    )
+    clock.add(span, seconds_of(held), from_corpus=True)
+    return held.get("value")
+
+
+def seconds_of(held: dict[str, Any]) -> float | None:
+    value = held.get("seconds")
+    return None if value is None else float(value)
+
+
+def main(argv: list[str]) -> int:
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8")  # the corpus carries non-ASCII
+        except AttributeError:
+            pass
+
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--phase", choices=("m0", "m1", "m2", "all"), default="all")
+    parser.add_argument("--design", help="substring of the design name to run alone")
+    parser.add_argument("--corpus")
+    parser.add_argument("--reference", help="reference CLI")
+    parser.add_argument("--extract", help="our pcb-extract binary")
+    parser.add_argument("--out", help="where the JSON report is written")
+    parser.add_argument(
+        "--examples", type=int, help=f"examples printed per difference class (default {EXAMPLES})"
+    )
+    parser.add_argument("--oracle", help="where the recorded reference answers live")
+    parser.add_argument(
+        "--build-oracle",
+        action="store_true",
+        help="re-ask the reference for every design and record the answers as the corpus",
+    )
+    parser.add_argument(
+        "--offline",
+        action="store_true",
+        help="compare against the recorded corpus only; never run the reference",
+    )
+    args = parser.parse_args(argv[1:])
+
+    if args.examples:
+        globals()["EXAMPLES"] = args.examples
+
+    cfg = Config(args)
+    problems = cfg.check()
+    if cfg.oracle_mode == "offline":
+        problems = [p for p in problems if "reference" not in p or "oracle" in p]
+    fatal = [p for p in problems if "M1 does not" not in p]
+    for problem in problems:
+        print(f"config: {problem}", file=sys.stderr)
+    if fatal:
+        return 2
+    if problems and args.phase in ("m0", "all") and cfg.oracle_mode != "offline":
+        print("config: M0 needs the reference library; run --phase m1", file=sys.stderr)
+        return 2
+
+    designs = discover(cfg.corpus)
+    if args.design:
+        designs = [d for d in designs if args.design.lower() in d.name.lower()]
+    if not designs:
+        print("no designs found", file=sys.stderr)
+        return 2
+
+    oracle = Oracle(cfg)
+    print(f"reference : {cfg.reference}  ({cfg.reference_version})")
+    print(f"ours      : {cfg.extract}")
+    print(f"corpus    : {cfg.corpus}  ({len(designs)} designs)")
+    print(f"oracle    : {cfg.oracle}  [{cfg.oracle_mode}]")
+    print()
+
+    results: dict[str, Any] = {}
+    clocks: dict[str, Clock] = {}
+    total = 0
+    for design in designs:
+        print(f"=== {design.name}  ({design.entry.name})")
+        entry = oracle.load(design)
+        before = oracle.recorded
+        clock = Clock()
+        clocks[design.name] = clock
+        design_result: dict[str, Any] = {}
+        for phase, runner in (("m0", phase_m0), ("m1", phase_m1), ("m2", phase_m2)):
+            if args.phase not in (phase, "all"):
+                continue
+            report = Report()
+            runner(cfg, design, report, oracle, entry, clock)
+            print(f"  {phase.upper()}")
+            for line in report.render("    "):
+                print(line)
+            design_result[phase] = report.as_json()
+            total += report.total
+        design_result["timing"] = clock.as_json()
+        results[design.name] = design_result
+        if oracle.recorded > before:
+            oracle.save(design, entry)
+            print(f"    + recorded {oracle.recorded - before} reference answers")
+        print(f"  TIME  {clock.line('ours', 'ours:')}")
+        print(f"        {clock.line('reference', 'ref:')}")
+        print()
+
+    cfg.out.mkdir(parents=True, exist_ok=True)
+    path = cfg.out / "differential.json"
+    path.write_text(json.dumps(results, indent=2, ensure_ascii=False), encoding="utf-8")
+    if oracle.kept:
+        print()
+        print(f"{len(oracle.kept)} answers the current reference could not re-produce:")
+        for line in oracle.kept:
+            print(f"  {line}")
+    if oracle.stale:
+        print()
+        what = "used anyway (offline)" if cfg.oracle_mode == "offline" else "re-asked"
+        print(f"{len(oracle.stale)} recorded answers were stale and {what}:")
+        for line in oracle.stale[:10]:
+            print(f"  {line}")
+        if len(oracle.stale) > 10:
+            print(f"  … and {len(oracle.stale) - 10} more")
+    print()
+    print("extraction time per design (wall clock, this machine)")
+    print(f"  {'design':38s} {'documents':>9s} {'ours':>9s} {'reference':>10s} {'ratio':>7s}")
+    ours_all = ref_all = 0.0
+    for design in designs:
+        clock = clocks.get(design.name)
+        if clock is None:
+            continue
+        mine, theirs = clock.total("ours:"), clock.total("ref:")
+        ours_all += mine
+        ref_all += theirs
+        ratio = f"{theirs / mine:.0f}x" if mine > 0.001 else "-"
+        mark = "+" if any(k.startswith("ref:") for k in clock.unknown) else " "
+        print(
+            f"  {design.name[:38]:38s} {len(design.documents):9d}"
+            f" {mine:8.1f}s {theirs:8.1f}s{mark} {ratio:>7s}"
+        )
+    ratio = f"{ref_all / ours_all:.0f}x" if ours_all > 0.001 else "-"
+    print(
+        f"  {'TOTAL':38s} {sum(len(d.documents) for d in designs):9d}"
+        f" {ours_all:8.1f}s {ref_all:8.1f}s  {ratio:>7s}"
+    )
+    if any(k.startswith("ref:") for c in clocks.values() for k in c.unknown):
+        print("  + the reference's time is unmeasured for part of this design:")
+        print("    its answer was carried over from a version that is no longer installed")
+    print()
+    print(f"{total} differences; report written to {path}")
+    print(f"oracle corpus: {cfg.oracle}")
+    # A difference is never auto-adopted (plan §8.3 triage rule), so a non-zero
+    # exit means "there is something to triage", not "the build is broken".
+    return 1 if total else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv))

@@ -9,7 +9,7 @@
 //! bottom-left — scaled so the optional `*_Frac` companion is exact. Millimetres
 //! and the bundle's Y-down orientation are the caller's job.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::doc::Doc;
 use crate::record::TextRecord;
@@ -362,10 +362,18 @@ const GRAPHIC_RECORDS: [i64; 7] = [6, 7, 8, 11, 12, 13, 14];
 /// Parse one `.SchDoc`.
 pub fn parse(doc: &Doc) -> SchDoc {
     let raw = doc.records("FileHeader");
-    let recs: Vec<TextRecord> = raw
-        .iter()
-        .map(|r| TextRecord::parse(&r.payload))
-        .collect();
+    parse_records(
+        raw.iter()
+            .map(|r| TextRecord::parse(&r.payload))
+            .collect(),
+    )
+}
+
+/// Build the document from its already-decoded `FileHeader` records.
+///
+/// Split out from [`parse`] so a record-level rule can be tested without
+/// building a compound file around it.
+pub fn parse_records(recs: Vec<TextRecord>) -> SchDoc {
     let mut out = SchDoc::default();
     if let Some(h) = recs.first() {
         out.uuid = h.s("UniqueID").to_string();
@@ -382,6 +390,9 @@ pub fn parse(doc: &Doc) -> SchDoc {
     // Implementation lists (RECORD=44) own the implementations (45); map the
     // list back to its component so a footprint reaches the right part.
     let mut impl_owner: BTreeMap<usize, usize> = BTreeMap::new(); // rec index of 44 -> rec index of 1
+    // Components whose footprint came from the implementation Altium marks
+    // current, so a later PCBLIB record cannot displace it.
+    let mut footprint_is_current: BTreeSet<usize> = BTreeSet::new();
     for (i, r) in recs.iter().enumerate() {
         match r.record_type() {
             Some(1) => {
@@ -499,7 +510,16 @@ pub fn parse(doc: &Doc) -> SchDoc {
                 else {
                     continue;
                 };
-                if out.components[c].footprint.is_empty() {
+                // A part carries SEVERAL PCBLIB models and Altium places the
+                // one flagged current; taking the first gives a footprint that
+                // is plausible, in the right family, and wrong — U2 on the EVAL
+                // design is `…-16N-4` first and `…-16N-V` current. Found by the
+                // §8.3 differential. An unflagged list keeps the first.
+                let current = r.b("IsCurrent");
+                if current && !footprint_is_current.contains(&c) {
+                    out.components[c].footprint = r.s("ModelName").to_string();
+                    footprint_is_current.insert(c);
+                } else if out.components[c].footprint.is_empty() {
                     out.components[c].footprint = r.s("ModelName").to_string();
                 }
             }
@@ -676,6 +696,39 @@ mod tests {
         assert_eq!(s.entry_point(&e(1, 5)), Pt { x: 340 * UNIT, y: 660 * UNIT });
         assert_eq!(s.entry_point(&e(2, 3)), Pt { x: 220 * UNIT, y: 710 * UNIT });
         assert_eq!(s.entry_point(&e(3, 3)), Pt { x: 220 * UNIT, y: 600 * UNIT });
+    }
+
+    /// A part carries several PCBLIB models and Altium places the one flagged
+    /// `IsCurrent`. Taking the first gives a footprint in the right family and
+    /// wrong — `SOIC127P1030X265-16N-4` where the board has `…-16N-V`. Found by
+    /// the plan §8.3 differential on U2 of the EVAL design.
+    #[test]
+    fn the_footprint_is_the_current_implementation() {
+        let rec = |s: &str| TextRecord::parse(format!("{s} ").as_bytes());
+        let doc = parse_records(vec![
+            rec("|HEADER=Protel for Windows - Schematic Capture|"),
+            rec("|RECORD=1|LibReference=GD|PartCount=2|"),
+            rec("|RECORD=44|OwnerIndex=0|"),
+            rec("|RECORD=45|OwnerIndex=1|ModelName=SOIC127P1030X265-16N-4|ModelType=PCBLIB|"),
+            rec("|RECORD=45|OwnerIndex=1|ModelName=SOIC127P1030X265-16N-V|ModelType=PCBLIB|IsCurrent=T|"),
+        ]);
+        assert_eq!(doc.components.len(), 1);
+        assert_eq!(doc.components[0].footprint, "SOIC127P1030X265-16N-V");
+    }
+
+    /// With nothing flagged, the first PCBLIB model still wins — the rule adds a
+    /// preference, it does not make an unflagged list footprint-less.
+    #[test]
+    fn an_unflagged_implementation_list_keeps_the_first_footprint() {
+        let rec = |s: &str| TextRecord::parse(format!("{s} ").as_bytes());
+        let doc = parse_records(vec![
+            rec("|HEADER=Protel for Windows - Schematic Capture|"),
+            rec("|RECORD=1|LibReference=GD|"),
+            rec("|RECORD=44|OwnerIndex=0|"),
+            rec("|RECORD=45|OwnerIndex=1|ModelName=FIRST|ModelType=PCBLIB|"),
+            rec("|RECORD=45|OwnerIndex=1|ModelName=SECOND|ModelType=PCBLIB|"),
+        ]);
+        assert_eq!(doc.components[0].footprint, "FIRST");
     }
 
     /// Corner case 17: a port connects at both edges, not only its origin.

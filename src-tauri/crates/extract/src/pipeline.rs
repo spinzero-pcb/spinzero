@@ -632,9 +632,56 @@ fn run_design_altium(
         u.directives_not_applied,
         u.compile_mask_candidates_not_applied,
     )));
+    std::fs::create_dir_all(out_dir).map_err(|e| e.to_string())?;
+
+    // Board geometry, when a `.PcbDoc` belongs to this project. A board that is
+    // absent or unreadable leaves the design model intact — a schematic-only
+    // review is a real review — and says so rather than failing the run.
+    let mut source = source;
+    let pcb_geometry = match crate::altium::pcb::board_beside(project) {
+        Some(board) => match crate::altium::pcb::extract_pcb(&board, out_dir, emit) {
+            Ok((rel, summary)) => {
+                emit(Msg::Progress(format!(
+                    "board {}: {} layers, {} components, {} tracks, {} pads, {} vias",
+                    board.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+                    summary.layers,
+                    summary.components,
+                    summary.tracks,
+                    summary.pads,
+                    summary.vias,
+                )));
+                // The board's own net classes are the ones a layout rule cites,
+                // and the schematic has no equivalent, so they land in the
+                // design model's `net_name_to_classes` the KiCad path fills
+                // from the project file.
+                for (class, members) in &summary.net_classes {
+                    for net in members {
+                        model
+                            .net_name_to_classes
+                            .entry(net.clone())
+                            .or_default()
+                            .push(class.clone());
+                    }
+                }
+                source.unresolved.board_substacks = summary.substacks;
+                source.unresolved.board_unresolved_specials = summary.unresolved_specials;
+                for (stream, n) in summary.skipped {
+                    *source.unresolved.skipped_records.entry(stream).or_default() += n;
+                }
+                Some(rel)
+            }
+            Err(e) => {
+                emit(Msg::Progress(format!("pcb skipped: {e}")));
+                None
+            }
+        },
+        None => {
+            emit(Msg::Progress("no board found beside the project".to_string()));
+            None
+        }
+    };
     model.source = serde_json::to_value(&source).ok();
 
-    std::fs::create_dir_all(out_dir).map_err(|e| e.to_string())?;
     let design_file = format!("{name}_design.json");
     let json = serde_json::to_string_pretty(&model).map_err(|e| e.to_string())?;
     std::fs::write(out_dir.join(&design_file), json).map_err(|e| e.to_string())?;
@@ -645,7 +692,7 @@ fn run_design_altium(
         design_json: design_file,
         schematic_svgs: Vec::new(),
         pcb_svgs: Vec::new(),
-        pcb_geometry: None,
+        pcb_geometry,
         schematic_geometry: None,
     };
     std::fs::write(

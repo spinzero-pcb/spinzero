@@ -6,7 +6,9 @@
 
 pub mod design;
 pub mod dump;
+pub mod layers;
 pub mod netlist;
+pub mod pcb;
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
@@ -89,6 +91,13 @@ pub struct Unresolved {
     pub unconnected_pins: usize,
     /// Pins connected implicitly as hidden supply pins.
     pub hidden_supply_pins: usize,
+    /// Rigid-flex layer-stack regions the board declares. Detected and named;
+    /// the substack itself is not modelled, so every primitive is placed against
+    /// the master stack (plan §4.5).
+    pub board_substacks: Vec<String>,
+    /// Board special strings drawn verbatim because the extraction has no value
+    /// for them — a drill legend, a print date.
+    pub board_unresolved_specials: usize,
     /// Record types seen but not modelled, by type and count.
     pub skipped_records: BTreeMap<String, usize>,
 }
