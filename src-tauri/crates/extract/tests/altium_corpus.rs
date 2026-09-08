@@ -510,3 +510,225 @@ fn board_geometry_keeps_every_pad_via_and_footprint() {
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
+
+
+/// The manifest lists a sheet SVG for every sheet the design model carries, and
+/// a layer SVG for every layer the geometry carries. A bundle whose manifest and
+/// model disagree opens with a blank canvas and no error anywhere.
+#[test]
+fn every_sheet_and_layer_reaches_the_manifest_as_a_file() {
+    let Some(root) = corpus() else {
+        eprintln!("skipping: no Altium corpus");
+        return;
+    };
+    for (i, d) in designs(&root).iter().enumerate() {
+        let name = d.project.file_name().unwrap().to_string_lossy().into_owned();
+        let (dir, model) = extract(d, &format!("svg{i}"));
+        let manifest: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.join("design_review_manifest.json")).unwrap(),
+        )
+        .unwrap();
+
+        let sheets = model["sheets"].as_array().unwrap();
+        let sheet_svgs = manifest["schematic_svgs"].as_array().unwrap();
+        assert_eq!(sheet_svgs.len(), sheets.len(), "{name}: a sheet has no SVG");
+        for entry in sheet_svgs {
+            let file = entry["file"].as_str().unwrap();
+            let svg = std::fs::read_to_string(dir.join(file))
+                .unwrap_or_else(|e| panic!("{name}: {file}: {e}"));
+            assert!(svg.starts_with("<svg "), "{name}: {file} is not an SVG");
+            assert!(svg.ends_with("</svg>"), "{name}: {file} is truncated");
+            assert!(
+                svg.contains("data-primitive="),
+                "{name}: {file} carries no addressable primitive"
+            );
+        }
+
+        let g: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.join("pcb/geometry.json")).unwrap(),
+        )
+        .unwrap();
+        let geom_layers: BTreeSet<String> = g["layers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|l| l["name"].as_str().unwrap().to_string())
+            .collect();
+        let mut seen = BTreeSet::new();
+        for entry in manifest["pcb_svgs"].as_array().unwrap() {
+            let layer = entry["layer"].as_str().unwrap().to_string();
+            // The synthetic drawing-sheet row is page context, not a board layer.
+            let Some(file) = entry["file"].as_str() else {
+                continue;
+            };
+            assert!(geom_layers.contains(&layer), "{name}: {layer} is not in the geometry");
+            let svg = std::fs::read_to_string(dir.join(file))
+                .unwrap_or_else(|e| panic!("{name}: {file}: {e}"));
+            assert!(
+                svg.contains(&format!(r#"data-review-layer="{}""#, layer.replace('&', "&amp;"))),
+                "{name}: {file} does not name its own layer"
+            );
+            seen.insert(layer);
+        }
+        // Every copper layer and the board edge must be there: a reviewer expects
+        // the stack to be complete and selectable even where it is empty.
+        for l in g["layers"].as_array().unwrap() {
+            let (n, role) = (l["name"].as_str().unwrap(), l["role"].as_str().unwrap());
+            if role == "copper" || role == "edge" {
+                assert!(seen.contains(n), "{name}: {n} ({role}) has no layer SVG");
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+/// Every sheet SVG is well formed and stays in the bundle's coordinate space.
+///
+/// Two things go silently wrong in a renderer and neither raises an error: an
+/// unbalanced group, which the browser reparents rather than rejects, and an
+/// image blob left in the format Altium stored it in, which is an uncompressed
+/// bitmap and makes one sheet tens of megabytes.
+#[test]
+fn sheet_svgs_are_balanced_and_carry_no_uncompressed_bitmaps() {
+    let Some(root) = corpus() else {
+        eprintln!("skipping: no Altium corpus");
+        return;
+    };
+    for (i, d) in designs(&root).iter().enumerate() {
+        let name = d.project.file_name().unwrap().to_string_lossy().into_owned();
+        let (dir, _model) = extract(d, &format!("svgshape{i}"));
+        let manifest: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.join("design_review_manifest.json")).unwrap(),
+        )
+        .unwrap();
+        for entry in manifest["schematic_svgs"].as_array().unwrap() {
+            let file = entry["file"].as_str().unwrap();
+            let svg = std::fs::read_to_string(dir.join(file)).unwrap();
+            let opens = svg.matches("<g ").count() + svg.matches("<g>").count();
+            let closes = svg.matches("</g>").count();
+            assert_eq!(opens, closes, "{name}: {file} has unbalanced groups");
+            assert!(
+                !svg.contains("data:image/bmp"),
+                "{name}: {file} embeds an uncompressed bitmap"
+            );
+            // An empty `data-uuid` looks like an identity to every consumer that
+            // reads one, so every junction on the sheet would share it. Altium's
+            // junction record is the one that carries no `UniqueID`; the
+            // attribute is omitted rather than written blank.
+            assert!(
+                !svg.contains(r#"data-uuid="""#),
+                "{name}: {file} writes an empty data-uuid"
+            );
+            // The viewBox is millimetres on a real page, not Altium's own units.
+            let vb = svg
+                .split(r#"viewBox=""#)
+                .nth(1)
+                .and_then(|s| s.split('"').next())
+                .expect("a viewBox");
+            let nums: Vec<f64> = vb.split_whitespace().map(|v| v.parse().unwrap()).collect();
+            assert!(
+                nums[2] > 50.0 && nums[2] < 3000.0 && nums[3] > 50.0 && nums[3] < 3000.0,
+                "{name}: {file} viewBox {vb} is not a page in millimetres"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+/// The design model carries the palette the viewer themes with, in the keys the
+/// frontend's theme map reads. An empty block is a bundle that renders every
+/// Altium object in the neutral fallback.
+#[test]
+fn the_bundle_carries_a_palette_in_the_viewers_own_keys() {
+    let Some(root) = corpus() else {
+        eprintln!("skipping: no Altium corpus");
+        return;
+    };
+    for (i, d) in designs(&root).iter().enumerate() {
+        let name = d.project.file_name().unwrap().to_string_lossy().into_owned();
+        let (dir, model) = extract(d, &format!("theme{i}"));
+        let sch = model["theme"]["schematic"].as_object().expect("a schematic palette");
+        for key in ["wire", "component_outline", "pin", "reference"] {
+            let hex = sch.get(key).and_then(|v| v.as_str());
+            assert!(
+                hex.map(|h| h.starts_with('#') && h.len() == 7).unwrap_or(false),
+                "{name}: theme.schematic.{key} is {hex:?}"
+            );
+        }
+        let board = model["theme"]["board"].as_object().expect("a board palette");
+        assert!(board.contains_key("copper.f"), "{name}: no front-copper colour");
+        assert!(board.contains_key("edge_cuts"), "{name}: no board-outline colour");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+
+/// M3's exit criterion: a `data-uuid` in a rendered sheet round-trips through
+/// the design model's cross-probe indexes. A click that resolves to nothing is
+/// the failure this catches, and it is invisible in the SVG itself.
+///
+/// Symbols and pins must resolve exactly — every one of them is a component the
+/// model carries. Wires and labels are held to a proportion instead: a wire on
+/// no net, and a label naming nothing, are both real and both rare.
+#[test]
+fn every_drawn_uuid_resolves_through_the_cross_probe_indexes() {
+    let Some(root) = corpus() else {
+        eprintln!("skipping: no Altium corpus");
+        return;
+    };
+    // `<g data-primitive="X" data-uuid="Y">`, the shape every emitter writes.
+    let scan = |svg: &str, primitive: &str| -> Vec<String> {
+        let needle = format!(r#"<g data-primitive="{primitive}" data-uuid=""#);
+        svg.match_indices(&needle)
+            .filter_map(|(i, _)| {
+                let rest = &svg[i + needle.len()..];
+                rest.find('"').map(|end| rest[..end].to_string())
+            })
+            .filter(|u| !u.is_empty())
+            .collect()
+    };
+
+    for (i, d) in designs(&root).iter().enumerate() {
+        let name = d.project.file_name().unwrap().to_string_lossy().into_owned();
+        let (dir, model) = extract(d, &format!("probe{i}"));
+        let manifest: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.join("design_review_manifest.json")).unwrap(),
+        )
+        .unwrap();
+        let idx = &model["indexes"];
+        let known = |key: &str, uuid: &str| idx[key].get(uuid).is_some();
+
+        let (mut soft_hit, mut soft_all) = (0usize, 0usize);
+        for entry in manifest["schematic_svgs"].as_array().unwrap() {
+            let svg = std::fs::read_to_string(dir.join(entry["file"].as_str().unwrap())).unwrap();
+            for uuid in scan(&svg, "symbol") {
+                assert!(
+                    known("svg_to_component", &uuid),
+                    "{name}: symbol {uuid} resolves to no component"
+                );
+            }
+            for uuid in scan(&svg, "pin") {
+                assert!(
+                    known("svg_to_net", &uuid) || known("svg_to_component", &uuid),
+                    "{name}: pin {uuid} resolves to neither a net nor a component"
+                );
+            }
+            for primitive in ["wire", "bus", "label", "power-symbol"] {
+                for uuid in scan(&svg, primitive) {
+                    soft_all += 1;
+                    if known("svg_to_net", &uuid) {
+                        soft_hit += 1;
+                    }
+                }
+            }
+        }
+        assert!(soft_all > 0, "{name}: no addressable net geometry at all");
+        let share = soft_hit as f64 / soft_all as f64;
+        assert!(
+            share >= 0.95,
+            "{name}: only {soft_hit}/{soft_all} ({:.0}%) of the drawn net geometry resolves",
+            share * 100.0
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

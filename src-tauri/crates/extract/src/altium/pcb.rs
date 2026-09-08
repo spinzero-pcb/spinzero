@@ -105,12 +105,24 @@ pub fn board_beside(project: &Path) -> Option<std::path::PathBuf> {
         .or_else(|| boards.first().cloned().filter(|_| boards.len() == 1))
 }
 
-/// Read a board and write `pcb/geometry.json` beside the design bundle.
+/// What a board contributed to the bundle.
+pub struct BoardArtifacts {
+    /// Cache-relative path of `pcb/geometry.json`.
+    pub geometry: String,
+    /// Manifest rows for the per-layer SVGs.
+    pub svgs: Vec<serde_json::Value>,
+    /// Board colours for the design model's `theme` block.
+    pub theme: std::collections::BTreeMap<String, String>,
+    pub summary: BoardSummary,
+}
+
+/// Read a board and write `pcb/geometry.json` plus the per-layer SVGs beside
+/// the design bundle.
 pub fn extract_pcb(
     board_path: &Path,
     out_dir: &Path,
     emit: &mut dyn FnMut(Msg),
-) -> Result<(String, BoardSummary), String> {
+) -> Result<BoardArtifacts, String> {
     let doc = Doc::open(board_path)?;
     let board = pcb::parse(&doc);
     let source = board_path
@@ -148,7 +160,25 @@ pub fn extract_pcb(
     )));
     let rel = "pcb/geometry.json".to_string();
     emit(Msg::Artifact(rel.clone()));
-    Ok((rel, summary))
+
+    // The vector layers come off the same IR the GPU renderer uploads, so the
+    // two cannot disagree about where a primitive is. A write failure here
+    // leaves the geometry — a board a reviewer can measure is worth more than
+    // one they can look at.
+    let svgs = match crate::altium::pcb_svg::write_layer_svgs(g, &source, out_dir, emit) {
+        Ok(v) => v,
+        Err(e) => {
+            emit(Msg::Progress(format!("pcb layer svgs skipped: {e}")));
+            Vec::new()
+        }
+    };
+    emit(Msg::Progress(format!("pcb: {} layer svgs", svgs.len())));
+    Ok(BoardArtifacts {
+        geometry: rel,
+        svgs,
+        theme: crate::altium::pcb_svg::board_theme(g),
+        summary,
+    })
 }
 
 /// The geometry document plus what building it could not resolve.

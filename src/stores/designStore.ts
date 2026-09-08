@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import { ipc } from "../lib/ipc";
-import type { DesignIndexes, SheetLite } from "../lib/design";
+import type { DesignIndexes, LayerLite, SheetLite } from "../lib/design";
+import { isCopperLayer, layerSide } from "../lib/layers";
 import { parsePcbGeometry, type PcbGeometry } from "../lib/pcbGeometry";
 import { applyKicadTheme, clearKicadTheme } from "../lib/kicadTheme";
 import { useToastStore } from "./toastStore";
@@ -60,7 +61,7 @@ function polylineLength(points: string): number {
 }
 
 function scanLayerSvg(
-  layer: string,
+  layer: LayerLite,
   text: string,
   out: Record<string, PcbNetInfo>,
   viaSeen: Set<string>,
@@ -72,7 +73,15 @@ function scanLayerSvg(
     const m = attrs.match(new RegExp(`${name}="([^"]*)"`));
     return m ? unescapeXml(m[1]) : null;
   };
-  const isCopper = layer.endsWith(".Cu");
+  const isCopper = isCopperLayer(layer);
+  // The layer's own side, from the manifest's role table — an Altium stack has
+  // no "B.Cu" to match on, and every component would read as front-side.
+  const side = layerSide(layer) === "back" ? "back" : "front";
+  const name = layer.name;
+  const noteSide = (comp: string) => {
+    const prev = compSide[comp];
+    compSide[comp] = prev && prev !== side ? "both" : side;
+  };
 
   const tagRe = /<g ([^>]*data-primitive="(track|zone|pad|via|footprint)"[^>]*)>/g;
   let m: RegExpExecArray | null;
@@ -83,12 +92,16 @@ function scanLayerSvg(
       if (!isCopper) continue; // silk/fab bundles also carry footprints
       const comp = attr(attrs, "data-component");
       if (!comp) continue;
-      const side = layer.startsWith("B") ? "back" : "front";
-      const prev = compSide[comp];
-      compSide[comp] = prev && prev !== side ? "both" : side;
+      noteSide(comp);
       continue;
     }
     const net = attr(attrs, "data-net");
+    // A pad names its component directly when the renderer groups by primitive
+    // rather than by footprint, which is how the Altium layers are written.
+    if (isCopper && kind === "pad") {
+      const comp = attr(attrs, "data-component");
+      if (comp) noteSide(comp);
+    }
     if (!net || !isCopper) continue;
     const e = entry(net);
     if (kind === "via") {
@@ -99,7 +112,7 @@ function scanLayerSvg(
       }
       continue;
     }
-    if (!e.layers.includes(layer)) e.layers.push(layer);
+    if (!e.layers.includes(name)) e.layers.push(name);
     if (kind === "track") {
       // Geometry sits within the group right after the tag; a bounded window
       // keeps the scan from bleeding into the next element.
@@ -111,7 +124,7 @@ function scanLayerSvg(
       }
       const pts = win.match(/points="([^"]+)"/);
       if (pts)
-        e.lenByLayer[layer] = (e.lenByLayer[layer] ?? 0) + polylineLength(pts[1]);
+        e.lenByLayer[name] = (e.lenByLayer[name] ?? 0) + polylineLength(pts[1]);
     }
   }
 }
@@ -245,9 +258,9 @@ export const useDesignStore = create<DesignState>((set, get) => ({
     const viaSeen = new Set<string>();
     // Copper carries all the net/side facts; skip silk/mask/fab bundles (they are
     // fetched lazily when the PCB view mounts).
-    for (const layer of indexes.layers.filter((l) => l.name.endsWith(".Cu"))) {
+    for (const layer of indexes.layers.filter(isCopperLayer)) {
       try {
-        scanLayerSvg(layer.name, await getArtifact(layer.svg), nets, viaSeen, compSide);
+        scanLayerSvg(layer, await getArtifact(layer.svg), nets, viaSeen, compSide);
       } catch {
         /* missing artifact — index stays partial */
       }

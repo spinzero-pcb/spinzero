@@ -9,6 +9,8 @@ pub mod dump;
 pub mod layers;
 pub mod netlist;
 pub mod pcb;
+pub mod pcb_svg;
+pub mod sch_svg;
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
@@ -86,6 +88,10 @@ pub struct Unresolved {
     pub compile_mask_candidates_not_applied: usize,
     /// Project variants defined but not applied, so the DNP column is empty.
     pub variants_not_applied: Vec<String>,
+    /// Images a sheet LINKS to rather than embeds. The file lives on the
+    /// designer's own machine and is not in the design, so the frame is drawn
+    /// and the picture is not.
+    pub linked_images_not_embedded: usize,
     /// Component pins on a net of their own — no wire, label or port at their
     /// location. A connectivity-model problem shows up here as a number.
     pub unconnected_pins: usize,
@@ -121,10 +127,21 @@ pub fn is_altium_project(p: &Path) -> bool {
 /// `project` is a `.PrjPcb`, or a loose `.SchDoc` / `.PcbDoc` — a design with no
 /// project file compiles with **free-document** defaults, notably global net
 /// scope, which is not the board-project default.
+/// A project's sheets and everything read alongside them.
+pub struct Hierarchy {
+    pub name: String,
+    pub options: CompileOptions,
+    pub sheets: Vec<LoadedSheet>,
+    pub unresolved: Unresolved,
+    /// The project file's `[ParameterN]` entries — where a title block's
+    /// `=PRJ_Title` and its siblings resolve. Empty for a loose document.
+    pub project_params: BTreeMap<String, String>,
+}
+
 pub fn load_hierarchy(
     project: &Path,
     emit: &mut dyn FnMut(crate::pipeline::Msg),
-) -> Result<(String, CompileOptions, Vec<LoadedSheet>, Unresolved), String> {
+) -> Result<Hierarchy, String> {
     use crate::pipeline::Msg;
     let mut unresolved = Unresolved::default();
     let dir = project.parent().map(Path::to_path_buf).unwrap_or_default();
@@ -134,9 +151,11 @@ pub fn load_hierarchy(
         .map(|e| e.eq_ignore_ascii_case("PrjPcb"))
         .unwrap_or(false);
 
+    let mut project_params: BTreeMap<String, String> = BTreeMap::new();
     let (name, options, candidates) = if is_prj {
         let prj = Project::open(project)?;
         unresolved.variants_not_applied = prj.variant_names();
+        project_params = prj.parameters();
         let docs = prj.documents_with_ext(&dir, "SchDoc");
         (prj.name.clone(), prj.options.clone(), docs)
     } else {
@@ -266,7 +285,12 @@ pub fn load_hierarchy(
     for s in &out {
         unresolved.buses_not_expanded += s.sch.buses.len();
         unresolved.directives_not_applied += s.sch.param_sets.len();
-        unresolved.compile_mask_candidates_not_applied += s.sch.regions.len();
+        // Two record types mask a sheet: the FileHeader region and the blanket
+        // in the Additional stream. Counting only the first reports zero on a
+        // sheet that is visibly masked in Altium.
+        unresolved.compile_mask_candidates_not_applied += s.sch.regions.len() + s.sch.blankets.len();
+        unresolved.linked_images_not_embedded +=
+            s.sch.images.iter().filter(|i| i.data.is_empty()).count();
         for (t, n) in &s.sch.skipped {
             if HARNESS_RECORDS.contains(t) {
                 unresolved.harness_objects += n;
@@ -277,7 +301,7 @@ pub fn load_hierarchy(
                 .or_default() += n;
         }
     }
-    Ok((name, options, out, unresolved))
+    Ok(Hierarchy { name, options, sheets: out, unresolved, project_params })
 }
 
 /// Depth-first walk of the sheet hierarchy, assigning sequential sheet numbers.

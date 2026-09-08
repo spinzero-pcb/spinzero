@@ -114,6 +114,33 @@ impl Doc {
         }
         out
     }
+
+    /// The document's embedded files, by the path Altium recorded for each.
+    ///
+    /// A `Storage` record is a type byte, a Pascal-string source path, the
+    /// inflated byte count, and a zlib stream. The path is the only key an
+    /// image record has — `RECORD=30`'s `FileName` is the same string — so the
+    /// map is keyed by it verbatim, absolute drive letter and all.
+    ///
+    /// A record that does not inflate is skipped rather than failing the
+    /// document: a missing logo is not a reason to lose a schematic.
+    pub fn storage(&self) -> BTreeMap<String, Vec<u8>> {
+        use std::io::Read as _;
+        let mut out = BTreeMap::new();
+        for raw in self.records("Storage") {
+            let b = &raw.payload;
+            // [kind][name_len u8][name][inflated_len u32][zlib]
+            let Some(&len) = b.get(1) else { continue };
+            let start = 2 + len as usize;
+            let Some(name) = b.get(2..start).map(record::decode) else { continue };
+            let Some(z) = b.get(start + 4..) else { continue };
+            let mut data = Vec::new();
+            if flate2::read::ZlibDecoder::new(z).read_to_end(&mut data).is_ok() {
+                out.insert(name, data);
+            }
+        }
+        out
+    }
 }
 
 /// A stream's record-type histogram: how many records, and how many of each

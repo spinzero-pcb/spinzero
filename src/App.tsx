@@ -39,6 +39,7 @@ import { canvasRestore, measureNav, nav, pcbNav } from "./ui/canvas/navigator";
 import { isTypingTarget, resolveKey } from "./lib/keymap";
 import { IconChevron } from "./ui/icons";
 import type { Selection } from "./lib/design";
+import { outerCopper } from "./lib/layers";
 import { ipc, onCrunchEvent } from "./lib/ipc";
 import { checkForUpdates } from "./lib/updater";
 
@@ -56,7 +57,13 @@ function activeLayerForSelection(sel: NonNullable<Selection>) {
   } else {
     const dsg = sel.kind === "pin" ? sel.ref.designator : sel.ref;
     const side = pcb?.compSide[dsg];
-    if (side) layer = side === "back" ? "B.Cu" : "F.Cu";
+    // Resolve the outer copper layer by role, not by name: an Altium stack has
+    // no "F.Cu" and cross-probing would activate nothing.
+    if (side)
+      layer = outerCopper(
+        useDesignStore.getState().indexes?.layers ?? [],
+        side === "back" ? "back" : "front",
+      );
   }
   if (!layer) return;
   const pv = usePcbViewStore.getState();

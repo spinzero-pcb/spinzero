@@ -142,14 +142,25 @@ describe("diff helpers", () => {
         ch({ id: "b", group: "silk", kind: "modified", anchors: { pcb: { layers: ["F.SilkS"] } } }),
         ch({ id: "c", group: "routing", kind: "removed", anchors: { pcb: { layers: ["B.Cu"] } } }),
       ];
-      expect(pcbLayerUnion(changes, known)).toEqual(["B.Cu", "F.SilkS", "Edge.Cuts"]);
+      expect(pcbLayerUnion(changes, known, "Edge.Cuts")).toEqual(["B.Cu", "F.SilkS", "Edge.Cuts"]);
+    });
+    // An Altium board draws its profile on a mechanical layer, so the outline
+    // that frames the copper is named by the layer table, not by a constant.
+    it("rides along whichever layer the board calls its outline", () => {
+      const altium = ["L1_Top", "L4_Bot", "Top Overlay", "Board Shape"];
+      const changes = [
+        ch({ id: "a", group: "routing", kind: "added", anchors: { pcb: { layers: ["L4_Bot"] } } }),
+      ];
+      expect(pcbLayerUnion(changes, altium, "Board Shape")).toEqual(["L4_Bot", "Board Shape"]);
+      // With no outline layer the union is just the changes' own layers.
+      expect(pcbLayerUnion(changes, altium, null)).toEqual(["L4_Bot"]);
     });
     it("ignores layers the board doesn't have and returns [] when nothing lands", () => {
       const changes = [
         ch({ id: "a", group: "routing", kind: "added", anchors: { pcb: { layers: ["In9.Cu"] } } }),
         ch({ id: "b", group: "net", kind: "added", anchors: { schematic: { sheet: 1, uuids: [] } } }),
       ];
-      expect(pcbLayerUnion(changes, known)).toEqual([]);
+      expect(pcbLayerUnion(changes, known, "Edge.Cuts")).toEqual([]);
     });
   });
 });

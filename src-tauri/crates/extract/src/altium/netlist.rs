@@ -508,36 +508,26 @@ mod tests {
         Pin {
             number: number.into(),
             name: name.into(),
-            description: String::new(),
             electrical: 4,
             conglomerate,
             length: 0,
             at,
             part_id: 1,
-            display_mode: 0,
             uuid: format!("pin-{number}-{}-{}", at.x, at.y),
-            hidden_net_name: String::new(),
+            ..Default::default()
         }
     }
 
     fn comp(designator: &str, pins: Vec<Pin>) -> Component {
         Component {
             library_ref: "R".into(),
-            description: String::new(),
             designator: designator.into(),
-            designator_uuid: String::new(),
             part_count: 1,
             current_part_id: 1,
-            display_mode: 0,
             kind: ComponentKind::Standard,
-            at: Pt::default(),
             uuid: format!("c-{designator}"),
-            source_library: String::new(),
-            database_table: String::new(),
-            footprint: String::new(),
             pins,
-            parameters: Vec::new(),
-            bbox: None,
+            ..Default::default()
         }
     }
 
@@ -556,8 +546,8 @@ mod tests {
                 comp("R1", vec![pin("2", "~", p(100, 100), 32)]),
                 comp("R2", vec![pin("1", "~", p(100, 140), 32)]),
             ],
-            wires: vec![Wire { pts: vec![p(100, 100), p(100, 140)], uuid: "w1".into() }],
-            net_labels: vec![NetLabel { at: p(100, 100), text: "MID".into(), uuid: "l1".into() }],
+            wires: vec![Wire { pts: vec![p(100, 100), p(100, 140)], uuid: "w1".into(), ..Default::default() }],
+            net_labels: vec![NetLabel { at: p(100, 100), text: "MID".into(), uuid: "l1".into(), ..Default::default() }],
             ..SchDoc::default()
         };
         let n = nets(&sch, &CompileOptions::board_project());
@@ -578,7 +568,7 @@ mod tests {
                 comp("C19", vec![pin("2", "~", p(100, 100), 32)]),
                 comp("R4", vec![pin("1", "~", p(100, 140), 32)]),
             ],
-            wires: vec![Wire { pts: vec![p(100, 100), p(100, 140)], uuid: "w1".into() }],
+            wires: vec![Wire { pts: vec![p(100, 100), p(100, 140)], uuid: "w1".into(), ..Default::default() }],
             ..SchDoc::default()
         };
         let n = nets(&sch, &CompileOptions::board_project());
@@ -595,9 +585,9 @@ mod tests {
                 comp("R1", vec![pin("1", "~", p(100, 100), 32)]),
                 comp("R2", vec![pin("1", "~", p(100, 140), 32)]),
             ],
-            wires: vec![Wire { pts: vec![p(100, 100), p(100, 140)], uuid: "w1".into() }],
-            net_labels: vec![NetLabel { at: p(100, 100), text: "RAIL".into(), uuid: "l1".into() }],
-            power_ports: vec![PowerPort { at: p(100, 140), text: "P5V".into(), style: 2, uuid: "pp1".into() }],
+            wires: vec![Wire { pts: vec![p(100, 100), p(100, 140)], uuid: "w1".into(), ..Default::default() }],
+            net_labels: vec![NetLabel { at: p(100, 100), text: "RAIL".into(), uuid: "l1".into(), ..Default::default() }],
+            power_ports: vec![PowerPort { at: p(100, 140), text: "P5V".into(), style: 2, uuid: "pp1".into(), ..Default::default() }],
             ..SchDoc::default()
         };
         let opts = CompileOptions::board_project();
@@ -615,7 +605,7 @@ mod tests {
                 comp("R1", vec![pin("1", "~", p(60, 620), 32)]),
                 comp("R2", vec![pin("1", "~", p(130, 620), 32)]),
             ],
-            ports: vec![Port { at: p(60, 620), width: 70, name: "IN_P".into(), io_type: 2, uuid: "prt".into() }],
+            ports: vec![Port { at: p(60, 620), width: 70, name: "IN_P".into(), io_type: 2, uuid: "prt".into(), ..Default::default() }],
             ..SchDoc::default()
         };
         let n = nets(&sch, &CompileOptions::board_project());
@@ -642,13 +632,15 @@ mod tests {
                     distance_from_top: 5,
                     io_type: 2,
                     uuid: "e1".into(),
+                    ..Default::default()
                 }],
+                ..Default::default()
             }],
             ..SchDoc::default()
         };
         let child = SchDoc {
             components: vec![comp("C1", vec![pin("1", "~", p(60, 620), 32)])],
-            ports: vec![Port { at: p(60, 620), width: 70, name: "SIG".into(), io_type: 2, uuid: "prt".into() }],
+            ports: vec![Port { at: p(60, 620), width: 70, name: "SIG".into(), io_type: 2, uuid: "prt".into(), ..Default::default() }],
             ..SchDoc::default()
         };
         let opts = CompileOptions::board_project();
@@ -670,7 +662,7 @@ mod tests {
                 comp("U1", vec![hidden]),
                 comp("C1", vec![pin("1", "~", p(200, 200), 32)]),
             ],
-            power_ports: vec![PowerPort { at: p(200, 200), text: "VDD".into(), style: 2, uuid: "pp".into() }],
+            power_ports: vec![PowerPort { at: p(200, 200), text: "VDD".into(), style: 2, uuid: "pp".into(), ..Default::default() }],
             ..SchDoc::default()
         };
         let mut d = SheetDiagnostics::default();
@@ -692,9 +684,9 @@ mod tests {
                 comp("R3", vec![pin("1", "~", p(500, 500), 32)]),
             ],
             power_ports: vec![
-                PowerPort { at: p(100, 100), text: "VCC".into(), style: 2, uuid: "a".into() },
-                PowerPort { at: p(300, 300), text: "Vcc".into(), style: 2, uuid: "b".into() },
-                PowerPort { at: p(500, 500), text: "VCC".into(), style: 2, uuid: "c".into() },
+                PowerPort { at: p(100, 100), text: "VCC".into(), style: 2, uuid: "a".into(), ..Default::default() },
+                PowerPort { at: p(300, 300), text: "Vcc".into(), style: 2, uuid: "b".into(), ..Default::default() },
+                PowerPort { at: p(500, 500), text: "VCC".into(), style: 2, uuid: "c".into(), ..Default::default() },
             ],
             ..SchDoc::default()
         };

@@ -174,6 +174,21 @@ impl Project {
             .collect()
     }
 
+    /// Project-level parameters (`[ParameterN] Name= / Value=`), the `PRJ_*`
+    /// values a title block's `=Name` special strings resolve against.
+    pub fn parameters(&self) -> BTreeMap<String, String> {
+        let mut out = BTreeMap::new();
+        for (sec, kv) in &self.sections {
+            if !sec.to_ascii_uppercase().starts_with("PARAMETER") {
+                continue;
+            }
+            if let Some(name) = kv.get("NAME").filter(|s| !s.is_empty()) {
+                out.insert(name.clone(), kv.get("VALUE").cloned().unwrap_or_default());
+            }
+        }
+        out
+    }
+
     /// Variant names defined by the project (`[ProjectVariant…] Description=`).
     /// Until variants are applied, this is what the diagnostics block reports.
     pub fn variant_names(&self) -> Vec<String> {

@@ -463,7 +463,7 @@ export function PcbGlView({ visible }: { visible: boolean }) {
   // Also drop any net-class isolation — its snapshot refers to the old layer set,
   // so restoring it would clobber the fresh defaults (reset() leaves layers alone).
   useEffect(() => {
-    resetForLayers(indexes?.layers.map((l) => l.name) ?? []);
+    resetForLayers(indexes?.layers ?? []);
     useNetClassStore.getState().reset();
   }, [indexes, resetForLayers]);
 

@@ -40,6 +40,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -371,6 +372,149 @@ def our_geometry(cfg: Config, design: Design, out: Path) -> dict[str, Any] | Non
     if not path.exists():
         return None
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def our_render(cfg: Config, design: Design, out: Path) -> dict[str, Any] | None:
+    """Our rendered sheets, reduced to per-sheet object-class counts."""
+    proc = run([str(cfg.extract), "design", str(design.entry), "-o", str(out)])
+    if proc.returncode != 0:
+        return None
+    manifest = out / "design_review_manifest.json"
+    if not manifest.exists():
+        return None
+    doc = json.loads(manifest.read_text(encoding="utf-8"))
+    sheets: dict[str, dict[str, int]] = {}
+    for entry in doc.get("schematic_svgs", []):
+        path = out / entry["file"]
+        if not path.exists():
+            continue
+        sheets[stem_key(entry.get("sheet_name", entry["file"]))] = index_our_svg(
+            path.read_text(encoding="utf-8")
+        )
+    return {"sheets": sheets}
+
+
+def stem_key(name: str) -> str:
+    """A sheet's identity across the two sides: the document name without its
+    extension, lower-cased.
+
+    Only a trailing `.SchDoc` is stripped, and only that. `Path.stem` drops
+    whatever follows the LAST dot, which turns `REF_5BR3995BZ_16W1 V1.0` into
+    `… V1` on one side and leaves it whole on the other, so the two sides stop
+    joining and every sheet reads as missing.
+    """
+    name = Path(name).name
+    if name.lower().endswith(".schdoc"):
+        name = name[: -len(".schdoc")]
+    return name.lower()
+
+
+# Our `data-primitive` (plus `data-kind` where it splits a class) mapped onto the
+# comparison's own vocabulary. Only classes BOTH sides express are listed; the
+# rest are reported as not compared rather than silently dropped.
+OUR_CLASS = {
+    ("symbol", ""): "component",
+    ("pin", ""): "pin",
+    ("wire", ""): "wire",
+    ("bus", ""): "bus",
+    ("label", ""): "netlabel",
+    ("port", "global"): "port",
+    ("port", "hier"): "sheetentry",
+    ("power-symbol", ""): "power",
+    ("sheet-symbol", ""): "sheet",
+    ("netclass-flag", ""): "parameterset",
+    ("image", ""): "image",
+    ("graphic", "compile-mask"): "blanket",
+    # A `RECORD=211` region masks a sheet too, but it is a different record and
+    # the reference has no kind for it, so it is not compared.
+    ("image", "linked"): "image",
+    ("text", "designator"): "designator",
+    ("text", "field"): "parameter",
+}
+
+PRIMITIVE_RE = re.compile(r'<g ([^>]*?)data-primitive="([a-z-]+)"([^>]*)>')
+KIND_RE = re.compile(r'data-kind="([a-z-]+)"')
+UUID_RE = re.compile(r'data-uuid="([^"]*)"')
+
+
+def index_our_svg(svg: str) -> dict[str, list[str]]:
+    """Our drawn objects, by class, each named by the `UniqueID` the file gave it.
+
+    Identity rather than a count: a difference then says WHICH object, and a
+    class whose totals happen to match for two opposite reasons stops looking
+    like agreement.
+    """
+    out: dict[str, list[str]] = {}
+    for before, primitive, after in PRIMITIVE_RE.findall(svg):
+        attrs = before + after
+        kind = KIND_RE.search(attrs)
+        key = OUR_CLASS.get((primitive, kind.group(1) if kind else ""))
+        if key is None and primitive == "power-symbol":
+            # A power port's `data-kind` is its Altium style number, not a class.
+            key = "power"
+        if key is None:
+            continue
+        uuid = UUID_RE.search(attrs)
+        out.setdefault(key, []).append(uuid.group(1) if uuid else "")
+    return out
+
+
+# The reference's on-screen record kinds, in the same vocabulary. `parameter`
+# and `designator` records exist for every parameter a part carries, drawn or
+# not, so they are counted only when the record actually draws a string — the
+# same rule M2 applies to board text with nothing to draw.
+REF_CLASS = {
+    "component": "component",
+    "pin": "pin",
+    "wire": "wire",
+    "bus": "bus",
+    "netlabel": "netlabel",
+    "port": "port",
+    "sheetentry": "sheetentry",
+    "power": "power",
+    "sheet_symbol": "sheet",
+    "sheetsymbol": "sheet",
+    "parameterset": "parameterset",
+    "image": "image",
+    "blanket": "blanket",
+    "designator": "designator",
+    "parameter": "parameter",
+}
+TEXT_CLASSES = {"designator", "parameter"}
+
+
+def ref_render(cfg: Config, design: Design, out: Path) -> dict[str, Any] | None:
+    """The reference's on-screen geometry for every sheet, reduced to the same
+    per-sheet class counts.
+
+    `sch-ir` is Altium's own drawing-operation oracle rather than a second SVG,
+    which is why it can be compared at all: an SVG's element count depends on
+    how each side chose to draw a symbol, and the operation record does not.
+    """
+    proc = run([cfg.reference, "sch-ir", str(design.entry), "-o", str(out)])
+    if proc.returncode != 0:
+        return None
+    sheets: dict[str, dict[str, int]] = {}
+    for path in sorted(out.rglob("*.gotir.json")):
+        try:
+            doc = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            continue
+        counts: dict[str, list[str]] = {}
+        for record in doc.get("records", []):
+            key = REF_CLASS.get(str(record.get("kind", "")).lower())
+            if key is None:
+                continue
+            if key in TEXT_CLASSES and not any(
+                op.get("type") == "gotString" for op in record.get("operations", [])
+            ):
+                continue
+            # `handle` is `<document>\\<UniqueID>`, which is the same id our
+            # `data-uuid` carries — so the two sides can be joined object by
+            # object instead of only counted.
+            counts.setdefault(key, []).append(str(record.get("handle", "")).rsplit("\\", 1)[-1])
+        sheets[stem_key(Path(doc.get("source_path", path.name)).name)] = counts
+    return {"sheets": sheets} if sheets else None
 
 
 def ref_board(cfg: Config, design: Design, out: Path) -> dict[str, Any] | None:
@@ -1417,6 +1561,85 @@ def phase_m2(
             compare_m2_centroids(ours, pnp, theirs.get("origin") or [], report)
 
 
+def compare_m3_render(
+    ours: dict[str, Any], theirs: dict[str, Any], report: Report, loose: bool = False
+) -> None:
+    """Per-sheet, per-class object counts, both sides in the same vocabulary.
+
+    A renderer's failure mode is silence: a symbol that never reaches the page,
+    a class of object nobody looks for, an owner rule that quietly drops half a
+    sheet's parameters. A count per class per sheet is the smallest thing that
+    catches all three.
+    """
+    our_sheets = ours.get("sheets", {})
+    their_sheets = theirs.get("sheets", {})
+    for name in sorted(set(their_sheets) - set(our_sheets)):
+        report.add("sheet the reference renders and we do not", name)
+    extra = sorted(set(our_sheets) - set(their_sheets))
+    if extra and loose:
+        # A design with no project file has no document list, so we walk every
+        # `.SchDoc` beside the named one — a project-less design is still a
+        # design (plan §7) — while the reference renders only the file it was
+        # handed. That is an intended divergence, not a difference.
+        report.note(
+            f"loose document: we render {len(extra)} further sheet(s) beside it "
+            f"({', '.join(extra[:3])}{'…' if len(extra) > 3 else ''})"
+        )
+    else:
+        for name in extra:
+            report.add("sheet we render and the reference does not", name)
+
+    for name in sorted(set(our_sheets) & set(their_sheets)):
+        mine, yours = our_sheets[name], their_sheets[name]
+        for cls in sorted(set(mine) | set(yours)):
+            ours_ids, their_ids = mine.get(cls, []), yours.get(cls, [])
+            a, b = set(ours_ids), set(their_ids)
+            # An id neither side kept (an object the file left unnamed) can only
+            # be compared by count.
+            if "" in a or "" in b or not a or not b:
+                if len(ours_ids) != len(their_ids):
+                    report.add(
+                        f"{cls} count on a sheet",
+                        f"{name}: ours {len(ours_ids)}, reference {len(their_ids)}",
+                    )
+                continue
+            for uuid in sorted(a - b):
+                report.add(f"{cls} we draw and the reference does not", f"{name}: {uuid}")
+            for uuid in sorted(b - a):
+                report.add(f"{cls} the reference draws and we do not", f"{name}: {uuid}")
+            dup = len(ours_ids) - len(a)
+            if dup and len(ours_ids) != len(their_ids):
+                report.add(
+                    f"{cls} drawn more than once",
+                    f"{name}: ours {len(ours_ids)} for {len(a)} objects",
+                )
+
+
+def phase_m3(
+    cfg: Config, design: Design, report: Report, oracle: Oracle, entry: dict, clock: Clock
+) -> None:
+    with tempfile.TemporaryDirectory(prefix="altium-diff-m3-") as tmp:
+        root = Path(tmp)
+        with clock.measure("ours:render"):
+            ours = our_render(cfg, design, root / "ours-render")
+        theirs = ask(
+            oracle, entry, "m3:render", design.entry,
+            lambda: ref_render(cfg, design, root / "ref-render"),
+            clock, "ref:render",
+        )
+        if ours is None:
+            report.add("design we cannot render", design.name)
+            return
+        if not theirs:
+            report.add("design the reference cannot render", design.name)
+            return
+        compare_m3_render(ours, theirs, report, loose=design.project is None)
+        report.note(
+            "board layers are compared by M2's geometry, which the layer SVGs are "
+            "rendered from; the plan's raster half is not built (see the notes)"
+        )
+
+
 def phase_m0(
     cfg: Config, design: Design, report: Report, oracle: Oracle, entry: dict, clock: Clock
 ) -> None:
@@ -1558,7 +1781,7 @@ def main(argv: list[str]) -> int:
             pass
 
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--phase", choices=("m0", "m1", "m2", "all"), default="all")
+    parser.add_argument("--phase", choices=("m0", "m1", "m2", "m3", "all"), default="all")
     parser.add_argument("--design", help="substring of the design name to run alone")
     parser.add_argument("--corpus")
     parser.add_argument("--reference", help="reference CLI")
@@ -1620,7 +1843,9 @@ def main(argv: list[str]) -> int:
         clock = Clock()
         clocks[design.name] = clock
         design_result: dict[str, Any] = {}
-        for phase, runner in (("m0", phase_m0), ("m1", phase_m1), ("m2", phase_m2)):
+        for phase, runner in (
+            ("m0", phase_m0), ("m1", phase_m1), ("m2", phase_m2), ("m3", phase_m3)
+        ):
             if args.phase not in (phase, "all"):
                 continue
             report = Report()

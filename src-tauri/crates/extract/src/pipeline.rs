@@ -588,8 +588,8 @@ fn read_pcb_pad_net(pcb_path: &Path) -> BTreeMap<(String, String), String> {
 ///
 /// Everything after the model is the KiCad path's code: the same `Design`
 /// struct, the same manifest, the same writer. Only the front half differs.
-/// SVGs, board geometry and the schematic geometry are M2/M3, so the manifest
-/// carries no SVG entries yet — which the app tolerates.
+/// The per-element schematic geometry is M4, so that manifest key stays absent
+/// and the diff falls back to its one-row-per-sheet behaviour.
 fn run_design_altium(
     project: &Path,
     out_dir: &Path,
@@ -600,7 +600,8 @@ fn run_design_altium(
         .and_then(|e| e.to_str())
         .map(|e| e.eq_ignore_ascii_case("PrjPcb"))
         .unwrap_or(false);
-    let (name, options, sheets, unresolved) = crate::altium::load_hierarchy(project, emit)?;
+    let h = crate::altium::load_hierarchy(project, emit)?;
+    let crate::altium::Hierarchy { name, options, sheets, unresolved, project_params } = h;
     let filename = project
         .file_name()
         .and_then(|s| s.to_str())
@@ -638,9 +639,13 @@ fn run_design_altium(
     // absent or unreadable leaves the design model intact — a schematic-only
     // review is a real review — and says so rather than failing the run.
     let mut source = source;
+    let mut pcb_svgs: Vec<serde_json::Value> = Vec::new();
     let pcb_geometry = match crate::altium::pcb::board_beside(project) {
         Some(board) => match crate::altium::pcb::extract_pcb(&board, out_dir, emit) {
-            Ok((rel, summary)) => {
+            Ok(artifacts) => {
+                let (rel, summary) = (artifacts.geometry, artifacts.summary);
+                pcb_svgs = artifacts.svgs;
+                model.theme.board = artifacts.theme;
                 emit(Msg::Progress(format!(
                     "board {}: {} layers, {} components, {} tracks, {} pads, {} vias",
                     board.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
@@ -682,6 +687,49 @@ fn run_design_altium(
     };
     model.source = serde_json::to_value(&source).ok();
 
+    // The schematic palette is the document's own: Altium keeps a colour on
+    // every object rather than in an application theme, so the class defaults
+    // are the modal colour each class actually uses (plan §6.2).
+    let docs: Vec<&eda_parse_altium::SchDoc> = sheets.iter().map(|s| &s.sch).collect();
+    model.theme.schematic = crate::altium::sch_svg::palette(&docs);
+    if !model.theme.is_empty() {
+        emit(Msg::Progress(format!(
+            "theme: {} schematic + {} board colours from the design",
+            model.theme.schematic.len(),
+            model.theme.board.len()
+        )));
+    }
+
+    let sch_dir = out_dir.join("schematics");
+    std::fs::create_dir_all(&sch_dir).map_err(|e| e.to_string())?;
+    let total = sheets.len() as i64;
+    let mut schematic_svgs = Vec::new();
+    for s in &sheets {
+        let display = s.info.filename.trim_end_matches(".SchDoc").to_string();
+        let file_name = format!("{:02}_{}.svg", s.info.sheet_number, slug(&display));
+        let ctx = crate::altium::sch_svg::SheetCtx {
+            number: s.info.sheet_number,
+            total,
+            sheet_path: &s.info.sheet_path,
+            file_name: &s.info.filename,
+            full_path: &s.info.path,
+            project_name: &name,
+            project_params: &project_params,
+        };
+        let svg = crate::altium::sch_svg::render_sheet(&s.sch, &ctx, &model.theme.schematic);
+        std::fs::write(sch_dir.join(&file_name), svg).map_err(|e| e.to_string())?;
+        let rel = format!("schematics/{file_name}");
+        emit(Msg::Artifact(rel.clone()));
+        schematic_svgs.push(SchematicSvg {
+            file: rel,
+            sheet_number: s.info.sheet_number,
+            sheet_name: display,
+            sheet_path: s.info.sheet_path.clone(),
+            page: s.info.page.clone(),
+        });
+    }
+    emit(Msg::Progress(format!("schematics: {} sheet svgs", schematic_svgs.len())));
+
     let design_file = format!("{name}_design.json");
     let json = serde_json::to_string_pretty(&model).map_err(|e| e.to_string())?;
     std::fs::write(out_dir.join(&design_file), json).map_err(|e| e.to_string())?;
@@ -690,8 +738,8 @@ fn run_design_altium(
     let manifest = Manifest {
         schema: crate::MANIFEST_SCHEMA.to_string(),
         design_json: design_file,
-        schematic_svgs: Vec::new(),
-        pcb_svgs: Vec::new(),
+        schematic_svgs,
+        pcb_svgs,
         pcb_geometry,
         schematic_geometry: None,
     };
@@ -719,7 +767,8 @@ fn onoff(b: bool) -> &'static str {
 pub fn load_components(project: &Path) -> Result<(String, Vec<Component>), String> {
     if crate::altium::is_altium_project(project) {
         let mut sink = |_: Msg| {};
-        let (name, opts, sheets, _u) = crate::altium::load_hierarchy(project, &mut sink)?;
+        let h = crate::altium::load_hierarchy(project, &mut sink)?;
+        let (name, opts, sheets) = (h.name, h.options, h.sheets);
         let mut components = crate::altium::build_components(&sheets, &opts);
         components.sort_by(|a, b| a.designator.cmp(&b.designator));
         return Ok((name, components));

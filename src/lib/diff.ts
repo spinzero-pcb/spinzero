@@ -258,10 +258,14 @@ export function hasBomAnchor(c: Change): boolean {
 }
 
 /** The union of PCB layers the changes land on — the "relevant layers" the diff view
- *  shows by default (overlay-all). Edge.Cuts rides along when the board has it so the
- *  outline keeps framing the copper. Returns [] when no change names a layer (then the
+ *  shows by default (overlay-all). The board outline rides along when the board has one
+ *  so it keeps framing the copper. Returns [] when no change names a layer (then the
  *  caller leaves the user's layer view alone). Pure. */
-export function pcbLayerUnion(changes: Change[], knownLayers: string[]): string[] {
+export function pcbLayerUnion(
+  changes: Change[],
+  knownLayers: string[],
+  edgeLayer?: string | null,
+): string[] {
   const known = new Set(knownLayers);
   const union = new Set<string>();
   for (const c of changes) {
@@ -269,7 +273,10 @@ export function pcbLayerUnion(changes: Change[], knownLayers: string[]): string[
       if (known.has(l)) union.add(l);
     }
   }
-  if (union.size > 0 && known.has("Edge.Cuts")) union.add("Edge.Cuts");
+  // The outline keeps framing the copper. Which layer that is comes from the
+  // board's own table (see `edgeLayer` in lib/layers) — Altium draws the profile
+  // on a mechanical layer, so testing for "Edge.Cuts" finds nothing there.
+  if (union.size > 0 && edgeLayer && known.has(edgeLayer)) union.add(edgeLayer);
   return knownLayers.filter((l) => union.has(l)); // known-table order, deterministic
 }
 

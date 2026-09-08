@@ -242,7 +242,7 @@ mod tests {
     use eda_parse_altium::sch::{ComponentKind, Pt};
 
     fn param(name: &str, text: &str) -> Param {
-        Param { name: name.into(), text: text.into(), hidden: false, uuid: String::new() }
+        Param { name: name.into(), text: text.into(), ..Default::default() }
     }
 
     fn comp(designator: &str, params: Vec<Param>, kind: ComponentKind) -> SchComponent {
@@ -260,9 +260,8 @@ mod tests {
             source_library: "PCBLibraryData.SVNDbLib".into(),
             database_table: "TPartsAll".into(),
             footprint: "RESC1608X55N".into(),
-            pins: Vec::new(),
             parameters: params,
-            bbox: None,
+            ..Default::default()
         }
     }
 
@@ -321,15 +320,12 @@ mod tests {
         let pin = |n: &str, part: i64| sch::Pin {
             number: n.into(),
             name: n.into(),
-            description: String::new(),
             electrical: 4,
             conglomerate: 32,
             length: 10,
-            at: Pt::default(),
             part_id: part,
-            display_mode: 0,
             uuid: format!("p{n}"),
-            hidden_net_name: String::new(),
+            ..Default::default()
         };
         let mut a = comp("U1", vec![], ComponentKind::Standard);
         a.pins = vec![pin("1", 1), pin("2", 1)];
@@ -370,15 +366,13 @@ mod tests {
         let pin = |n: &str, mode: i64| sch::Pin {
             number: n.into(),
             name: n.into(),
-            description: String::new(),
             electrical: 4,
             conglomerate: 32,
             length: 10,
-            at: Pt::default(),
             part_id: 1,
             display_mode: mode,
             uuid: format!("p{n}m{mode}"),
-            hidden_net_name: String::new(),
+            ..Default::default()
         };
         let mut c = comp("R1", vec![], ComponentKind::Standard);
         c.pins = vec![pin("1", 0), pin("2", 0), pin("1", 1), pin("2", 1), pin("1", 2), pin("2", 2)];

@@ -85,14 +85,23 @@ the reference's API, and it runs inside the reference's own interpreter.
 | M0 | per stream: byte length, record count, record counts by type; the typed primitive counts for the board's block-framed streams; and the decoded key/value map of every text record that carries a `%UTF8%` key, an escaped pipe, or a non-ASCII byte |
 | M1 | component set keyed by designator (value, footprint, library ref, description, pin count, parameter key set **and** parameter values); net set keyed by name with sorted `DESIGNATOR.PIN` membership; hierarchy depth; the BOM row set as a partition of designators |
 | M2 | layer table and copper stack order; primitive counts per layer; pad and via geometry index by index (position, size, shape, corner radius, drill, rotation, designator, plating, net); component centroids and rotations against Altium's own pick-and-place |
+| M3 | the drawn objects of every sheet, by class, joined **by `UniqueID`** rather than by count — component, pin, wire, bus, net label, port, sheet entry, power port, sheet symbol, parameter set, blanket, image, designator and parameter |
 
 M2 asks the reference two questions: `json-dump` of the `.PcbDoc`, and
 `pnp --position-mode altium-pick-place`, which is the export a component centroid
 has to agree with (plan corner case 23). A design with no `.PrjPcb` gets no
 pick-and-place and says so.
 
-M3–M4 rows of the plan's table are not implemented yet; add them beside
-`compare_m2_board` as those milestones land.
+M3 asks `sch-ir`, which is Altium's own **on-screen geometry oracle** — the
+drawing operations, not a second SVG. That matters: an SVG's element count
+depends on how each side chose to draw a symbol, and the operation record does
+not. Every record carries the object's `UniqueID` in its handle, so the two
+sides are joined object by object and a difference names the object rather than
+a number. Board layers have no M3 row of their own: the layer SVGs are rendered
+from the geometry document M2 already compares.
+
+The M4 row is not implemented yet; add it beside `compare_m3_render` as that
+milestone lands.
 
 ## Normalisation, and what it is allowed to absorb
 

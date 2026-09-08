@@ -41,17 +41,25 @@ describe("isWorksheetLayer", () => {
   });
 });
 
+/** A KiCad bundle's layer row: no `role`, so these exercise the name fallback
+ *  every pre-Altium bundle still relies on. */
+const L = (...names: string[]) => names.map((name) => ({ name, svg: `${name}.svg` }));
+
+/** An Altium bundle's row: the designer's own name plus the review role, which
+ *  is the only thing that can classify it. */
+const A = (name: string, role: string, side?: string) => ({ name, svg: `${name}.svg`, role, side });
+
 describe("pcbViewStore.resetForLayers", () => {
   beforeEach(() => {
-    usePcbViewStore.setState({ active: null, hidden: new Set(), known: [] });
+    usePcbViewStore.setState({ active: null, hidden: new Set(), known: [], edge: null });
   });
 
   it("hides documentation/user + non-essential layers by default, shows copper/silk/edge", () => {
-    usePcbViewStore.getState().resetForLayers([
+    usePcbViewStore.getState().resetForLayers(L(
       "F.Cu", "B.Cu", "F.SilkS", "Edge.Cuts",
       "F.Fab", "F.Mask", "F.Paste", "F.CrtYd", "F.Adhes",
       "User.3", "Dwgs.User", "Margin",
-    ]);
+    ));
     const { hidden } = usePcbViewStore.getState();
     // Shown by default.
     for (const l of ["F.Cu", "B.Cu", "F.SilkS", "Edge.Cuts"]) expect(hidden.has(l)).toBe(false);
@@ -61,35 +69,64 @@ describe("pcbViewStore.resetForLayers", () => {
   });
 
   it("defaults the active layer to F.Cu on first load", () => {
-    usePcbViewStore.setState({ active: null, hidden: new Set(), known: [] });
-    usePcbViewStore.getState().resetForLayers(["F.Cu", "B.Cu", "Edge.Cuts"]);
+    usePcbViewStore.setState({ active: null, hidden: new Set(), known: [], edge: null });
+    usePcbViewStore.getState().resetForLayers(L("F.Cu", "B.Cu", "Edge.Cuts"));
     expect(usePcbViewStore.getState().active).toBe("F.Cu");
+    expect(usePcbViewStore.getState().edge).toBe("Edge.Cuts");
   });
 
-  it("falls back to the F.Cu default when the active layer no longer exists, keeps a surviving one", () => {
-    // A stale active layer is replaced by the F.Cu default (when the board has one).
-    usePcbViewStore.setState({ active: "User.9", hidden: new Set(), known: [] });
-    usePcbViewStore.getState().resetForLayers(["F.Cu", "B.Cu"]);
+  // An Altium stack has no layer called F.Cu and draws its profile on a
+  // mechanical layer, so a board that classified layers by NAME opened with
+  // nothing active, nothing hidden, and no outline riding along in the diff.
+  it("classifies an Altium stack by role, not by KiCad's names", () => {
+    usePcbViewStore.setState({ active: null, hidden: new Set(), known: [], edge: null });
+    usePcbViewStore.getState().resetForLayers([
+      A("L1_Top", "copper", "front"),
+      A("L2_GND", "copper", "inner"),
+      A("L4_Bot", "copper", "back"),
+      A("Top Overlay", "silkscreen", "front"),
+      A("Top Solder", "mask", "front"),
+      A("Board Shape", "edge"),
+      A("M15 (CMP_Courtyard_Top)", "user"),
+    ]);
+    const { active, hidden, edge } = usePcbViewStore.getState();
+    expect(active).toBe("L1_Top");
+    expect(edge).toBe("Board Shape");
+    for (const l of ["L1_Top", "L2_GND", "L4_Bot", "Top Overlay", "Board Shape"])
+      expect(hidden.has(l)).toBe(false);
+    for (const l of ["Top Solder", "M15 (CMP_Courtyard_Top)"]) expect(hidden.has(l)).toBe(true);
+  });
+
+  it("falls back to the front-copper default when the active layer no longer exists, keeps a surviving one", () => {
+    // A stale active layer is replaced by the front-copper default.
+    usePcbViewStore.setState({ active: "User.9", hidden: new Set(), known: [], edge: null });
+    usePcbViewStore.getState().resetForLayers(L("F.Cu", "B.Cu"));
     expect(usePcbViewStore.getState().active).toBe("F.Cu");
 
     // A surviving non-default active layer is preserved, not forced back to F.Cu.
-    usePcbViewStore.setState({ active: "B.Cu", hidden: new Set(), known: ["F.Cu", "B.Cu"] });
-    usePcbViewStore.getState().resetForLayers(["F.Cu", "B.Cu"]);
+    usePcbViewStore.setState({ active: "B.Cu", hidden: new Set(), known: ["F.Cu", "B.Cu"], edge: null });
+    usePcbViewStore.getState().resetForLayers(L("F.Cu", "B.Cu"));
     expect(usePcbViewStore.getState().active).toBe("B.Cu");
 
-    // No F.Cu on the board → nothing forced (natural board order).
-    usePcbViewStore.setState({ active: "X", hidden: new Set(), known: [] });
-    usePcbViewStore.getState().resetForLayers(["B.Cu", "Edge.Cuts"]);
+    // No front copper on the board → the first copper layer, which is a layer
+    // the reviewer can see rather than the blank board the old default gave.
+    usePcbViewStore.setState({ active: "X", hidden: new Set(), known: [], edge: null });
+    usePcbViewStore.getState().resetForLayers(L("B.Cu", "Edge.Cuts"));
+    expect(usePcbViewStore.getState().active).toBe("B.Cu");
+
+    // Nothing but documentation → nothing forced.
+    usePcbViewStore.setState({ active: "X", hidden: new Set(), known: [], edge: null });
+    usePcbViewStore.getState().resetForLayers(L("Dwgs.User"));
     expect(usePcbViewStore.getState().active).toBeNull();
   });
 
   it("does not re-hide a layer the user already chose to show on a later revision", () => {
     // First open hides F.Fab by default…
-    usePcbViewStore.getState().resetForLayers(["F.Cu", "F.Fab"]);
+    usePcbViewStore.getState().resetForLayers(L("F.Cu", "F.Fab"));
     expect(usePcbViewStore.getState().hidden.has("F.Fab")).toBe(true);
     // …user shows it, then a new revision re-runs resetForLayers with the same set.
     usePcbViewStore.getState().showLayer("F.Fab");
-    usePcbViewStore.getState().resetForLayers(["F.Cu", "F.Fab"]);
+    usePcbViewStore.getState().resetForLayers(L("F.Cu", "F.Fab"));
     expect(usePcbViewStore.getState().hidden.has("F.Fab")).toBe(false);
   });
 });

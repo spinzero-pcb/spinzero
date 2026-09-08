@@ -427,7 +427,7 @@ function hydrateBlink() {
  *  copper-stack fade differentiates depth instead). Restored on exit (priorPcbView). */
 function applyLayerUnion(changes: Change[]) {
   const pv = usePcbViewStore.getState();
-  const union = pcbLayerUnion(changes, pv.known);
+  const union = pcbLayerUnion(changes, pv.known, pv.edge);
   if (union.length === 0) return;
   const keep = new Set(union);
   pv.setHidden(pv.known.filter((l) => !keep.has(l)));

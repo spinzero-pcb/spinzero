@@ -1,5 +1,7 @@
 import { create } from "zustand";
 import { useSettingsStore } from "./settingsStore";
+import type { LayerLite } from "../lib/design";
+import { edgeLayer, hiddenByDefault, outerCopper } from "../lib/layers";
 
 /** KiCad default board theme tokens (tokens.css), keyed by canonical layer name.
  *  Shared by the PCB canvas (island colors) and the Appearance panel (swatches). */
@@ -63,13 +65,6 @@ export const isWorksheetLayer = (l: { name: string; role?: string }) =>
 // PCB appearance state (item 7): KiCad-style layer list with visibility, an active
 // layer that paints on top (others translucent), and object-class filters. Lives in
 // a store so the Explorer's layer rows and the properties card can drive it too.
-/** Layers that start hidden (clutter): mask, paste, fab, courtyard, adhesive, and the
- *  documentation/user layers (User.*, Dwgs/Cmts/Eco, Margin). They're extracted and
- *  available — toggle them on in the Appearance panel — but stay off the default board
- *  view so annotations don't bury the copper. */
-const hiddenByDefault = (l: string) =>
-  /\.(CrtYd|Courtyard|Fab|Paste|Mask|Adhes)$/i.test(l) ||
-  /^(User\.|Dwgs\.User|Cmts\.User|Eco[12]\.User|Margin$)/i.test(l);
 
 interface PcbViewState {
   /** Active layer (painted on top, full opacity); null = natural board order. */
@@ -77,6 +72,9 @@ interface PcbViewState {
   hidden: Set<string>;
   /** Layers already given their default visibility (don't clobber user choices). */
   known: string[];
+  /** Name of the layer carrying the board profile, resolved by role. The diff
+   *  view rides it along so the outline keeps framing the copper. */
+  edge: string | null;
   objects: Record<PcbObjectKey, boolean>;
   /** Per-class opacity 0..1, KiCad Objects-tab style (item 23). */
   opacity: Record<PcbObjectKey, number>;
@@ -95,8 +93,9 @@ interface PcbViewState {
    *  unknown/absent keys keep their default so a partial save never blanks a class. */
   hydrateOpacity: (saved: Record<string, number> | null | undefined) => void;
   /** New revision: reset hides, keep the active layer if it still exists, else
-   *  default the active layer to F.Cu (KiCad's front-copper default) when present. */
-  resetForLayers: (layers: string[]) => void;
+   *  default to the board's own front copper — resolved by role, because an
+   *  Altium stack has no layer called F.Cu. */
+  resetForLayers: (layers: LayerLite[]) => void;
 }
 
 // KiCad Appearance→Objects defaults: tracks/vias/pads opaque, zones at 60% so the
@@ -109,6 +108,7 @@ export const usePcbViewStore = create<PcbViewState>((set, get) => ({
   active: null,
   hidden: new Set(),
   known: [],
+  edge: null,
   objects: { tracks: true, vias: true, pads: true, zones: true, footprints: true, text: true },
   opacity: { ...DEFAULT_OPACITY },
   setActive: (active) => set({ active }),
@@ -147,21 +147,21 @@ export const usePcbViewStore = create<PcbViewState>((set, get) => ({
     }
     set({ opacity });
   },
-  resetForLayers: (layers) =>
-    set((s) => {
-      const hidden = new Set([...s.hidden].filter((l) => layers.includes(l)));
+  resetForLayers: (layers) => {
+    const names = layers.map((l) => l.name);
+    return set((s) => {
+      const hidden = new Set([...s.hidden].filter((l) => names.includes(l)));
       for (const l of layers)
-        if (!s.known.includes(l) && hiddenByDefault(l)) hidden.add(l);
+        if (!s.known.includes(l.name) && hiddenByDefault(l)) hidden.add(l.name);
       return {
         hidden,
-        known: layers,
-        // Keep a still-present active layer; otherwise default to F.Cu so the board
-        // opens with the front copper selected (KiCad's default) instead of nothing.
-        active: s.active && layers.includes(s.active)
-          ? s.active
-          : layers.includes("F.Cu")
-            ? "F.Cu"
-            : null,
+        known: names,
+        edge: edgeLayer(layers) ?? null,
+        // Keep a still-present active layer; otherwise open on the board's own
+        // front copper instead of nothing.
+        active:
+          s.active && names.includes(s.active) ? s.active : (outerCopper(layers, "front") ?? null),
       };
-    }),
+    });
+  },
 }));

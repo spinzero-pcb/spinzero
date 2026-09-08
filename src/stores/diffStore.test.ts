@@ -174,6 +174,7 @@ describe("diffStore enter/exit/step/seen", () => {
       known: ["F.Cu", "In2.Cu", "B.Cu", "Edge.Cuts"],
       hidden: new Set(),
       active: null,
+      edge: "Edge.Cuts",
     });
     await useDiffStore.getState().enterDiff("rA", "rB");
     // Focusing isolates the change's own layer (Edge.Cuts rides along to frame it —

@@ -7,6 +7,7 @@
 
 pub mod cfb;
 pub mod doc;
+pub mod image;
 pub mod pcb;
 pub mod prj;
 pub mod record;
