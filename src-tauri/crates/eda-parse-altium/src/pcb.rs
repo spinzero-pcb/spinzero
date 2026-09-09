@@ -249,6 +249,8 @@ pub struct PcbDoc {
     pub models: Vec<Model>,
     /// Where each model is placed (`ComponentBodies6`).
     pub bodies: Vec<Body>,
+    /// The board's design rules (`Rules6`), in file order.
+    pub rules: Vec<Rule>,
     /// Streams read but not modelled, by stream and record count.
     pub skipped: BTreeMap<String, usize>,
 }
@@ -331,6 +333,7 @@ pub fn parse(doc: &Doc) -> PcbDoc {
     }
 
     out.models = read_models(doc);
+    out.rules = read_rules(doc);
     for r in doc.records("ComponentBodies6") {
         let b = &r.payload;
         let (Some(c), Some(len)) = (Common::parse(b), i32_at(b, 18)) else { continue };
@@ -703,6 +706,54 @@ pub struct Model {
 pub struct Body {
     pub c: Common,
     pub params: TextRecord,
+}
+
+/// One design rule (`Rules6`).
+///
+/// A rule is what the board is CHECKED against, so it is review input of the
+/// first order: a clearance, a track width, a hole size, a mask expansion. The
+/// scope expressions are Altium's own query language and are kept verbatim —
+/// `InNet('DESAT_2_2')` means nothing to this reader and everything to a
+/// reviewer.
+#[derive(Debug, Clone, Default)]
+pub struct Rule {
+    /// `RULEKIND`: `Clearance`, `Width`, `HoleSize`, `RoomDefinition`, …
+    pub kind: String,
+    pub name: String,
+    pub enabled: bool,
+    pub priority: i64,
+    /// `SCOPE1EXPRESSION` and `SCOPE2EXPRESSION`, verbatim.
+    pub scope: (String, String),
+    /// Every other field of the record, so a rule this reader does not know by
+    /// name still reaches a review with its values intact.
+    pub fields: BTreeMap<String, String>,
+}
+
+/// Read the board's design rules.
+fn read_rules(doc: &Doc) -> Vec<Rule> {
+    const SKIP: &[&str] = &[
+        "RECORD", "RULEKIND", "NAME", "ENABLED", "PRIORITY", "SCOPE1EXPRESSION",
+        "SCOPE2EXPRESSION", "SELECTION", "POLYGONOUTLINE", "USERROUTED", "KEEPOUT",
+        "SUBPOLYINDEX", "UNIONINDEX", "INDEXFORSAVE", "LOCKED",
+    ];
+    doc.text_records("Rules6")
+        .iter()
+        .filter(|r| !r.s("RULEKIND").is_empty())
+        .map(|r| Rule {
+            kind: r.s("RULEKIND").to_string(),
+            name: r.s("NAME").to_string(),
+            enabled: r.b("ENABLED"),
+            priority: r.i("PRIORITY").unwrap_or(0),
+            scope: (r.s("SCOPE1EXPRESSION").to_string(), r.s("SCOPE2EXPRESSION").to_string()),
+            fields: r
+                .fields
+                .iter()
+                .filter(|(k, _)| !SKIP.contains(&k.to_ascii_uppercase().as_str()))
+                .map(|(k, v)| (k.clone(), v.trim_end_matches('\u{0}').to_string()))
+                .filter(|(_, v)| !v.is_empty())
+                .collect(),
+        })
+        .collect()
 }
 
 /// Read every embedded model, in `Models/Data` order.

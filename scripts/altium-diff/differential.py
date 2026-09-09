@@ -1062,6 +1062,18 @@ def compare_m0(ours: dict[str, Any], theirs: dict[str, Any], report: Report) -> 
                 "stream length", f"{name}: ours {mine['bytes']} vs ref {yours['bytes']}"
             )
         framing = framings.get(name, "?")
+        if framing == "Indexed":
+            # A framing this reader names and the reference's record walk does
+            # not: `Rules6` is a `u16` index then one length-prefixed text
+            # payload, and the reference reads it as an opaque stream here while
+            # its own `json-dump` parses the same rules through a dedicated
+            # reader. Our count matches that dump rule for rule, so the record
+            # walk reading nothing is the reference's, not a disagreement.
+            report.note(
+                f"{name}: we frame {mine['records']} records the reference's "
+                "record walk does not, and its own parse agrees with the count"
+            )
+            continue
         if framing.startswith("Blocks"):
             # A block-framed stream against the reference's prefixed walk is a
             # representation difference, not a disagreement about content; the

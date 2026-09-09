@@ -675,6 +675,19 @@ fn run_design_altium(
                             .push(class.clone());
                     }
                 }
+                source.board_rules = summary
+                    .rules
+                    .into_iter()
+                    .map(|r| crate::altium::RuleInfo {
+                        kind: r.kind,
+                        name: r.name,
+                        enabled: r.enabled,
+                        priority: r.priority,
+                        scope: r.scope.0,
+                        against: r.scope.1,
+                        values: r.fields,
+                    })
+                    .collect();
                 source.unresolved.board_substacks = summary.substacks;
                 source.unresolved.board_unresolved_specials = summary.unresolved_specials;
                 for (stream, n) in summary.skipped {

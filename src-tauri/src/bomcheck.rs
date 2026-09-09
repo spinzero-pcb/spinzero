@@ -669,11 +669,19 @@ mod tests {
         let out = ingest(&pcb, "alice", Some("r1".into()), doc, &mapping).expect("ingest");
         assert!(out.filed > 0);
         let filed_first = out.filed;
+        // Pick the comment by the RULE that filed it. Several findings can be
+        // critical, `find` returns whichever the fold happened to order first,
+        // and the test failed about one run in five on the one anchored to the
+        // BOM as a whole rather than to R1.
         let dup = out
             .comments
             .iter()
-            .find(|c| c.severity.as_deref() == Some("critical"))
-            .expect("critical comment filed");
+            .find(|c| {
+                c.predicate.as_ref().and_then(|p| p.get("rule_id")).and_then(|v| v.as_str())
+                    == Some("bom.duplicate_refdes")
+            })
+            .expect("the duplicate-designator comment is filed");
+        assert_eq!(dup.severity.as_deref(), Some("critical"));
         assert_eq!(dup.source, "rule");
         assert_eq!(dup.view, "bom");
         assert_eq!(dup.anchor.r#ref, "R1");

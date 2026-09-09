@@ -62,6 +62,8 @@ pub struct BoardSummary {
     pub tracks: usize,
     pub pads: usize,
     pub vias: usize,
+    /// The board's design rules, for the design model's `source` block.
+    pub rules: Vec<pcb::Rule>,
     /// Net classes from `Classes6`, for the design model's `net_name_to_classes`.
     pub net_classes: Vec<(String, Vec<String>)>,
     /// Layer-stack regions detected but not modelled (plan §4.5).
@@ -137,6 +139,7 @@ pub fn extract_pcb(
         tracks: g.tracks.seg.w.len() + g.tracks.arc.w.len(),
         pads: g.pads.len(),
         vias: g.vias.len(),
+        rules: board.rules.clone(),
         net_classes: board.net_classes.clone(),
         substacks: board.substacks.clone(),
         skipped: board.skipped.clone(),

@@ -1043,3 +1043,34 @@ fn embedded_models_are_written_and_every_reference_resolves() {
     }
     assert!(boards_with_models > 0, "the corpus embeds 3D models; none were written");
 }
+
+/// The board's design rules reach the model.
+///
+/// A rule is what the board is CHECKED against — a clearance, a track width, a
+/// hole size — so a layout review that cannot read them is guessing at the
+/// design's own limits. `Rules6` is written in a framing detection cannot pin
+/// down, and reading it as an opaque stream cost all 68 rules on every corpus
+/// board without anything failing.
+#[test]
+fn the_boards_design_rules_reach_the_model() {
+    let Some(root) = corpus() else {
+        eprintln!("skipping: no Altium corpus");
+        return;
+    };
+    for (i, d) in designs(&root).iter().enumerate() {
+        let name = d.project.file_name().unwrap().to_string_lossy().into_owned();
+        let (_dir, model) = extract(d, &format!("rules{i}"));
+        let rules = model["source"]["board_rules"].as_array().expect("board_rules");
+        assert!(!rules.is_empty(), "{name}: a board with no design rules at all");
+        let mut kinds: BTreeSet<String> = BTreeSet::new();
+        for r in rules {
+            let kind = r["kind"].as_str().unwrap_or_default();
+            assert!(!kind.is_empty(), "{name}: a rule with no kind");
+            assert!(!r["name"].as_str().unwrap_or_default().is_empty(), "{name}: {kind} has no name");
+            kinds.insert(kind.to_string());
+        }
+        // Every board in the corpus states its clearance; it is the rule a
+        // layout review reaches for first.
+        assert!(kinds.contains("Clearance"), "{name}: no clearance rule, kinds {kinds:?}");
+    }
+}

@@ -195,6 +195,10 @@ fn known_framing(stream: &str) -> Option<Framing> {
     let base = stream.split('/').next().unwrap_or(stream);
     match base.to_ascii_uppercase().as_str() {
         "PADS6" => Some(Framing::Blocks(6)),
+        // A `u16` index then one length-prefixed text payload. Walking cannot
+        // tell that from the other layouts, and reading it as `Flat` cost the
+        // board's whole design-rule table — 68 rules on the eval board.
+        "RULES6" => Some(Framing::Indexed),
         _ => None,
     }
 }

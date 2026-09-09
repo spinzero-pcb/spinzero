@@ -166,11 +166,31 @@ pub struct VariantInfo {
     pub alternate_parts: BTreeMap<String, String>,
 }
 
+/// One of the board's design rules, as the review reads it.
+///
+/// A rule is what the board is CHECKED against — a clearance, a track width, a
+/// hole size, a mask expansion — so it belongs in the model beside the geometry
+/// it constrains. The scope expressions are Altium's own query language, kept
+/// verbatim: `InNet('DESAT_2_2')` means nothing to this extractor and
+/// everything to a reviewer.
+#[derive(Debug, Clone, Serialize)]
+pub struct RuleInfo {
+    pub kind: String,
+    pub name: String,
+    pub enabled: bool,
+    pub priority: i64,
+    pub scope: String,
+    pub against: String,
+    pub values: BTreeMap<String, String>,
+}
+
 /// Source-tool block added to the design model for Altium designs.
 #[derive(Debug, Clone, Serialize)]
 pub struct SourceInfo {
     pub tool: String,
     pub compile: CompileSettings,
+    /// The board's design rules. Empty for a design with no board.
+    pub board_rules: Vec<RuleInfo>,
     /// Every variant the project defines. Empty for a design with none.
     pub variants: Vec<VariantInfo>,
     pub unresolved: Unresolved,
@@ -578,6 +598,7 @@ pub fn build_design(
     let source = SourceInfo {
         tool: "altium".to_string(),
         compile: CompileSettings::new(options, free_document),
+        board_rules: Vec::new(),
         variants: resolved,
         unresolved,
     };

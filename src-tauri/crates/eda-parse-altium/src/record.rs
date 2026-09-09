@@ -48,6 +48,11 @@ pub enum Framing {
     Prefixed,
     /// `u8` record type then `n` length-prefixed blocks.
     Blocks(u8),
+    /// `u16` index then one `u32`-length-prefixed TEXT payload. `Rules6` is
+    /// written this way and nothing else in the corpus is, which is why it is
+    /// named rather than detected: a two-byte prefix is not distinguishable
+    /// from the other layouts by walking alone.
+    Indexed,
     /// Not record-framed.
     Flat,
 }
@@ -89,6 +94,7 @@ pub fn records_with(stream: &[u8], framing: Framing) -> Vec<Raw> {
     match framing {
         Framing::Prefixed => walk_prefixed(stream).unwrap_or_default(),
         Framing::Blocks(n) => walk_blocks(stream, n).unwrap_or_default(),
+        Framing::Indexed => walk_indexed(stream).unwrap_or_default(),
         Framing::Flat => Vec::new(),
     }
 }
@@ -122,6 +128,32 @@ fn walk_prefixed(stream: &[u8]) -> Option<Vec<Raw>> {
         i = start + len;
         if len == 0 {
             return None; // would not advance
+        }
+    }
+    Some(out)
+}
+
+/// Walk the `u16` index + one `u32`-length-prefixed text payload framing.
+fn walk_indexed(stream: &[u8]) -> Option<Vec<Raw>> {
+    let mut out = Vec::new();
+    let mut i = 0usize;
+    while i < stream.len() {
+        if i + 6 > stream.len() {
+            return None;
+        }
+        let len = u32::from_le_bytes(stream[i + 2..i + 6].try_into().ok()?) as usize;
+        let start = i + 6;
+        let payload = stream.get(start..start + len)?;
+        out.push(Raw {
+            mode: Mode::Text,
+            offset: start,
+            kind: None,
+            payload: payload.to_vec(),
+            extra: Vec::new(),
+        });
+        i = start + len;
+        if len == 0 {
+            return None;
         }
     }
     Some(out)
@@ -463,5 +495,34 @@ mod tests {
     fn decodes_utf16_runs() {
         let bytes: Vec<u8> = "U6_CH1".encode_utf16().flat_map(u16::to_le_bytes).collect();
         assert_eq!(decode_utf16(&bytes), "U6_CH1");
+    }
+}
+
+#[cfg(test)]
+mod indexed_tests {
+    use super::*;
+
+    /// `Rules6` is a `u16` index then one `u32`-length text payload. Walking
+    /// cannot tell that from the other layouts, so the stream read as `Flat` and
+    /// the board's whole design-rule table went missing — 68 rules on the eval
+    /// board, which is what a layout review checks against.
+    #[test]
+    fn an_indexed_stream_yields_one_text_record_per_entry() {
+        let mut b = Vec::new();
+        for (i, text) in [b"|RULEKIND=Clearance|".as_slice(), b"|RULEKIND=Width|"].iter().enumerate() {
+            b.extend_from_slice(&(i as u16).to_le_bytes());
+            b.extend_from_slice(&(text.len() as u32).to_le_bytes());
+            b.extend_from_slice(text);
+        }
+        let recs = records_with(&b, Framing::Indexed);
+        assert_eq!(recs.len(), 2);
+        let kinds: Vec<String> = recs
+            .iter()
+            .map(|r| TextRecord::parse(&r.payload).s("RULEKIND").to_string())
+            .collect();
+        assert_eq!(kinds, vec!["Clearance", "Width"]);
+
+        // A walk that does not land on the end is not this framing.
+        assert!(records_with(&b[..b.len() - 1], Framing::Indexed).is_empty());
     }
 }
