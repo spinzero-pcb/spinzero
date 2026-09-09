@@ -108,6 +108,11 @@ pub struct Pad {
     pub hole: f64,
     pub rotation: f64,
     pub plated: bool,
+    /// Solder-mask expansion in millimetres when this pad OVERRIDES the board
+    /// rule. `None` means the rule applies, which is what most pads say.
+    pub solder_mask: Option<f64>,
+    /// Paste-mask expansion in millimetres, on the same terms.
+    pub paste_mask: Option<f64>,
 }
 
 /// A via (`Vias6`). `from_layer`/`to_layer` are legacy copper ids.
@@ -598,7 +603,23 @@ fn read_pad(r: &Raw) -> Option<Pad> {
         hole,
         rotation,
         plated,
+        // Mode 1 is "this pad says so"; mode 2 is "the rule says so", and the
+        // manual field is then stale. The offsets are not documented anywhere
+        // this project can cite, so they were derived by correlating every pad
+        // of two corpus boards against the reference's own parse — 604 and 153
+        // pads, all matching, including the fourteen the 5BR board expands by
+        // 4 mil.
+        solder_mask: expansion(main, 102, 90),
+        paste_mask: expansion(main, 101, 86),
     })
+}
+
+/// A pad's own mask expansion, in millimetres, when it overrides the rule.
+fn expansion(main: &[u8], mode_at: usize, value_at: usize) -> Option<f64> {
+    if main.get(mode_at) != Some(&1) {
+        return None;
+    }
+    Some(units::board_mm(i32_at(main, value_at)? as i64))
 }
 
 /// Offsets inside a pad's sixth sub-record. It opens with 29 layers of x sizes,
@@ -884,6 +905,42 @@ mod tests {
         assert_eq!(p.shape, SHAPE_ROUNDED_RECT, "the base record says plain rectangle");
         assert!((p.w - 0.1).abs() < 1e-4, "the size still comes from the base record");
         assert!((p.corner_ratio - 0.25).abs() < 1e-9, "50% is half a stadium");
+    }
+
+    /// A pad states its own mask expansion only when its MODE says so. Mode 2
+    /// means "the board rule decides" and leaves a stale manual value behind, so
+    /// reading the number without the mode would give every pad an override it
+    /// does not have.
+    #[test]
+    fn a_pad_states_its_mask_expansion_only_when_it_overrides_the_rule() {
+        let pad = |paste_mode: u8, mask_mode: u8| {
+            let mut main = vec![0u8; 194];
+            main[0] = TOP;
+            main[3..5].copy_from_slice(&0xFFFFu16.to_le_bytes());
+            main[5..7].copy_from_slice(&0xFFFFu16.to_le_bytes());
+            main[7..9].copy_from_slice(&0xFFFFu16.to_le_bytes());
+            main[86..90].copy_from_slice(&(-39_370i32).to_le_bytes()); // paste
+            main[90..94].copy_from_slice(&40_000i32.to_le_bytes()); // solder mask
+            main[101] = paste_mode;
+            main[102] = mask_mode;
+            let r = Raw {
+                mode: Mode::Binary,
+                offset: 0,
+                kind: Some(2),
+                payload: vec![1, b'1'],
+                extra: vec![vec![0], vec![0, 0, 0, 0, 0], vec![0], main, Vec::new()],
+            };
+            read_pad(&r).expect("pad")
+        };
+        let rule = pad(2, 2);
+        assert_eq!(rule.solder_mask, None, "mode 2 defers to the board rule");
+        assert_eq!(rule.paste_mask, None);
+
+        let own = pad(1, 1);
+        let mask = own.solder_mask.expect("its own solder mask");
+        assert!((mask - 0.1016).abs() < 1e-6, "40000 units is 4 mil, got {mask}");
+        let paste = own.paste_mask.expect("its own paste mask");
+        assert!((paste + 0.1).abs() < 1e-4, "a negative expansion pulls the aperture in");
     }
 
     /// Corner case 7: the placed designator is the one the file marks as the

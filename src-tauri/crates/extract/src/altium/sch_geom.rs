@@ -47,14 +47,17 @@ impl Frame {
 /// Build the schematic geometry for a whole design, one entry per unique source
 /// document. A sheet placed twice is the same file with the same elements, so
 /// the file name is the dedupe key — the diff maps it back to sheet numbers.
-pub fn build(sheets: &[LoadedSheet]) -> SchGeometry {
+pub fn build(
+    sheets: &[LoadedSheet],
+    project_params: &std::collections::BTreeMap<String, String>,
+) -> SchGeometry {
     let mut seen: HashSet<&str> = HashSet::new();
     let mut out: Vec<SheetGeom> = Vec::new();
     for s in sheets {
         if s.info.filename.is_empty() || !seen.insert(s.info.filename.as_str()) {
             continue;
         }
-        out.push(build_sheet(&s.info.filename, &s.sch));
+        out.push(build_sheet(&s.info.filename, &s.sch, project_params));
     }
     out.sort_by(|a, b| a.file.cmp(&b.file));
     SchGeometry { schema: SCH_GEOMETRY_SCHEMA, units: "mm", sheets: out }
@@ -164,7 +167,11 @@ fn text_kind(k: TextKind) -> &'static str {
     }
 }
 
-fn build_sheet(file: &str, doc: &SchDoc) -> SheetGeom {
+fn build_sheet(
+    file: &str,
+    doc: &SchDoc,
+    project_params: &std::collections::BTreeMap<String, String>,
+) -> SheetGeom {
     let f = Frame { height: mm(doc.sheet.height).max(1.0) };
     let mut elems: Vec<SchElem> = Vec::new();
     let mut push = |uuid: String, kind: &'static str, pts: &[(f64, f64)], sig: String| {
@@ -333,7 +340,14 @@ fn build_sheet(file: &str, doc: &SchDoc) -> SheetGeom {
     // one corpus sheet. A `=Special` that expands to nothing is the same case,
     // but resolving it needs the project, which the renderer has and this does
     // not; those few stay.
-    for t in doc.texts.iter().filter(|t| !t.template && !t.text.trim().is_empty()) {
+    // A text with nothing in it draws no SVG group, and a `=Special` that
+    // RESOLVES to nothing draws none either — so neither gets a row. The second
+    // needs the project's parameters, which is why they reach this far.
+    for t in doc.texts.iter().filter(|t| {
+        !t.template
+            && !t.text.trim().is_empty()
+            && !super::sch_svg::special_draws_nothing(&t.text, doc, project_params)
+    }) {
         push(oid(&t.uuid, "t", t.at), "text", &text_points(&f, t), text_sig(t));
     }
 
@@ -414,7 +428,7 @@ mod tests {
     }
 
     fn elems(d: &SchDoc) -> Vec<SchElem> {
-        build_sheet("Sheet.SchDoc", d).elements
+        build_sheet("Sheet.SchDoc", d, &std::collections::BTreeMap::new()).elements
     }
 
     fn find(d: &SchDoc, uuid: &str) -> SchElem {
@@ -503,7 +517,7 @@ mod tests {
         let sheets = |d: SchDoc| SchGeometry {
             schema: SCH_GEOMETRY_SCHEMA,
             units: "mm",
-            sheets: vec![build_sheet("Sheet.SchDoc", &d)],
+            sheets: vec![build_sheet("Sheet.SchDoc", &d, &std::collections::BTreeMap::new())],
         };
         let a = serde_json::to_string(&sheets(doc())).unwrap();
         let b = serde_json::to_string(&sheets(doc())).unwrap();

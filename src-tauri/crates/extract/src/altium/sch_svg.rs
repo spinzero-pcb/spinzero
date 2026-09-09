@@ -101,15 +101,60 @@ struct Specials {
     project: BTreeMap<String, String>,
 }
 
+/// Special strings this renderer computes rather than looks up. They always
+/// have a value, which is why [`special_draws_nothing`] can rule them out.
+const COMPUTED_SPECIALS: [&str; 5] = [
+    "SHEETNUMBER",
+    "SHEETTOTAL",
+    "DOCUMENTNAME",
+    "DOCUMENTFULLPATHANDNAME",
+    "PROJECTNAME",
+];
+
+/// True when a `=Special` resolves to an EMPTY string, so the renderer draws no
+/// group for it (D3.7).
+///
+/// The schematic geometry has to apply the same rule or the two disagree: a row
+/// with no group is a change the viewer can report and never frame. It is a
+/// narrow case — the special has to resolve, and resolve to nothing, which only
+/// a project parameter defined as empty does — so the test is stated once, here,
+/// beside the resolution it mirrors.
+pub fn special_draws_nothing(
+    text: &str,
+    doc: &SchDoc,
+    project: &BTreeMap<String, String>,
+) -> bool {
+    let Some(name) = text.strip_prefix('=') else {
+        return false;
+    };
+    let key = name.to_ascii_uppercase();
+    if COMPUTED_SPECIALS.contains(&key.as_str()) {
+        return false;
+    }
+    // A document parameter wins, and an empty or `*` one is not a value at all.
+    if doc
+        .parameters
+        .iter()
+        .any(|p| p.name.eq_ignore_ascii_case(name) && !p.text.is_empty() && p.text != "*")
+    {
+        return false;
+    }
+    project
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case(name))
+        .map(|(_, v)| v.is_empty())
+        .unwrap_or(false)
+}
+
 impl Specials {
     fn new(doc: &SchDoc, ctx: &SheetCtx) -> Specials {
         let mut computed = BTreeMap::new();
         let mut put = |k: &str, v: String| computed.insert(k.to_ascii_uppercase(), v);
-        put("SHEETNUMBER", ctx.number.to_string());
-        put("SHEETTOTAL", ctx.total.to_string());
-        put("DOCUMENTNAME", ctx.file_name.to_string());
-        put("DOCUMENTFULLPATHANDNAME", ctx.full_path.to_string());
-        put("PROJECTNAME", ctx.project_name.to_string());
+        put(COMPUTED_SPECIALS[0], ctx.number.to_string());
+        put(COMPUTED_SPECIALS[1], ctx.total.to_string());
+        put(COMPUTED_SPECIALS[2], ctx.file_name.to_string());
+        put(COMPUTED_SPECIALS[3], ctx.full_path.to_string());
+        put(COMPUTED_SPECIALS[4], ctx.project_name.to_string());
         let document: BTreeMap<String, String> = doc
             .parameters
             .iter()

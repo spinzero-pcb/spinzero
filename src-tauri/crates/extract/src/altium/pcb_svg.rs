@@ -623,6 +623,7 @@ mod tests {
                 ring: None,
             }],
             pads: vec![PadDef {
+                paste: None,
                 x: 20.0,
                 y: 30.0,
                 w: 1.0,

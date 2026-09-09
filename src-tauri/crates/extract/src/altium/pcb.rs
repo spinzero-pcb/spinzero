@@ -581,7 +581,11 @@ pub fn build(b: &PcbDoc, source: &str) -> Built {
             comp: p.c.component.map(i32::from).unwrap_or(-1),
             num: p.name.clone(),
             layers: idx,
-            mask: None,
+            // Set only where the pad overrides the board rule, which is what
+            // Altium's expansion MODE says. Most pads defer to the rule, and 60
+            // of the eval board's 604 do not.
+            mask: p.solder_mask.map(r4),
+            paste: p.paste_mask.map(r4),
             // A drilled hole with no plating is a bare hole — a mounting hole,
             // not a pad — and the viewer paints it as one.
             npth: p.hole > 0.0 && !p.plated,
@@ -986,6 +990,8 @@ mod tests {
             ..eda_parse_altium::pcb::Component::default()
         });
         let pad = |x: f64, y: f64| Pad {
+            solder_mask: None,
+            paste_mask: None,
             c: Common { layer: TOP, net: None, polygon: None, component: Some(0) },
             name: "1".into(),
             x,
@@ -1012,6 +1018,8 @@ mod tests {
     fn a_through_hole_pad_spans_the_stack_and_reports_plating() {
         let mut b = board();
         b.pads.push(Pad {
+            solder_mask: None,
+            paste_mask: None,
             c: common(MULTI_LAYER, None),
             name: "MH".into(),
             x: 5.0,

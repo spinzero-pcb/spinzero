@@ -755,7 +755,7 @@ fn run_design_altium(
     // failure logs and leaves the manifest key absent, so the diff falls back to
     // its one-row-per-sheet behaviour rather than failing the extraction.
     let schematic_geometry = {
-        let geom = crate::altium::sch_geom::build(&sheets);
+        let geom = crate::altium::sch_geom::build(&sheets, &project_params);
         let rel = "schematics/geometry.json";
         match serde_json::to_string(&geom)
             .map_err(|e| e.to_string())

@@ -196,6 +196,11 @@ pub struct PadDef {
     /// Per-pad solder-mask expansion (mm) when overriding the board default.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mask: Option<f64>,
+    /// Per-pad PASTE-mask expansion (mm) when overriding the board default. A
+    /// stencil is cut from this, so a pad that states its own is stating a
+    /// manufacturing requirement.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub paste: Option<f64>,
     /// Non-plated through hole (KiCad `np_thru_hole`): a bare drilled hole with no
     /// copper — the viewer paints it as a hole, not a pad.
     #[serde(skip_serializing_if = "is_false")]
@@ -584,6 +589,9 @@ pub fn build(pcb: &Pcb, theme: &crate::theme::Theme, source: &str) -> Geometry {
                 num: pad.number.clone(),
                 layers: players,
                 mask: pad.mask_margin.map(r4),
+                // KiCad's paste margin is not read yet; the field is the
+                // Altium path's, and an absent value means the board rule.
+                paste: None,
                 npth: pad.kind == "np_thru_hole",
             });
         }

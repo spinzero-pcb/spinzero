@@ -102,13 +102,36 @@ fn sibling(p: &Path, ext: &str) -> Option<PathBuf> {
     (found.len() == 1).then(|| found.remove(0))
 }
 
-fn out_dir(tag: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("extract_altium_{tag}_{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&d);
-    d
+/// A bundle directory that deletes itself.
+///
+/// Every one of these tests extracts the whole corpus, and a bundle is tens of
+/// megabytes of SVGs and 3D models. Cleaning up at the END of a test left one
+/// directory per design per run behind, because the extraction happens inside a
+/// loop — 747 of them had accumulated on this machine and filled the disk,
+/// which is what made three unrelated tests flaky. Dropping the guard runs even
+/// when the test panics.
+struct Out(PathBuf);
+
+impl std::ops::Deref for Out {
+    type Target = Path;
+    fn deref(&self) -> &Path {
+        &self.0
+    }
 }
 
-fn extract(design: &Design, tag: &str) -> (PathBuf, serde_json::Value) {
+impl Drop for Out {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn out_dir(tag: &str) -> Out {
+    let d = std::env::temp_dir().join(format!("extract_altium_{tag}_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    Out(d)
+}
+
+fn extract(design: &Design, tag: &str) -> (Out, serde_json::Value) {
     let dir = out_dir(tag);
     let mut sink = |_: Msg| {};
     run_design(&design.project, &dir, &mut sink)
@@ -220,7 +243,6 @@ fn bundle_matches_the_shared_shape_contract() {
         let manifest = std::fs::read_to_string(dir.join("design_review_manifest.json")).unwrap();
         let manifest: serde_json::Value = serde_json::from_str(&manifest).unwrap();
         assert_eq!(manifest["schema"], "extract.design_review_manifest.a0", "{name}");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 
@@ -284,7 +306,6 @@ fn design_agrees_with_the_boards_own_tables() {
             "{name}: only {found} of {} board nets are in the design model",
             board_nets.len()
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 
@@ -332,7 +353,6 @@ fn enriched_bom_resolves_the_review_fields() {
             );
             checked += 1;
         }
-        let _ = std::fs::remove_dir_all(&dir);
     }
     assert!(checked > 0, "no corpus design resolved an MPN field at all");
 }
@@ -353,8 +373,7 @@ fn altium_design_json_is_byte_deterministic() {
         serde_json::to_string(&mb).unwrap(),
         "design.json must be identical across runs"
     );
-    let _ = std::fs::remove_dir_all(&a);
-    let _ = std::fs::remove_dir_all(&b);
+
 }
 
 /// Every corpus board produces a `pcb/geometry.json` the renderer can consume:
@@ -474,7 +493,6 @@ fn board_geometry_is_internally_consistent() {
                 c["ref"]
             );
         }
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 
@@ -508,10 +526,8 @@ fn board_geometry_keeps_every_pad_via_and_footprint() {
                 "{name}: {key} in the geometry do not match the record count"
             );
         }
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }
-
 
 /// The manifest lists a sheet SVG for every sheet the design model carries, and
 /// a layer SVG for every layer the geometry carries. A bundle whose manifest and
@@ -579,7 +595,6 @@ fn every_sheet_and_layer_reaches_the_manifest_as_a_file() {
                 assert!(seen.contains(n), "{name}: {n} ({role}) has no layer SVG");
             }
         }
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 
@@ -632,7 +647,6 @@ fn sheet_svgs_are_balanced_and_carry_no_uncompressed_bitmaps() {
                 "{name}: {file} viewBox {vb} is not a page in millimetres"
             );
         }
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 
@@ -659,10 +673,8 @@ fn the_bundle_carries_a_palette_in_the_viewers_own_keys() {
         let board = model["theme"]["board"].as_object().expect("a board palette");
         assert!(board.contains_key("copper.f"), "{name}: no front-copper colour");
         assert!(board.contains_key("edge_cuts"), "{name}: no board-outline colour");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }
-
 
 /// M3's exit criterion: a `data-uuid` in a rendered sheet round-trips through
 /// the design model's cross-probe indexes. A click that resolves to nothing is
@@ -730,10 +742,8 @@ fn every_drawn_uuid_resolves_through_the_cross_probe_indexes() {
             "{name}: only {soft_hit}/{soft_all} ({:.0}%) of the drawn net geometry resolves",
             share * 100.0
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }
-
 
 /// Every element the schematic geometry names is drawn under that id in the
 /// sheet SVG, and every sheet the manifest lists has geometry.
@@ -778,10 +788,12 @@ fn schematic_geometry_is_addressable_in_the_sheet_svgs() {
             let Some(svg) = svg_of.get(file) else { continue };
             let elems = sheet["elements"].as_array().unwrap();
             assert!(!elems.is_empty(), "{name}: {file} has no elements");
-            // A component's own id must be drawn: it is the anchor a placement or
-            // a field edit lands on. The rest of the classes are checked in bulk
-            // below, because a symbol that draws nothing (an empty parameter, a
-            // hidden pin) deliberately emits no group (section 7).
+            // EVERY row must be drawn. A row with no SVG group is a change the
+            // viewer can report and never frame, so the two sides apply one
+            // rule: an object that draws nothing gets no group AND no row.
+            // This was a 90% threshold while a `=Special` resolving to nothing
+            // still earned a row; it is exact now that both sides ask
+            // `sch_svg::special_draws_nothing`.
             let (mut hit, mut all) = (0usize, 0usize);
             for e in elems {
                 let uuid = e["uuid"].as_str().unwrap();
@@ -792,14 +804,12 @@ fn schematic_geometry_is_addressable_in_the_sheet_svgs() {
                 all += 1;
                 hit += drawn as usize;
             }
-            let share = hit as f64 / all as f64;
-            assert!(
-                share >= 0.9,
-                "{name}: {file}: only {hit}/{all} ({:.0}%) of the geometry is addressable",
-                share * 100.0
+            assert_eq!(
+                hit, all,
+                "{name}: {file}: {} of {all} geometry rows are in no SVG group",
+                all - hit
             );
         }
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 
@@ -859,7 +869,6 @@ fn every_footprint_pairs_to_a_schematic_instance() {
             "{name}: only {resolved}/{total} ({:.0}%) of footprints pair to a schematic instance",
             share * 100.0
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 
