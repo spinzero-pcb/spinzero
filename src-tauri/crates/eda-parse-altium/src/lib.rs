@@ -19,6 +19,6 @@ mod test_support;
 
 pub use doc::{Doc, Kind};
 pub use pcb::PcbDoc;
-pub use prj::{CompileOptions, HierarchyMode, Project};
+pub use prj::{CompileOptions, Fitting, HierarchyMode, Project, Variant, Variation};
 pub use record::TextRecord;
 pub use sch::SchDoc;

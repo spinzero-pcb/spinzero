@@ -189,15 +189,24 @@ impl Project {
         out
     }
 
-    /// Variant names defined by the project (`[ProjectVariant…] Description=`).
-    /// Until variants are applied, this is what the diagnostics block reports.
-    pub fn variant_names(&self) -> Vec<String> {
+    /// Every variant the project defines, in file order.
+    ///
+    /// A variant is Altium's answer to KiCad's per-symbol DNP flag: the design
+    /// is one schematic and the variants say which parts a given build leaves
+    /// off, swaps, or re-parameterises. The base design is unchanged by any of
+    /// them, which is why it stays the thing a review reads.
+    pub fn variants(&self) -> Vec<Variant> {
         self.sections
             .iter()
             .filter(|(s, _)| s.to_ascii_uppercase().starts_with("PROJECTVARIANT"))
-            .filter_map(|(_, kv)| kv.get("DESCRIPTION").cloned())
-            .filter(|s| !s.is_empty())
+            .map(|(_, kv)| Variant::parse(kv))
+            .filter(|v| !v.name.is_empty())
             .collect()
+    }
+
+    /// Variant names defined by the project (`[ProjectVariant…] Description=`).
+    pub fn variant_names(&self) -> Vec<String> {
+        self.variants().into_iter().map(|v| v.name).collect()
     }
 }
 
@@ -212,6 +221,113 @@ fn strip_bom(bytes: &[u8]) -> String {
 }
 
 /// Sections in file order; keys upper-cased for lookup, values left alone.
+/// What one variation does to a part.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Fitting {
+    /// `Kind=0` — fitted, as the base design draws it.
+    Fitted,
+    /// `Kind=1` — not fitted in this variant.
+    NotFitted,
+    /// `Kind=2` — fitted, but with the part named in `AlternatePart`.
+    Alternate,
+}
+
+impl Fitting {
+    fn from_i(v: i64) -> Fitting {
+        match v {
+            1 => Fitting::NotFitted,
+            2 => Fitting::Alternate,
+            _ => Fitting::Fitted,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Fitting::Fitted => "fitted",
+            Fitting::NotFitted => "not_fitted",
+            Fitting::Alternate => "alternate",
+        }
+    }
+}
+
+/// One part's variation inside a variant.
+#[derive(Debug, Clone)]
+pub struct Variation {
+    /// The PLACED designator, channel suffix included (`R37_1`).
+    pub designator: String,
+    /// The sheet-symbol chain plus the component's own id, the same handle the
+    /// board writes as `SOURCEUNIQUEID` — so a variation resolves to one
+    /// placement even when two channels share a base designator.
+    pub unique_id: String,
+    pub fitting: Fitting,
+    /// The part fitted instead, for [`Fitting::Alternate`].
+    pub alternate_part: String,
+}
+
+/// One project variant (`[ProjectVariantN]`).
+#[derive(Debug, Clone, Default)]
+pub struct Variant {
+    /// `Description=`, which is the name Altium shows and a finding cites.
+    pub name: String,
+    pub uid: String,
+    /// `AllowFabrication=` — whether this variant may be built.
+    pub allow_fabrication: bool,
+    pub variations: Vec<Variation>,
+    /// Parameter overrides (`ParamVariationN=`) whose shape this reader does not
+    /// know: every corpus project declares `ParamVariationCount=0`, so the
+    /// layout could not be confirmed against a real one. They are counted rather
+    /// than guessed at.
+    pub parameter_overrides_unread: usize,
+}
+
+impl Variant {
+    fn parse(kv: &BTreeMap<String, String>) -> Variant {
+        let get = |k: &str| kv.get(k).map(|s| s.trim()).unwrap_or("");
+        let count = |k: &str| get(k).parse::<usize>().unwrap_or(0);
+        let mut variations = Vec::new();
+        for i in 1..=count("VARIATIONCOUNT") {
+            let raw = get(&format!("VARIATION{i}"));
+            if raw.is_empty() {
+                continue;
+            }
+            let f = sub_fields(raw);
+            let designator = f.get("DESIGNATOR").cloned().unwrap_or_default();
+            if designator.is_empty() {
+                continue;
+            }
+            variations.push(Variation {
+                designator,
+                unique_id: f.get("UNIQUEID").cloned().unwrap_or_default(),
+                fitting: Fitting::from_i(
+                    f.get("KIND").and_then(|v| v.parse().ok()).unwrap_or(0),
+                ),
+                alternate_part: f.get("ALTERNATEPART").cloned().unwrap_or_default(),
+            });
+        }
+        Variant {
+            name: get("DESCRIPTION").to_string(),
+            uid: get("UNIQUEID").to_string(),
+            allow_fabrication: ini_bool(get("ALLOWFABRICATION")),
+            variations,
+            parameter_overrides_unread: count("PARAMVARIATIONCOUNT"),
+        }
+    }
+}
+
+/// Split a `Key=Value|Key=Value` field into an upper-cased map. Altium writes a
+/// variation as one line in that shape, and pads some values with a space.
+fn sub_fields(raw: &str) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    for part in raw.split('|') {
+        let Some(eq) = part.find('=') else { continue };
+        out.insert(
+            part[..eq].trim().to_ascii_uppercase(),
+            part[eq + 1..].trim().to_string(),
+        );
+    }
+    out
+}
+
 fn parse_ini(text: &str) -> Vec<(String, BTreeMap<String, String>)> {
     let mut out: Vec<(String, BTreeMap<String, String>)> = Vec::new();
     let mut cur = String::new();
@@ -258,6 +374,38 @@ AllowSheetEntryNetNames=0\r\nPowerPortNamesTakePriority=1\r\n\
             p.documents_with_ext(dir, "PcbDoc"),
             vec![Path::new("/tmp/proj/board/Main.PcbDoc").to_path_buf()]
         );
+    }
+
+    /// Altium has no per-symbol DNP flag: a build that leaves parts off is a
+    /// VARIANT. A variation names the PLACED designator, so a channel’s copy is
+    /// its own entry, and `Kind` says what happens to the part.
+    #[test]
+    fn variants_read_their_variations() {
+        const VARIANTS: &str = r"[Design]
+[ProjectVariant1]
+UniqueID=27F4F725
+Description=Default_Assembly
+AllowFabrication=0
+VariationCount=3
+Variation1=Designator=R37_1|UniqueId=\TOTQIBMJ\HEHBWHNW|Kind=1|AlternatePart= 
+Variation2=Designator=C9|UniqueId=\FWZOGPGT\ABCDEFGH|Kind=2|AlternatePart=CAP-10uF
+Variation3=Designator=R74|UniqueId=\FWZOGPGT\VYYXIUQS|Kind=0|AlternatePart= 
+ParamVariationCount=2
+";
+        let p = Project::parse("demo", VARIANTS.as_bytes());
+        let v = p.variants();
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].name, "Default_Assembly");
+        assert!(!v[0].allow_fabrication);
+        assert_eq!(v[0].variations.len(), 3);
+        assert_eq!(v[0].variations[0].designator, "R37_1");
+        assert_eq!(v[0].variations[0].fitting, Fitting::NotFitted);
+        assert_eq!(v[0].variations[0].unique_id, r"\TOTQIBMJ\HEHBWHNW");
+        assert_eq!(v[0].variations[1].fitting, Fitting::Alternate);
+        assert_eq!(v[0].variations[1].alternate_part, "CAP-10uF", "trailing space trimmed");
+        assert_eq!(v[0].variations[2].fitting, Fitting::Fitted, "Kind=0 is fitted");
+        assert_eq!(v[0].parameter_overrides_unread, 2, "counted, not guessed at");
+        assert_eq!(p.variant_names(), vec!["Default_Assembly"]);
     }
 
     /// Corner case 12: a loose document is compiled with Global scope, not the

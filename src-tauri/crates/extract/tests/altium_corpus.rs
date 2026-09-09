@@ -928,3 +928,67 @@ fn every_pad_a_symbol_draws_reaches_the_netlist() {
         );
     }
 }
+
+/// Every variant a project defines is modelled, and every part it names is one
+/// the design places.
+///
+/// Altium has no per-symbol DNP flag: a build that leaves parts off is a
+/// VARIANT, and the eval project defines five. The base design stays what a
+/// review reads — `kicad_dnp` is false on every part, because the schematic as
+/// drawn fits all of them — so the variants have to carry the fitting
+/// themselves, and a variation naming a part the design does not place is
+/// reported rather than carried into a build list.
+#[test]
+fn every_variant_names_parts_the_design_places() {
+    let Some(root) = corpus() else {
+        eprintln!("skipping: no Altium corpus");
+        return;
+    };
+    let mut seen_any = false;
+    for (i, d) in designs(&root).iter().enumerate() {
+        let name = d.project.file_name().unwrap().to_string_lossy().into_owned();
+        let (_dir, model) = extract(d, &format!("variant{i}"));
+        let placed: BTreeSet<String> = model["components"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["designator"].as_str().unwrap_or_default().to_string())
+            .collect();
+        for c in model["components"].as_array().unwrap() {
+            assert_eq!(
+                c["parameters"]["kicad_dnp"].as_str(),
+                Some("false"),
+                "{name}: the base design fits every part"
+            );
+        }
+        let variants = model["source"]["variants"].as_array().expect("variants block");
+        for v in variants {
+            seen_any = true;
+            let vname = v["name"].as_str().unwrap_or_default();
+            assert!(!vname.is_empty(), "{name}: a variant with no name");
+            for d in v["not_fitted"].as_array().into_iter().flatten() {
+                let designator = d.as_str().unwrap_or_default();
+                assert!(
+                    placed.contains(designator),
+                    "{name}: variant {vname} does not fit {designator}, which the design never places"
+                );
+            }
+        }
+        // A part a variant leaves off says so on the part as well.
+        for c in model["components"].as_array().unwrap() {
+            let Some(off) = c["parameters"]["altium_not_fitted_in"].as_str() else { continue };
+            let designator = c["designator"].as_str().unwrap_or_default();
+            assert!(
+                variants.iter().any(|v| {
+                    v["name"].as_str() == Some(off.split(", ").next().unwrap_or(""))
+                        && v["not_fitted"]
+                            .as_array()
+                            .map(|a| a.iter().any(|d| d.as_str() == Some(designator)))
+                            .unwrap_or(false)
+                }),
+                "{name}: {designator} names a variant that does not list it"
+            );
+        }
+    }
+    assert!(seen_any, "the corpus defines variants; none were modelled");
+}

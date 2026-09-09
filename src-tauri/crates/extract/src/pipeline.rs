@@ -599,7 +599,14 @@ fn run_design_altium(
         .map(|e| e.eq_ignore_ascii_case("PrjPcb"))
         .unwrap_or(false);
     let h = crate::altium::load_hierarchy(project, emit)?;
-    let crate::altium::Hierarchy { name, options, sheets, unresolved, project_params } = h;
+    let crate::altium::Hierarchy {
+        name,
+        options,
+        sheets,
+        unresolved,
+        project_params,
+        variants,
+    } = h;
     let filename = project
         .file_name()
         .and_then(|s| s.to_str())
@@ -613,6 +620,7 @@ fn run_design_altium(
         &options,
         unresolved,
         free_document,
+        &variants,
     );
     emit(Msg::Progress(format!(
         "compile options: {} scope, sheet-entry names {}, port names {}",

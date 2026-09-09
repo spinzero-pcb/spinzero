@@ -87,8 +87,12 @@ pub struct Unresolved {
     /// would drop 65 real parts. They are reported, not applied — see
     /// docs/altium-extraction-notes.md.
     pub compile_mask_candidates_not_applied: usize,
-    /// Project variants defined but not applied, so the DNP column is empty.
-    pub variants_not_applied: Vec<String>,
+    /// Variations naming a designator the design does not place. Altium keeps
+    /// stale entries in a variant, and an unannotated one reads `R?`.
+    pub variations_without_a_part: Vec<String>,
+    /// Parameter overrides inside a variant this reader does not decode. Every
+    /// corpus project declares none, so the layout could not be confirmed.
+    pub variant_parameter_overrides_unread: usize,
     /// Images a sheet LINKS to rather than embeds. The file lives on the
     /// designer's own machine and is not in the design, so the frame is drawn
     /// and the picture is not.
@@ -126,11 +130,42 @@ pub struct Unresolved {
     pub skipped_records: BTreeMap<String, usize>,
 }
 
+/// Parameter naming the variants that leave a part off. `kicad_dnp` stays
+/// false: in the schematic as drawn every part is fitted, and the base design is
+/// what a review reads.
+pub const NOT_FITTED_PARAM: &str = "altium_not_fitted_in";
+
+/// Parameter naming the variants that fit a different part instead.
+pub const ALTERNATE_IN_PARAM: &str = "altium_alternate_in";
+
+/// One project variant, resolved against the design's own components.
+///
+/// Altium has no per-symbol DNP flag: a build that leaves parts off is a
+/// VARIANT, and one project can define several. Every one of them is modelled
+/// here, and the base design — the schematic as drawn — stays what
+/// `components` and `nets` describe. That keeps one design to review and lets a
+/// finding name the variant it applies to, rather than picking one build and
+/// silently reviewing that.
+#[derive(Debug, Clone, Serialize)]
+pub struct VariantInfo {
+    /// The variant's own name, which is what a finding cites.
+    pub name: String,
+    pub uid: String,
+    /// Whether the project allows this variant to be fabricated.
+    pub allow_fabrication: bool,
+    /// Designators this variant does not fit, sorted.
+    pub not_fitted: Vec<String>,
+    /// Designator -> the part fitted in place of the base one.
+    pub alternate_parts: BTreeMap<String, String>,
+}
+
 /// Source-tool block added to the design model for Altium designs.
 #[derive(Debug, Clone, Serialize)]
 pub struct SourceInfo {
     pub tool: String,
     pub compile: CompileSettings,
+    /// Every variant the project defines. Empty for a design with none.
+    pub variants: Vec<VariantInfo>,
     pub unresolved: Unresolved,
 }
 
@@ -173,6 +208,9 @@ pub struct Hierarchy {
     /// The project file's `[ParameterN]` entries — where a title block's
     /// `=PRJ_Title` and its siblings resolve. Empty for a loose document.
     pub project_params: BTreeMap<String, String>,
+    /// Every `[ProjectVariantN]` the project defines, unresolved. Empty for a
+    /// loose document, which has no project file to define one.
+    pub variants: Vec<eda_parse_altium::Variant>,
 }
 
 pub fn load_hierarchy(
@@ -189,9 +227,10 @@ pub fn load_hierarchy(
         .unwrap_or(false);
 
     let mut project_params: BTreeMap<String, String> = BTreeMap::new();
+    let mut variants: Vec<eda_parse_altium::Variant> = Vec::new();
     let (name, options, candidates) = if is_prj {
         let prj = Project::open(project)?;
-        unresolved.variants_not_applied = prj.variant_names();
+        variants = prj.variants();
         project_params = prj.parameters();
         let docs = prj.documents_with_ext(&dir, "SchDoc");
         (prj.name.clone(), prj.options.clone(), docs)
@@ -338,7 +377,7 @@ pub fn load_hierarchy(
                 .or_default() += n;
         }
     }
-    Ok(Hierarchy { name, options, sheets: out, unresolved, project_params })
+    Ok(Hierarchy { name, options, sheets: out, unresolved, project_params, variants })
 }
 
 /// Depth-first walk of the sheet hierarchy, assigning sequential sheet numbers.
@@ -465,6 +504,7 @@ fn check_hierarchy_links(sheets: &[LoadedSheet], unresolved: &mut Unresolved) {
 }
 
 /// Assemble the design model from every sheet instance.
+#[allow(clippy::too_many_arguments)]
 pub fn build_design(
     project_name: &str,
     project_path: &str,
@@ -473,6 +513,7 @@ pub fn build_design(
     options: &CompileOptions,
     unresolved: Unresolved,
     free_document: bool,
+    variants: &[eda_parse_altium::Variant],
 ) -> (crate::design::Design, SourceInfo) {
     let channels = channels_of(sheets, options);
     let mut placements = Vec::new();
@@ -495,11 +536,12 @@ pub fn build_design(
     }
     // Parts of one multi-part symbol can sit on different sheets, so the
     // grouping runs over the whole design rather than per sheet.
-    let (components, extra_svg_ids) = design::group_parts(placements);
+    let (mut components, extra_svg_ids) = design::group_parts(placements);
     let mut nets = crate::netlist::merge_frags(frags);
     netlist::consolidate_case(&mut nets);
 
     let mut unresolved = unresolved;
+    let resolved = resolve_variants(variants, &mut components, &mut unresolved);
     unresolved.unconnected_pins = diag.unconnected_pins;
     unresolved.hidden_supply_pins = diag.hidden_supply_pins;
     unresolved.hidden_pins_without_net = diag.hidden_pins_without_net;
@@ -524,9 +566,83 @@ pub fn build_design(
     let source = SourceInfo {
         tool: "altium".to_string(),
         compile: CompileSettings::new(options, free_document),
+        variants: resolved,
         unresolved,
     };
     (model, source)
+}
+
+/// Resolve every variant against the components the design actually places.
+///
+/// A variation names a placed designator (`R37_1`, channel suffix included) and
+/// the sheet-symbol chain that reaches it. Altium keeps stale entries — a part
+/// deleted from the schematic leaves its variation behind, and an unannotated
+/// one reads `R?` — so a variation naming nothing is reported rather than
+/// silently carried into a build list.
+///
+/// The base design is not changed by any of this. `kicad_dnp` stays false on
+/// every component, because in the schematic as drawn every part is fitted; a
+/// review that wants a specific build reads the variant it names.
+fn resolve_variants(
+    variants: &[eda_parse_altium::Variant],
+    components: &mut [crate::design::Component],
+    unresolved: &mut Unresolved,
+) -> Vec<VariantInfo> {
+    let placed: BTreeSet<&str> = components.iter().map(|c| c.designator.as_str()).collect();
+    let mut out = Vec::new();
+    for v in variants {
+        let mut not_fitted: Vec<String> = Vec::new();
+        let mut alternate_parts: BTreeMap<String, String> = BTreeMap::new();
+        for x in &v.variations {
+            if !placed.contains(x.designator.as_str()) {
+                unresolved
+                    .variations_without_a_part
+                    .push(format!("{}:{}", v.name, x.designator));
+                continue;
+            }
+            match x.fitting {
+                eda_parse_altium::Fitting::NotFitted => not_fitted.push(x.designator.clone()),
+                eda_parse_altium::Fitting::Alternate if !x.alternate_part.is_empty() => {
+                    alternate_parts.insert(x.designator.clone(), x.alternate_part.clone());
+                }
+                _ => {}
+            }
+        }
+        not_fitted.sort();
+        not_fitted.dedup();
+        unresolved.variant_parameter_overrides_unread += v.parameter_overrides_unread;
+        out.push(VariantInfo {
+            name: v.name.clone(),
+            uid: v.uid.clone(),
+            allow_fabrication: v.allow_fabrication,
+            not_fitted,
+            alternate_parts,
+        });
+    }
+    unresolved.variations_without_a_part.sort();
+    unresolved.variations_without_a_part.dedup();
+
+    // Say it on the part as well as in the variant list. A BOM row that reads
+    // "not fitted in Default_Assembly" needs no cross-reference, and a review
+    // that only ever sees the row still sees the fact.
+    for c in components.iter_mut() {
+        let names = |f: &dyn Fn(&VariantInfo) -> bool| -> String {
+            out.iter()
+                .filter(|v| f(v))
+                .map(|v| v.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let off = names(&|v: &VariantInfo| v.not_fitted.iter().any(|d| *d == c.designator));
+        if !off.is_empty() {
+            c.parameters.insert(NOT_FITTED_PARAM.into(), off);
+        }
+        let alt = names(&|v: &VariantInfo| v.alternate_parts.contains_key(&c.designator));
+        if !alt.is_empty() {
+            c.parameters.insert(ALTERNATE_IN_PARAM.into(), alt);
+        }
+    }
+    out
 }
 
 /// Bus alias definitions from bus-range labels (`GATE_[1...12]`).

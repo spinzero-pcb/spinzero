@@ -1147,6 +1147,8 @@ COMPONENT_FIELDS = ("value", "footprint", "library_ref", "description")
 # counterpart in the file or in the reference — an intended divergence, §7.
 SYNTHESISED_PARAMETERS = {
     "ALTIUM_COMPONENT_KIND",
+    "ALTIUM_ALTERNATE_IN",
+    "ALTIUM_NOT_FITTED_IN",
     "ALTIUM_SOURCE_LIBRARY",
     "KICAD_DNP",
     "KICAD_IN_BOM",
