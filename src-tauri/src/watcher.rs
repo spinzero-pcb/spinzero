@@ -26,10 +26,17 @@ const HEALTH_CHECK: Duration = Duration::from_secs(10);
 const SOURCE_EXTENSIONS: &[&str] = &[
     // KiCad sources + project libraries
     "kicad_pro", "kicad_sch", "kicad_pcb", "kicad_prl", "kicad_sym", "kicad_mod",
+    // Altium sources + project libraries. Lower-case because `is_relevant_source`
+    // lower-cases the extension first — Altium's own capitalisation (`.PrjPcb`,
+    // `.SchDoc`) varies between the designer's file and the project's reference.
+    "prjpcb", "schdoc", "pcbdoc", "schlib", "pcblib",
 ];
 
 const LIB_TABLE_NAMES: &[&str] = &["sym-lib-table", "fp-lib-table"];
 
+// `history` and `__previews` are Altium's own: it writes a zipped snapshot of every
+// save into `History/` and a thumbnail into `__Previews/`, so watching them would
+// re-crunch the design once per save with nothing changed.
 const IGNORE_DIRS: &[&str] = &[
     ".pcbreview", ".pcbreview-project", ".git", "output", "history", "__previews", "node_modules",
 ];
@@ -189,5 +196,52 @@ pub fn run(app: AppHandle, project: Arc<ProjectHandle>, generation: u64) {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn root() -> PathBuf {
+        PathBuf::from("/design")
+    }
+
+    fn relevant(rel: &str) -> bool {
+        is_relevant_source(&root(), &root().join(rel))
+    }
+
+    #[test]
+    fn altium_sources_trigger_a_crunch() {
+        assert!(relevant("Board.PrjPcb"));
+        assert!(relevant("Top_Level.SchDoc"));
+        assert!(relevant("Board.PcbDoc"));
+        // Altium's own capitalisation varies between the file and the project's
+        // reference to it, and the filter lower-cases before matching.
+        assert!(relevant("board.pcbdoc"));
+        assert!(relevant("Lib/Parts.SchLib"));
+    }
+
+    #[test]
+    fn altium_save_churn_does_not() {
+        // Altium zips a snapshot of every save into History/ and writes a thumbnail
+        // into __Previews/, so watching them would re-crunch once per save with the
+        // design unchanged.
+        assert!(!relevant("History/Board.PcbDoc"));
+        assert!(!relevant("__Previews/Top_Level.SchDoc"));
+        assert!(!relevant("Project Outputs for Board/Board.PcbDoc"));
+        assert!(!relevant("Board.PcbDoc.bak"));
+        assert!(!relevant("~Board.SchDoc"));
+        // An output job is not a design source: it changes nothing the bundle holds.
+        assert!(!relevant("Board.OutJob"));
+    }
+
+    #[test]
+    fn kicad_sources_are_unchanged() {
+        assert!(relevant("board.kicad_pro"));
+        assert!(relevant("board.kicad_sch"));
+        assert!(relevant("sym-lib-table"));
+        assert!(!relevant("output/bundle.json"));
     }
 }

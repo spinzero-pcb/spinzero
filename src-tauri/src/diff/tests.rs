@@ -1605,3 +1605,226 @@ fn bom_fp_short_matches_bomline_footprint() {
     assert_eq!(anch.footprint, "R_0402_1005Metric");
     assert!(anch.key.contains("R_0402_1005Metric") && !anch.key.contains("Resistor_SMD"));
 }
+
+#[test]
+fn altium_element_kinds_get_their_own_nouns_and_priority() {
+    // Altium sheets carry kinds KiCad has no equivalent for. Without a noun each of
+    // them titled its row "element changed", and without a priority a sheet symbol
+    // resized with its entries read as whichever member the sort happened to see.
+    let make_ix = || {
+        let mut ix = empty_indexes();
+        ix.sheets = vec![sheet(1, "root")];
+        ix
+    };
+    let a = vec![
+        sch_elem("ss1", "sheet_symbol", [50.0, 50.0, 20.0, 20.0], "sheet_symbol|Power|a"),
+        sch_elem("p1", "port", [52.0, 52.0, 6.0, 2.0], "port|VBUS|io1"),
+        sch_elem("j1", "junction", [200.0, 200.0, 0.0, 0.0], "junction|"),
+    ];
+    let b = vec![
+        sch_elem("ss1", "sheet_symbol", [50.0, 50.0, 20.0, 20.0], "sheet_symbol|Power|b"),
+        sch_elem("p1", "port", [52.0, 52.0, 6.0, 2.0], "port|VBUS|io1"),
+    ];
+    let mut ba = bundle(make_ix());
+    ba.sheet_files.insert(1, "Top_Level.SchDoc".into());
+    ba.sch_geometry = Some(sch_geom("Top_Level.SchDoc", a));
+    let mut bb = bundle(make_ix());
+    bb.sheet_files.insert(1, "Top_Level.SchDoc".into());
+    bb.sch_geometry = Some(sch_geom("Top_Level.SchDoc", b));
+
+    let doc = diff_bundles(&ba, &bb, &changed(&["Top_Level.SchDoc"]));
+    // The re-entried sheet symbol (with the co-located port) is one row; the removed
+    // junction, far away, is another.
+    assert_eq!(doc.changes.len(), 2, "{:?}", doc.changes);
+    assert!(
+        doc.changes.iter().any(|c| c.title.contains("sheet symbol")),
+        "the sheet symbol names its cluster: {:?}",
+        doc.changes.iter().map(|c| &c.title).collect::<Vec<_>>()
+    );
+    let removed = doc
+        .changes
+        .iter()
+        .find(|c| c.kind == Kind::Removed)
+        .expect("the junction removal is its own row");
+    assert!(removed.title.contains("junction"), "{}", removed.title);
+    assert_eq!(removed.anchors.schematic.as_ref().unwrap().uuids, vec!["j1".to_string()]);
+}
+
+// --------------------------------------------------- the Altium corpus, end to end
+
+/// Locate one real Altium project. The corpus may not be redistributed, so this
+/// skips with a message when absent (`SPINZERO_ALTIUM_CORPUS` overrides the path).
+fn altium_project() -> Option<std::path::PathBuf> {
+    let root = std::path::PathBuf::from(
+        std::env::var("SPINZERO_ALTIUM_CORPUS")
+            .unwrap_or_else(|_| r"D:\git_repo\reference_designs".to_string()),
+    );
+    if !root.is_dir() {
+        return None;
+    }
+    let mut stack = vec![root];
+    let mut best: Option<std::path::PathBuf> = None;
+    while let Some(d) = stack.pop() {
+        for p in std::fs::read_dir(&d).into_iter().flatten().flatten().map(|e| e.path()) {
+            if p.is_dir() {
+                stack.push(p);
+            } else if p.extension().map(|e| e.eq_ignore_ascii_case("PrjPcb")).unwrap_or(false)
+                && best.as_ref().map(|b| p < *b).unwrap_or(true)
+            {
+                best = Some(p);
+            }
+        }
+    }
+    best
+}
+
+/// Extract a design into `dir` and load the two bundles the diff engine consumes.
+fn altium_bundle(project: &std::path::Path, dir: &std::path::Path, rev: &str) -> Bundle {
+    let mut sink = |_: extract::pipeline::Msg| {};
+    extract::pipeline::run_design(project, dir, &mut sink).expect("extraction");
+    let extras = crate::design::load_diff_extras(dir).expect("diff extras");
+    Bundle {
+        rev: rev.into(),
+        label: rev.into(),
+        indexes: crate::design::build_indexes(Some(dir.to_path_buf())).expect("indexes"),
+        sheet_files: extras.sheet_files,
+        geometry: extras
+            .geometry_json
+            .map(|t| serde_json::from_str(&t).expect("geometry parses")),
+        sch_geometry: extras
+            .sch_geometry_json
+            .map(|t| serde_json::from_str(&t).expect("schematic geometry parses")),
+        pcb_file: None,
+        comp_params: extras.comp_params,
+    }
+}
+
+/// Two extractions of the SAME Altium project must diff to nothing.
+///
+/// This is the whole M4 chain on real data: schematic geometry, the object ids the
+/// renderer and the geometry share, and the `SOURCEUNIQUEID` pairing. Any of them
+/// keyed unstably — a position-derived id that moves, a pairing key that collides —
+/// shows up here as a change row for an edit nobody made, which is the failure mode
+/// a fixture test cannot catch.
+#[test]
+fn two_extractions_of_one_altium_project_diff_to_nothing() {
+    let Some(project) = altium_project() else {
+        eprintln!("skipping: no Altium corpus");
+        return;
+    };
+    let tmp = std::env::temp_dir().join(format!("sz_altium_diff_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    let a = altium_bundle(&project, &tmp.join("a"), "r_a");
+    let b = altium_bundle(&project, &tmp.join("b"), "r_b");
+
+    // Every source file marked changed, so no pass is pruned: this asks the engine to
+    // look everywhere. The only row it may then produce is the per-sheet cosmetic
+    // fallback, which fires on the source hash alone and is exactly right for the
+    // claim being made here — that hash says the sheet changed. What must NOT appear
+    // is an ANCHORED row: one of those means the engine found an element that moved
+    // or was re-signed, which is a phantom edit from an unstable id.
+    let files: Vec<String> = a.sheet_files.values().cloned().collect();
+    let all = changed(&files.iter().map(|s| s.as_str()).collect::<Vec<_>>());
+    let doc = diff_bundles(&a, &b, &all);
+    let anchored: Vec<&Change> = doc
+        .changes
+        .iter()
+        .filter(|c| {
+            c.anchors.schematic.as_ref().map(|s| !s.uuids.is_empty()).unwrap_or(false)
+                || c.anchors.schematic_a.is_some()
+                || c.anchors.pcb.is_some()
+                || c.group != Group::Sheet
+        })
+        .collect();
+    assert!(
+        anchored.is_empty(),
+        "identical extractions produced {} anchored changes: {:?}",
+        anchored.len(),
+        anchored.iter().take(5).map(|c| &c.title).collect::<Vec<_>>()
+    );
+
+    // And with the sources correctly reported unchanged, there is nothing at all.
+    let doc = diff_bundles(&a, &b, &no_source_diff());
+    assert!(
+        doc.changes.is_empty(),
+        "identical extractions produced {} changes: {:?}",
+        doc.changes.len(),
+        doc.changes.iter().take(5).map(|c| &c.title).collect::<Vec<_>>()
+    );
+
+    // And the artifacts M4 adds are actually there — an empty diff is also what a
+    // missing artifact produces, so the two are told apart explicitly.
+    let sch = a.sch_geometry.as_ref().expect("the bundle carries schematic geometry");
+    assert!(!sch.sheets.is_empty(), "schematic geometry names no sheets");
+    assert!(
+        sch.sheets.iter().any(|s| !s.elements.is_empty()),
+        "schematic geometry has no elements"
+    );
+    let geom = a.geometry.as_ref().expect("the bundle carries board geometry");
+    assert!(
+        geom.components.iter().all(|c| !c.uuid.is_empty()),
+        "every footprint carries the pairing key the placement diff pairs on"
+    );
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// A real edit on a real Altium design produces one anchored row per edit.
+///
+/// The corpus holds no second revision of any design, so the B side is the A side
+/// with one component nudged on the board and one element nudged on a sheet — which
+/// is exactly the input the extractor would produce for that edit. The claim under
+/// test is the diff's, not the extractor's: that it finds the two edits, and only
+/// those, and anchors each to the object that moved.
+#[test]
+fn an_altium_edit_lands_as_one_anchored_row_each() {
+    let Some(project) = altium_project() else {
+        eprintln!("skipping: no Altium corpus");
+        return;
+    };
+    let tmp = std::env::temp_dir().join(format!("sz_altium_edit_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    let a = altium_bundle(&project, &tmp.join("a"), "r_a");
+    let mut b = altium_bundle(&project, &tmp.join("b"), "r_b");
+
+    // Nudge one footprint 5 mm — well past the move threshold.
+    let geom = b.geometry.as_mut().expect("board geometry");
+    let moved_ref = geom.components[0].reference.clone();
+    geom.components[0].x += 5.0;
+
+    // And drag one schematic wire on the first sheet that has one.
+    let sch = b.sch_geometry.as_mut().expect("schematic geometry");
+    let mut dragged = None;
+    for sheet in &mut sch.sheets {
+        if let Some(e) = sheet.elements.iter_mut().find(|e| e.kind == "wire") {
+            e.bbox[0] += 10.0;
+            dragged = Some((sheet.file.clone(), e.uuid.clone()));
+            break;
+        }
+    }
+    let (sheet_file, wire_uuid) = dragged.expect("a wire somewhere in the design");
+
+    let doc = diff_bundles(&a, &b, &changed(&[&sheet_file]));
+
+    let placement: Vec<&Change> =
+        doc.changes.iter().filter(|c| c.group == Group::Placement).collect();
+    assert_eq!(placement.len(), 1, "one placement row: {:?}", doc.changes);
+    assert!(placement[0].title.contains(&moved_ref), "{}", placement[0].title);
+    assert_eq!(
+        placement[0].anchors.pcb.as_ref().and_then(|p| p.comp.as_deref()),
+        Some(moved_ref.as_str()),
+        "the row anchors to the footprint that moved"
+    );
+
+    let sheet_rows: Vec<&Change> = doc.changes.iter().filter(|c| c.group == Group::Sheet).collect();
+    assert_eq!(sheet_rows.len(), 1, "one sheet row: {:?}", sheet_rows);
+    assert!(
+        sheet_rows[0]
+            .anchors
+            .schematic
+            .as_ref()
+            .map(|s| s.uuids.contains(&wire_uuid))
+            .unwrap_or(false),
+        "the row anchors to the wire that moved ({wire_uuid})"
+    );
+    let _ = std::fs::remove_dir_all(&tmp);
+}

@@ -19,6 +19,8 @@ use eda_parse_altium::sch::{self, Pt, SchDoc};
 
 use crate::netlist::{Frag, Graphical, Terminal};
 
+use super::oid;
+
 /// Supply names a hidden pin implicitly connects to (§4.4). Kept explicit
 /// because it is load-bearing: miss it and every part with hidden power pins
 /// reads as having unpowered supply pins.
@@ -104,6 +106,11 @@ fn on_segment(a: Pt, b: Pt, p: Pt) -> bool {
 }
 
 /// The kind of an addressable element, routing its uuid into a `Graphical` bucket.
+///
+/// Ids come through [`super::oid`], the same handle the renderer stamps as
+/// `data-uuid`. Altium names no junction and drops the id on a few percent of
+/// pins and graphics; skipping those left the SVG drawing a group the
+/// cross-probe indexes could not resolve.
 #[derive(Clone, Copy)]
 enum GKind {
     Wire,
@@ -180,9 +187,7 @@ pub fn fragments(
         };
         for pin in super::design::placed_pins(c) {
             let node = conn.id(pin.connection());
-            if !pin.uuid.is_empty() {
-                elems.push(GElem { uuid: pin.uuid.clone(), kind: GKind::Pin, node });
-            }
+            elems.push(GElem { uuid: oid(&pin.uuid, "pin", pin.at), kind: GKind::Pin, node });
             pins.push((
                 node,
                 Terminal {
@@ -202,25 +207,19 @@ pub fn fragments(
 
     for j in &sch.junctions {
         let node = conn.id(j.at);
-        if !j.uuid.is_empty() {
-            elems.push(GElem { uuid: j.uuid.clone(), kind: GKind::Junction, node });
-        }
+        elems.push(GElem { uuid: oid(&j.uuid, "j", j.at), kind: GKind::Junction, node });
     }
     // Net labels match on strict fractional coordinates — the tolerance is
     // asymmetric, and a loose match attaches a label to the wrong net.
     for l in &sch.net_labels {
         let node = conn.id(l.at);
         namers.push(Namer { node, text: l.text.clone(), kind: NameKind::NetLabel });
-        if !l.uuid.is_empty() {
-            elems.push(GElem { uuid: l.uuid.clone(), kind: GKind::Label, node });
-        }
+        elems.push(GElem { uuid: oid(&l.uuid, "nl", l.at), kind: GKind::Label, node });
     }
     for p in &sch.power_ports {
         let node = conn.id(p.at);
         namers.push(Namer { node, text: p.text.clone(), kind: NameKind::PowerPort });
-        if !p.uuid.is_empty() {
-            elems.push(GElem { uuid: p.uuid.clone(), kind: GKind::PowerPort, node });
-        }
+        elems.push(GElem { uuid: oid(&p.uuid, "pp", p.at), kind: GKind::PowerPort, node });
     }
     // A port connects at BOTH edges; taking only its origin misses half of a
     // design's port connections.
@@ -231,9 +230,7 @@ pub fn fragments(
         conn.union(node, far);
         namers.push(Namer { node, text: p.name.clone(), kind: NameKind::Port });
         port_links.push((node, p.name.clone()));
-        if !p.uuid.is_empty() {
-            elems.push(GElem { uuid: p.uuid.clone(), kind: GKind::Port, node });
-        }
+        elems.push(GElem { uuid: oid(&p.uuid, "p", p.at), kind: GKind::Port, node });
     }
     // Sheet entries store no coordinate; theirs is computed from the parent
     // symbol's rectangle plus `Side` and `DistanceFromTop`.
@@ -243,17 +240,17 @@ pub fn fragments(
             let node = conn.id(s.entry_point(e));
             entry_links.push((node, child.clone(), e.name.clone()));
             namers.push(Namer { node, text: e.name.clone(), kind: NameKind::SheetEntry });
-            if !e.uuid.is_empty() {
-                elems.push(GElem { uuid: e.uuid.clone(), kind: GKind::SheetEntry, node });
-            }
+            elems.push(GElem {
+                uuid: oid(&e.uuid, "se", s.entry_point(e)),
+                kind: GKind::SheetEntry,
+                node,
+            });
         }
     }
     for w in &sch.wires {
         if let Some(first) = w.pts.first() {
             let node = conn.id(*first);
-            if !w.uuid.is_empty() {
-                elems.push(GElem { uuid: w.uuid.clone(), kind: GKind::Wire, node });
-            }
+            elems.push(GElem { uuid: oid(&w.uuid, "wire", *first), kind: GKind::Wire, node });
         }
     }
 

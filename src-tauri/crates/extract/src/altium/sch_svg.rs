@@ -25,6 +25,8 @@ use eda_parse_altium::sch::{
 };
 use eda_parse_altium::units;
 
+use super::oid;
+
 /// Padding around the drawn extent, in mm — matches the KiCad renderer so the
 /// two look the same when a report puts them side by side.
 const PAD: f64 = 2.54;
@@ -217,9 +219,10 @@ pub fn palette(sheets: &[&SchDoc]) -> BTreeMap<String, String> {
         .collect()
 }
 
-/// `data-uuid` for an object the file named, and nothing for one it did not.
+/// `data-uuid` for an object, and nothing for one with no handle at all.
 ///
-/// Altium's junction record carries no `UniqueID` at all. An empty attribute
+/// Altium's junction record carries no `UniqueID`, so ids come through
+/// [`super::oid`], which falls back to the object's position. An empty attribute
 /// would look like an identity to every consumer that reads one — the
 /// cross-probe indexes, the diff engine's pairing — and every junction on the
 /// sheet would share it.
@@ -595,7 +598,7 @@ pub fn render_sheet(doc: &SchDoc, ctx: &SheetCtx, palette: &BTreeMap<String, Str
 
     // Free sheet artwork.
     for g in &doc.graphics {
-        let _ = write!(s, r#"<g data-primitive="graphic"{}>"#, uuid_attr(&g.uuid));
+        let _ = write!(s, r#"<g data-primitive="graphic"{}>"#, uuid_attr(&oid(&g.uuid, "g", graphic_origin(g))));
         emit_shape(&mut s, &ctxt, g);
         s.push_str("</g>");
     }
@@ -611,7 +614,7 @@ pub fn render_sheet(doc: &SchDoc, ctx: &SheetCtx, palette: &BTreeMap<String, Str
             let _ = write!(
                 s,
                 r#"<g data-primitive="{prim}"{}{}><polyline points="{}" fill="none" stroke="{stroke}" stroke-width="{}" stroke-linecap="round" stroke-linejoin="round"/></g>"#,
-                uuid_attr(&w.uuid),
+                uuid_attr(&oid(&w.uuid, prim, w.pts[0])),
                 override_attr(&w.color, ctxt.class(prim)),
                 points_attr(&pts),
                 c(units::sch_line_width_mm(w.width))
@@ -625,7 +628,7 @@ pub fn render_sheet(doc: &SchDoc, ctx: &SheetCtx, palette: &BTreeMap<String, Str
         let _ = write!(
             s,
             r#"<g data-primitive="junction"{}{}><circle cx="{}" cy="{}" r="{}" fill="{fill}" stroke="none"/></g>"#,
-            uuid_attr(&j.uuid), override_attr(&j.color, ctxt.class("junction")), c(x), c(y), c(mm(sch::UNIT) * 0.6)
+            uuid_attr(&oid(&j.uuid, "j", j.at)), override_attr(&j.color, ctxt.class("junction")), c(x), c(y), c(mm(sch::UNIT) * 0.6)
         );
     }
 
@@ -636,7 +639,7 @@ pub fn render_sheet(doc: &SchDoc, ctx: &SheetCtx, palette: &BTreeMap<String, Str
         let _ = write!(
             s,
             r#"<g data-primitive="no-connect"{}{}><polyline points="{},{} {},{}" stroke="{stroke}"/><polyline points="{},{} {},{}" stroke="{stroke}"/></g>"#,
-            uuid_attr(&n.uuid), override_attr(&n.color, ctxt.class("no_connect")),
+            uuid_attr(&oid(&n.uuid, "nc", n.at)), override_attr(&n.color, ctxt.class("no_connect")),
             c(x - r), c(y - r), c(x + r), c(y + r),
             c(x - r), c(y + r), c(x + r), c(y - r)
         );
@@ -662,7 +665,7 @@ pub fn render_sheet(doc: &SchDoc, ctx: &SheetCtx, palette: &BTreeMap<String, Str
         let _ = write!(
             s,
             r#"<g data-primitive="label"{}>"#,
-            uuid_attr(&l.uuid)
+            uuid_attr(&oid(&l.uuid, "nl", l.at))
         );
         emit_text(&mut s, &ctxt, &l.text, l.at, l.font, 0, l.orientation, &l.color, ctxt.class("label_local"));
         s.push_str("</g>");
@@ -677,7 +680,7 @@ pub fn render_sheet(doc: &SchDoc, ctx: &SheetCtx, palette: &BTreeMap<String, Str
         let _ = write!(
             s,
             r#"<g data-primitive="netclass-flag"{}{}><polyline points="{},{} {},{} {},{} {},{} {},{}" stroke="{stroke}"/>"#,
-            uuid_attr(&ps.uuid), override_attr(&color, ctxt.class("netclass_flag")),
+            uuid_attr(&oid(&ps.uuid, "ps", ps.at)), override_attr(&color, ctxt.class("netclass_flag")),
             c(x), c(y), c(x + r), c(y - r), c(x + r * 3.0), c(y - r),
             c(x + r * 3.0), c(y - r * 2.0), c(x + r), c(y - r * 2.0)
         );
@@ -706,7 +709,7 @@ pub fn render_sheet(doc: &SchDoc, ctx: &SheetCtx, palette: &BTreeMap<String, Str
         let _ = write!(
             s,
             r##"<g data-primitive="graphic" data-kind="compile-region"{}><rect x="{}" y="{}" width="{}" height="{}" fill="none" stroke="#808080" stroke-width="{}" stroke-dasharray="{} {}"/></g>"##,
-            uuid_attr(&r.uuid),
+            uuid_attr(&oid(&r.uuid, "rg", r.min)),
             c(x1.min(x2)), c(y1.min(y2)), c((x2 - x1).abs()), c((y2 - y1).abs()),
             c(line), c(line * 6.0), c(line * 3.0)
         );
@@ -717,7 +720,7 @@ pub fn render_sheet(doc: &SchDoc, ctx: &SheetCtx, palette: &BTreeMap<String, Str
         let _ = write!(
             s,
             r#"<g data-primitive="graphic" data-kind="compile-mask"{}>"#,
-            uuid_attr(&b.uuid)
+            uuid_attr(&oid(&b.uuid, "bl", graphic_origin(b)))
         );
         emit_shape(&mut s, &ctxt, b);
         s.push_str("</g>");
@@ -838,7 +841,7 @@ fn emit_image(s: &mut String, ctx: &Ctx, img: &sch::SchImage) {
         let _ = write!(
             s,
             r##"<g data-primitive="image" data-kind="linked"{}><rect x="{}" y="{}" width="{}" height="{}" fill="none" stroke="#B0B0B0" stroke-width="{}" stroke-dasharray="{} {}"/></g>"##,
-            uuid_attr(&img.uuid), c(x), c(y), c(w), c(h),
+            uuid_attr(&oid(&img.uuid, "im", img.min)), c(x), c(y), c(w), c(h),
             c(units::sch_line_width_mm(1)),
             c(units::sch_line_width_mm(1) * 4.0),
             c(units::sch_line_width_mm(1) * 2.0)
@@ -859,7 +862,7 @@ fn emit_image(s: &mut String, ctx: &Ctx, img: &sch::SchImage) {
     let _ = write!(
         s,
         r#"<g data-primitive="image"{}><image x="{}" y="{}" width="{}" height="{}" href="data:{mime};base64,{}"/></g>"#,
-        uuid_attr(&img.uuid), c(x), c(y), c(w), c(h), base64(&bytes)
+        uuid_attr(&oid(&img.uuid, "im", img.min)), c(x), c(y), c(w), c(h), base64(&bytes)
     );
 }
 
@@ -888,7 +891,7 @@ fn emit_sheet_symbol(s: &mut String, ctx: &Ctx, sym: &SheetSymbol) {
     let _ = write!(
         s,
         r#"<g data-primitive="sheet-symbol"{} data-sheet-name="{}" data-at-x-nm="{}" data-at-y-nm="{}" data-size-x-nm="{}" data-size-y-nm="{}">"#,
-        uuid_attr(&sym.uuid),
+        uuid_attr(&oid(&sym.uuid, "ss", sym.at)),
         esc(&sym.name),
         (x * 1e6) as i64,
         (y * 1e6) as i64,
@@ -952,7 +955,7 @@ fn emit_component(s: &mut String, ctx: &Ctx, comp: &sch::Component) {
     let _ = write!(
         s,
         r#"<g data-primitive="{prim}"{} data-ref="{}">"#,
-        uuid_attr(&comp.uuid),
+        uuid_attr(&oid(&comp.uuid, "c", comp.at)),
         esc(&comp.designator)
     );
     for g in comp.graphics.iter().filter(|g| mine(g.part_id, g.display_mode)) {
@@ -1016,7 +1019,7 @@ fn emit_pin(s: &mut String, ctx: &Ctx, comp: &sch::Component, p: &Pin) {
     let _ = write!(
         s,
         r#"<g data-primitive="pin"{} data-designator="{}" data-pin="{}">"#,
-        uuid_attr(&p.uuid),
+        uuid_attr(&oid(&p.uuid, "pin", p.at)),
         esc(&comp.designator),
         esc(&p.number)
     );
@@ -1116,7 +1119,7 @@ fn emit_power_port(s: &mut String, ctx: &Ctx, p: &PowerPort) {
     let _ = write!(
         s,
         r#"<g data-primitive="power-symbol"{} data-kind="{}"{}>"#,
-        uuid_attr(&p.uuid),
+        uuid_attr(&oid(&p.uuid, "pp", p.at)),
         p.style,
         override_attr(&p.color, ctx.class("label_hier"))
     );
@@ -1246,7 +1249,7 @@ fn emit_port(s: &mut String, ctx: &Ctx, p: &Port) {
     let _ = write!(
         s,
         r#"<g data-primitive="port" data-kind="global"{}{}><polygon points="{}" fill="{fill}" stroke="{stroke}" stroke-width="{}"/>"#,
-        uuid_attr(&p.uuid),
+        uuid_attr(&oid(&p.uuid, "p", p.at)),
         override_attr(&p.text_color, ctx.class("label_global")),
         points_attr(&pts),
         c(units::sch_line_width_mm(1))
@@ -1267,7 +1270,7 @@ fn emit_free_text(s: &mut String, ctx: &Ctx, t: &SchText) {
     if text.is_empty() {
         return;
     }
-    let _ = write!(s, r#"<g data-primitive="text"{}>"#, uuid_attr(&t.uuid));
+    let _ = write!(s, r#"<g data-primitive="text"{}>"#, uuid_attr(&oid(&t.uuid, "t", t.at)));
     if let Some(corner) = t.corner {
         let (x1, y1) = ctx.xy(t.at);
         let (x2, y2) = ctx.xy(corner);
@@ -1369,7 +1372,13 @@ fn every_point(doc: &SchDoc) -> Vec<Pt> {
     out
 }
 
-fn graphic_points(g: &Graphic) -> Vec<Pt> {
+/// A graphic's first point — the origin its `oid` fallback is keyed on, so the
+/// SVG group and the geometry row agree on an unnamed shape's handle.
+pub(crate) fn graphic_origin(g: &Graphic) -> Pt {
+    graphic_points(g).first().copied().unwrap_or_default()
+}
+
+pub(crate) fn graphic_points(g: &Graphic) -> Vec<Pt> {
     match &g.shape {
         GShape::Line { a, b } => vec![*a, *b],
         GShape::Polyline { pts, .. } | GShape::Polygon { pts } => pts.clone(),

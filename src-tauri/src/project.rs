@@ -192,7 +192,7 @@ pub fn local_data_root(project_dir: &Path) -> PathBuf {
 
 #[derive(Clone, Serialize)]
 pub struct DetectedDesign {
-    pub kind: String, // "kicad"
+    pub kind: String, // "kicad" | "altium"
     /// Absolute path to the EDA project file (.kicad_pro / .PrjPcb), or for a legacy
     /// KiCad project the legacy project/schematic file we matched on.
     pub file: String,
@@ -212,6 +212,22 @@ fn legacy_kicad_rank(ext: &str) -> Option<u8> {
     } else if ext.eq_ignore_ascii_case("sch") {
         Some(1)
     } else if ext.eq_ignore_ascii_case("kicad_pcb") {
+        Some(2)
+    } else {
+        None
+    }
+}
+
+/// Rank an Altium candidate file: the project (`.PrjPcb`) always wins, then a loose
+/// schematic, then a loose board. A folder with no `.PrjPcb` is a real corpus case —
+/// the extractor compiles it with free-document defaults — so a loose document is a
+/// design, not a near miss.
+fn altium_rank(ext: &str) -> Option<u8> {
+    if ext.eq_ignore_ascii_case("PrjPcb") {
+        Some(0)
+    } else if ext.eq_ignore_ascii_case("SchDoc") {
+        Some(1)
+    } else if ext.eq_ignore_ascii_case("PcbDoc") {
         Some(2)
     } else {
         None
@@ -283,8 +299,16 @@ fn kicad_pro_is_pre6(pro: &Path) -> bool {
 /// and EDA-internal dirs). Returns the shallowest modern match (ties broken by name);
 /// failing that, a legacy KiCad layout if one is present (so the UI can prompt an
 /// upgrade instead of reporting "no design found").
+///
+/// Both sources are detected. A `.kicad_pro` and a `.PrjPcb` rank the same — depth
+/// decides, then the rank inside a folder, then the name — so a tree holding one of
+/// each resolves to whichever the user actually pointed at rather than to a fixed
+/// tool preference. A folder with only loose `.SchDoc` / `.PcbDoc` documents is an
+/// Altium design too: the corpus has one, and the extractor compiles it with
+/// free-document defaults.
 pub fn detect_design(design_path: &Path) -> Option<DetectedDesign> {
-    let mut best: Option<(usize, DetectedDesign)> = None;
+    // (depth, rank) — a project file beats a loose document at the same depth.
+    let mut best: Option<(usize, u8, DetectedDesign)> = None;
     // Legacy KiCad fallback, keyed by (depth, rank) so a .pro beats a stray .sch/.kicad_pcb.
     let mut legacy: Option<(usize, u8, DetectedDesign)> = None;
     for entry in WalkDir::new(design_path)
@@ -309,8 +333,10 @@ pub fn detect_design(design_path: &Path) -> Option<DetectedDesign> {
             .file_stem()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_default();
-        let kind = if ext.eq_ignore_ascii_case("kicad_pro") {
-            "kicad"
+        let (kind, rank) = if ext.eq_ignore_ascii_case("kicad_pro") {
+            ("kicad", 0)
+        } else if let Some(rank) = altium_rank(ext) {
+            ("altium", rank)
         } else {
             // Not a modern KiCad project file — remember a legacy KiCad candidate
             // for the fallback. (Only KiCad projects are detected.)
@@ -339,21 +365,23 @@ pub fn detect_design(design_path: &Path) -> Option<DetectedDesign> {
         };
         let better = match &best {
             None => true,
-            Some((d, b)) => depth < *d || (depth == *d && cand.file < b.file),
+            Some((d, r, b)) => {
+                (depth, rank, cand.file.as_str()) < (*d, *r, b.file.as_str())
+            }
         };
         if better {
-            best = Some((depth, cand));
+            best = Some((depth, rank, cand));
         }
     }
     // A modern-looking project (found a .kicad_pro) can still front a pre-6 board that a
     // newer KiCad left in the old format. Verify by the board version before accepting it,
     // so the wizard refuses it instead of importing an incomplete extraction.
-    if let Some((_, d)) = best.as_mut() {
-        if kicad_pro_is_pre6(Path::new(&d.file)) {
+    if let Some((_, _, d)) = best.as_mut() {
+        if d.kind == "kicad" && kicad_pro_is_pre6(Path::new(&d.file)) {
             d.legacy = true;
         }
     }
-    best.map(|(_, d)| d).or_else(|| legacy.map(|(_, _, d)| d))
+    best.map(|(_, _, d)| d).or_else(|| legacy.map(|(_, _, d)| d))
 }
 
 // ------------------------------------------------------------ extractions
@@ -928,6 +956,60 @@ mod detect_tests {
         fs::write(d.join("b.kicad_pcb"), pcb(KICAD6_PCB_EPOCH)).unwrap();
         let det = detect_design(&d).expect("detected");
         assert!(!det.legacy, "the 6.0 epoch itself is KiCad 6, not legacy");
+        fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn altium_project_is_detected() {
+        let d = tmp();
+        fs::write(d.join("b.PrjPcb"), "[Design]
+").unwrap();
+        fs::write(d.join("b.SchDoc"), "").unwrap();
+        fs::write(d.join("b.PcbDoc"), "").unwrap();
+        let det = detect_design(&d).expect("detected");
+        assert_eq!(det.kind, "altium");
+        assert!(det.file.ends_with("b.PrjPcb"), "the project file wins, got {}", det.file);
+        assert!(!det.legacy, "legacy is a KiCad-only verdict");
+        fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn loose_altium_documents_are_a_design() {
+        // A `.SchDoc` + `.PcbDoc` with no `.PrjPcb` is a real corpus case, and the
+        // extractor compiles it with free-document defaults — so the wizard must
+        // offer it rather than report "no design found".
+        let d = tmp();
+        fs::write(d.join("b.SchDoc"), "").unwrap();
+        fs::write(d.join("b.PcbDoc"), "").unwrap();
+        let det = detect_design(&d).expect("detected");
+        assert_eq!(det.kind, "altium");
+        assert!(det.file.ends_with("b.SchDoc"), "the schematic is entered first, got {}", det.file);
+        fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn a_project_file_beats_a_loose_document_at_the_same_depth() {
+        // Ranking is (depth, rank): without the rank a name-ordered tie would pick
+        // `a.SchDoc` over `b.PrjPcb` and compile the design as a free document.
+        let d = tmp();
+        fs::write(d.join("a.SchDoc"), "").unwrap();
+        fs::write(d.join("b.PrjPcb"), "[Design]
+").unwrap();
+        let det = detect_design(&d).expect("detected");
+        assert!(det.file.ends_with("b.PrjPcb"), "got {}", det.file);
+        fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn a_shallower_design_wins_whichever_tool_drew_it() {
+        let d = tmp();
+        fs::write(d.join("b.PrjPcb"), "[Design]
+").unwrap();
+        let deep = d.join("nested");
+        fs::create_dir_all(&deep).unwrap();
+        fs::write(deep.join("b.kicad_pro"), "{}").unwrap();
+        let det = detect_design(&d).expect("detected");
+        assert_eq!(det.kind, "altium", "depth decides, not a tool preference");
         fs::remove_dir_all(&d).ok();
     }
 

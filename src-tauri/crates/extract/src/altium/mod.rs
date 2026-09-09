@@ -10,6 +10,7 @@ pub mod layers;
 pub mod netlist;
 pub mod pcb;
 pub mod pcb_svg;
+pub mod sch_geom;
 pub mod sch_svg;
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
@@ -114,6 +115,25 @@ pub struct SourceInfo {
     pub tool: String,
     pub compile: CompileSettings,
     pub unresolved: Unresolved,
+}
+
+/// A stable handle for a drawable object, falling back to its position when
+/// the file names none.
+///
+/// Altium writes no `UniqueID` on a junction at all (1786 of them in the
+/// corpus) and drops it on a few percent of graphics and pins. Those objects
+/// would otherwise be unaddressable: no `data-uuid` in the SVG, no row in the
+/// schematic geometry, so a junction added or removed between two revisions
+/// would never reach the diff. The position IS the identity for an object the
+/// file does not name — a junction that "moved" really is one removed and one
+/// added — and the renderer and the geometry builder derive the same string, so
+/// a change still anchors to the group the viewer draws.
+pub fn oid(uuid: &str, tag: &str, at: sch::Pt) -> String {
+    if uuid.is_empty() {
+        format!("~{tag}:{},{}", at.x, at.y)
+    } else {
+        uuid.to_string()
+    }
 }
 
 /// True when a path names a project or document this front-end handles.

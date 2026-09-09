@@ -443,6 +443,12 @@ def index_our_svg(svg: str) -> dict[str, list[str]]:
     Identity rather than a count: a difference then says WHICH object, and a
     class whose totals happen to match for two opposite reasons stops looking
     like agreement.
+
+    Our SVG also carries a `~`-prefixed handle for an object the file left
+    UNNAMED — Altium names no junction, and drops the id on a few percent of pins
+    and graphics — so that the viewer can frame it and the diff can pair it. The
+    reference has no id for those at all, so the handle is dropped back to "" here
+    and the class falls to the count comparison the empty case already takes.
     """
     out: dict[str, list[str]] = {}
     for before, primitive, after in PRIMITIVE_RE.findall(svg):
@@ -455,7 +461,8 @@ def index_our_svg(svg: str) -> dict[str, list[str]]:
         if key is None:
             continue
         uuid = UUID_RE.search(attrs)
-        out.setdefault(key, []).append(uuid.group(1) if uuid else "")
+        found = uuid.group(1) if uuid else ""
+        out.setdefault(key, []).append("" if found.startswith("~") else found)
     return out
 
 
@@ -1640,6 +1647,144 @@ def phase_m3(
         )
 
 
+def compare_m4_pairing(
+    ours: dict[str, Any], theirs: dict[str, Any], report: Report, loose: bool = False
+) -> None:
+    """Schematic-to-board instance pairing (plan section 8.3, M4 row).
+
+    The diff engine pairs a footprint across two revisions by the SCHEMATIC
+    instance it came from — Altium's `SOURCEUNIQUEID`, which is the chain of
+    sheet-symbol ids down to the placed part. Two revisions of one design are not
+    in the corpus, but the claim that pairing rests on is, and it is checkable on
+    a single revision: every footprint carries an identity, no two footprints
+    share one, and the instance each identity names is the one the reference
+    places on that sheet. A pairing key that is missing, duplicated or pointing
+    at the wrong sheet cannot pair correctly across a revision either.
+
+    The board writes the chain relative to the project's own root while the
+    reference writes it from the top-level sheet symbol down, so the board's
+    prefix is compared as a SUFFIX of the reference's path rather than for
+    equality — that difference is framing, not disagreement.
+
+    A key whose chain the SCHEMATIC does not corroborate — absent entirely, or
+    naming a sheet symbol no document places — is counted and named, not reported
+    as a difference. The corpus has both: the eval design writes Q7 with no chain
+    at all and its fiducials with a sheet-symbol id that was re-drawn out of the
+    schematic. That is the board/schematic mismatch the plan already records as a
+    divergence (section 7, board authority), and it costs the pairing nothing:
+    the key is still stable and still unique, which is all pairing asks of it.
+    """
+    comps = ours.get("components") or []
+    if not comps:
+        report.add("board with no placed components", "nothing to pair")
+        return
+
+    unnamed = [c["ref"] for c in comps if not c.get("uuid")]
+    for designator in sorted(unnamed)[:EXAMPLES]:
+        report.add("footprint with no pairing key", designator)
+    if len(unnamed) > EXAMPLES:
+        report.counts["footprint with no pairing key"] = len(unnamed)
+
+    seen: dict[str, str] = {}
+    for c in comps:
+        uid = c.get("uuid") or ""
+        if not uid:
+            continue
+        if uid in seen:
+            report.add(
+                "pairing key shared by two footprints",
+                f"{seen[uid]} and {c['ref']} both claim {uid}",
+            )
+        seen[uid] = c["ref"]
+
+    hierarchy = theirs.get("schematic_hierarchy") or {}
+    paths = hierarchy.get("hierarchy_paths") or []
+    sheet_of = {
+        c.get("designator"): str((c.get("hierarchy") or {}).get("sheet") or "")
+        for c in theirs.get("components") or []
+    }
+    if not paths:
+        # A flat design has one sheet and no chain; there is nothing to resolve,
+        # so identity and uniqueness above are the whole claim.
+        report.note("flat design: no hierarchy chain to resolve a pairing key against")
+        return
+
+    chainless: list[str] = []
+    stale: list[str] = []
+    for c in sorted(comps, key=lambda c: c["ref"]):
+        uid = c.get("uuid") or ""
+        segments = [s for s in uid.replace("/", "\\").split("\\") if s]
+        if len(segments) < 2:
+            chainless.append(c["ref"])
+            continue
+        prefix = segments[:-1]
+        matches = [
+            p
+            for p in paths
+            if [x for x in str(p.get("unique_id_path") or "").split("\\") if x][-len(prefix):]
+            == prefix
+        ]
+        if not matches:
+            stale.append(f"{c['ref']} ({'/'.join(prefix)})")
+            continue
+        want = sheet_of.get(c["ref"])
+        if want is None:
+            report.add("footprint the reference has no schematic part for", c["ref"])
+            continue
+        leaves = {
+            str((p.get("levels") or [{}])[-1].get("child_filename") or "").lower()
+            for p in matches
+        }
+        if want.lower() not in leaves:
+            report.add(
+                "pairing key resolving to the wrong sheet",
+                f"{c['ref']}: ours {sorted(leaves)} vs ref {want!r}",
+            )
+
+    if chainless:
+        report.note(
+            f"{len(chainless)} footprints carry a pairing key with no sheet chain "
+            f"({', '.join(sorted(chainless)[:4])}) - the board's own omission"
+        )
+    if stale:
+        report.note(
+            f"{len(stale)} footprints name a sheet symbol the schematic no longer "
+            f"places ({', '.join(sorted(stale)[:4])}) - board/schematic mismatch"
+        )
+
+
+def phase_m4(
+    cfg: Config, design: Design, report: Report, oracle: Oracle, entry: dict, clock: Clock
+) -> None:
+    if design.board is None:
+        report.note("no board in this design")
+        return
+    with tempfile.TemporaryDirectory(prefix="altium-diff-m4-") as tmp:
+        root = Path(tmp)
+        with clock.measure("ours:geometry"):
+            ours = our_geometry(cfg, design, root / "ours-geom")
+        # M4 asks the reference nothing new: the hierarchy document M1 already
+        # records is what a pairing key has to resolve against.
+        theirs = ask(
+            oracle,
+            entry,
+            "m1:design",
+            design.entry,
+            lambda: (lambda d: reduce_design(d) if d else None)(
+                ref_design(cfg, design, root / "ref-design")
+            ),
+            clock,
+            "ref:design",
+        )
+        if ours is None:
+            report.add("board geometry we cannot build", design.name)
+            return
+        if not theirs or not theirs.get("components"):
+            report.add("design the reference cannot build", design.name)
+            return
+        compare_m4_pairing(ours, theirs, report, loose=design.project is None)
+
+
 def phase_m0(
     cfg: Config, design: Design, report: Report, oracle: Oracle, entry: dict, clock: Clock
 ) -> None:
@@ -1781,7 +1926,7 @@ def main(argv: list[str]) -> int:
             pass
 
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--phase", choices=("m0", "m1", "m2", "m3", "all"), default="all")
+    parser.add_argument("--phase", choices=("m0", "m1", "m2", "m3", "m4", "all"), default="all")
     parser.add_argument("--design", help="substring of the design name to run alone")
     parser.add_argument("--corpus")
     parser.add_argument("--reference", help="reference CLI")
@@ -1844,7 +1989,8 @@ def main(argv: list[str]) -> int:
         clocks[design.name] = clock
         design_result: dict[str, Any] = {}
         for phase, runner in (
-            ("m0", phase_m0), ("m1", phase_m1), ("m2", phase_m2), ("m3", phase_m3)
+            ("m0", phase_m0), ("m1", phase_m1), ("m2", phase_m2), ("m3", phase_m3),
+            ("m4", phase_m4),
         ):
             if args.phase not in (phase, "all"):
                 continue

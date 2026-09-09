@@ -16,7 +16,7 @@ is configured on the machine rather than written into this repo.
 ```bash
 cargo build -p extract --bin pcb-extract --release
 python scripts/altium-diff/differential.py                 # M0 and M1, whole corpus
-python scripts/altium-diff/differential.py --phase m0
+python scripts/altium-diff/differential.py --phase m0   # m0 | m1 | m2 | m3 | m4
 python scripts/altium-diff/differential.py --design EVAL --examples 30
 python scripts/altium-diff/differential.py --offline        # recorded answers only
 ```
@@ -76,7 +76,10 @@ Everything is optional and read from the environment.
 
 M1 needs only the CLI. M0 additionally needs the library, because a record-level
 comparison has no CLI surface; `ref_probe.py` is the one file here that touches
-the reference's API, and it runs inside the reference's own interpreter.
+the reference's API, and it runs inside the reference's own interpreter. M4 asks
+the reference nothing of its own — it resolves each board footprint's pairing key
+against the hierarchy document M1 already records — so it runs offline wherever
+M1 has.
 
 ## What is compared
 
@@ -100,8 +103,14 @@ sides are joined object by object and a difference names the object rather than
 a number. Board layers have no M3 row of their own: the layer SVGs are rendered
 from the geometry document M2 already compares.
 
-The M4 row is not implemented yet; add it beside `compare_m3_render` as that
-milestone lands.
+M4 checks the pairing key the diff engine pairs footprints on across two
+revisions. The corpus holds no revision pair, so what it compares is the claim
+that pairing rests on, which a single revision does carry: every footprint has an
+identity, no two share one, and the schematic instance each identity names is the
+one the reference places on that sheet. A key whose chain the schematic does not
+corroborate — absent, or naming a sheet symbol no document places — is counted
+and named rather than reported as a difference; that is the board/schematic
+mismatch plan §7 records, and it costs the pairing nothing.
 
 ## Normalisation, and what it is allowed to absorb
 
@@ -119,7 +128,10 @@ differences we *intend* (plan §7). It currently folds:
 - board text with nothing to draw: we do not emit a text whose resolved string is
   empty, so the same *rule* (not our implementation of it) is applied to the
   reference's per-layer counts;
-- hierarchy path spelling, by comparing depth rather than the sheet's name.
+- hierarchy path spelling, by comparing depth rather than the sheet's name;
+- our `~`-prefixed handle for an object the file left unnamed (a junction, and a
+  few percent of pins and graphics): the reference has no id for those at all, so
+  the handle is dropped and the class falls to the count comparison.
 
 Teaching the normaliser anything new is the **second** triage outcome below, and
 it is a decision, not a convenience. Do not silence a difference to make the run

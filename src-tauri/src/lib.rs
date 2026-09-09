@@ -712,13 +712,20 @@ fn revision_label(rev: &rawstore::Revision) -> String {
     rev.id.clone()
 }
 
-/// The `.kicad_pcb` source file in a revision's source-hash map (design-relative),
-/// for the diff engine's PCB-pass pruning. `None` for a board-less (schematic-only)
-/// revision.
+/// The board source file in a revision's source-hash map (design-relative), for the
+/// diff engine's PCB-pass pruning. `None` for a board-less (schematic-only) revision.
+///
+/// Both sources are matched: a `.kicad_pcb`, or an Altium `.PcbDoc` (whose extension
+/// the designer's own file may spell in any case). Missing the Altium board here does
+/// not fail the diff — it makes the PCB pass run on every revision pair, including the
+/// ones where the board never changed.
 fn pcb_source_file(hashes: &std::collections::BTreeMap<String, String>) -> Option<String> {
     hashes
         .keys()
-        .find(|k| k.ends_with(".kicad_pcb"))
+        .find(|k| {
+            let lower = k.to_ascii_lowercase();
+            lower.ends_with(".kicad_pcb") || lower.ends_with(".pcbdoc")
+        })
         .cloned()
 }
 
@@ -1670,6 +1677,23 @@ pub fn run() {
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+
+    /// The diff's PCB pass is pruned by whether the board file changed, so the board
+    /// has to be findable in the source-hash map whichever tool wrote it. Missing the
+    /// Altium case ran the board diff on every revision pair, board or not.
+    #[test]
+    fn the_board_source_file_is_found_for_both_sources() {
+        let hashes = |name: &str| BTreeMap::from([
+            ("root.kicad_sch".to_string(), "h".to_string()),
+            (name.to_string(), "h".to_string()),
+        ]);
+        assert_eq!(pcb_source_file(&hashes("b.kicad_pcb")).as_deref(), Some("b.kicad_pcb"));
+        assert_eq!(pcb_source_file(&hashes("Board.PcbDoc")).as_deref(), Some("Board.PcbDoc"));
+        assert_eq!(pcb_source_file(&hashes("board.pcbdoc")).as_deref(), Some("board.pcbdoc"));
+        let schematic_only =
+            BTreeMap::from([("Top_Level.SchDoc".to_string(), "h".to_string())]);
+        assert_eq!(pcb_source_file(&schematic_only), None, "a schematic-only revision has none");
+    }
 
     /// Hash every file under `dir` into the {rel-path -> blake3} map a revision keys on.
     fn hash_tree(dir: &Path) -> BTreeMap<String, String> {

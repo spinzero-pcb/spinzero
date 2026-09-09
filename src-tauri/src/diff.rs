@@ -306,8 +306,10 @@ pub struct GeomComp {
     pub angle: f64,
     #[serde(default)]
     pub bbox: Option<[f64; 4]>,
-    /// Stable per-instance identity (the KiCad footprint uuid; EPOCH ≥ 19).
-    /// Empty for legacy caches / Altium — those fall back to designator pairing.
+    /// Stable per-instance identity: the KiCad footprint uuid (EPOCH ≥ 19), or the
+    /// Altium footprint's `SOURCEUNIQUEID` — the SCHEMATIC instance it came from,
+    /// which survives a board re-annotation. Empty only for legacy caches, which
+    /// fall back to designator pairing.
     #[serde(default)]
     pub uuid: String,
 }
@@ -722,6 +724,12 @@ fn sch_kind_noun(kind: &str) -> &'static str {
         "bus" => "bus",
         "bus_entry" => "bus entry",
         "junction" => "junction",
+        // Altium-only kinds. A port and a sheet symbol are hierarchy, not
+        // decoration, so they outrank the line work in `sch_cluster_noun`.
+        "sheet_symbol" => "sheet symbol",
+        "port" => "port",
+        "no_connect" => "no-connect",
+        "image" => "image",
         _ => "element",
     }
 }
@@ -729,9 +737,9 @@ fn sch_kind_noun(kind: &str) -> &'static str {
 /// The dominant element in a cluster (highest priority present), whose noun titles the
 /// row — a symbol drag that also stretched its wires reads as "power symbol", not "wire".
 fn sch_cluster_noun(members: &[ChangedElem]) -> &'static str {
-    const PRIORITY: [&str; 11] = [
-        "power", "symbol", "hier_label", "global_label", "label", "text", "graphic",
-        "netclass_flag", "bus", "wire", "junction",
+    const PRIORITY: [&str; 15] = [
+        "sheet_symbol", "power", "symbol", "port", "hier_label", "global_label", "label",
+        "text", "image", "graphic", "netclass_flag", "bus", "wire", "junction", "no_connect",
     ];
     for k in PRIORITY {
         if members.iter().any(|m| m.kind == k) {
@@ -2321,9 +2329,10 @@ fn diff_docs(a: &Bundle, b: &Bundle, out: &mut Vec<Change>) {
 /// Component placement changes from the geometry IR (move / rotate / side flip).
 ///
 /// Instances are paired by **footprint uuid** (the stable per-instance identity,
-/// EPOCH ≥ 19): a shifted STITCH1 among 136 same-designator stitching footprints is
-/// one accurate row, unchanged siblings none. Instances without a uuid on either
-/// side (legacy caches extracted before the field existed, Altium) fall back to
+/// EPOCH ≥ 19; on Altium the schematic instance's `SOURCEUNIQUEID`): a shifted
+/// STITCH1 among 136 same-designator stitching footprints is one accurate row,
+/// unchanged siblings none. Instances without a uuid on either side (legacy caches
+/// extracted before the field existed) fall back to
 /// designator pairing that is duplicate-safe: within a repeated designator, exact
 /// positions consume each other first, then leftovers pair in sorted-position order
 /// — never the old first-instance collapse that flooded one row per sibling.
@@ -2353,7 +2362,7 @@ fn diff_placement(a: &Geometry, b: &Geometry, out: &mut Vec<Change>) {
         .filter(|c| c.uuid.is_empty() || !paired_a.contains(c.uuid.as_str()))
         .collect();
 
-    // --- 2) designator fallback for the unpaired remainder (legacy / Altium) ---
+    // --- 2) designator fallback for the unpaired remainder (legacy caches) ---
     // Group each side's leftovers by designator; within a group, exact-position
     // matches consume first (an unmoved duplicate never pairs with a moved one),
     // then the leftovers zip in sorted order. Surplus instances on one side are
@@ -3373,7 +3382,9 @@ pub fn diff_key(cache_key_a: &str, cache_key_b: &str) -> String {
     //     BOM row instead of showing up in the component pass alone.
     // 12: a BOM row whose two sides label the same ("9.1k R_0402 → 9.1k R_0402") leads
     //     with the field that actually changed instead.
-    const DIFF_ENGINE_VERSION: &str = "12";
+    // 13: Altium sheets carry per-element geometry, so their graphical edits split
+    //     into anchored rows (with the Altium element kinds) instead of one clubbed row.
+    const DIFF_ENGINE_VERSION: &str = "13";
     let mut h = blake3::Hasher::new();
     h.update(DIFF_ENGINE_VERSION.as_bytes());
     h.update(b" ");

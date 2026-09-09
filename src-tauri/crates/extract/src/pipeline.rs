@@ -588,8 +588,6 @@ fn read_pcb_pad_net(pcb_path: &Path) -> BTreeMap<(String, String), String> {
 ///
 /// Everything after the model is the KiCad path's code: the same `Design`
 /// struct, the same manifest, the same writer. Only the front half differs.
-/// The per-element schematic geometry is M4, so that manifest key stays absent
-/// and the diff falls back to its one-row-per-sheet behaviour.
 fn run_design_altium(
     project: &Path,
     out_dir: &Path,
@@ -730,6 +728,29 @@ fn run_design_altium(
     }
     emit(Msg::Progress(format!("schematics: {} sheet svgs", schematic_svgs.len())));
 
+    // Per-element schematic geometry (the diff engine's input for splitting +
+    // anchoring graphical edits). Best-effort, exactly as the KiCad path: a write
+    // failure logs and leaves the manifest key absent, so the diff falls back to
+    // its one-row-per-sheet behaviour rather than failing the extraction.
+    let schematic_geometry = {
+        let geom = crate::altium::sch_geom::build(&sheets);
+        let rel = "schematics/geometry.json";
+        match serde_json::to_string(&geom)
+            .map_err(|e| e.to_string())
+            .and_then(|json| {
+                std::fs::write(sch_dir.join("geometry.json"), json).map_err(|e| e.to_string())
+            }) {
+            Ok(()) => {
+                emit(Msg::Artifact(rel.to_string()));
+                Some(rel.to_string())
+            }
+            Err(e) => {
+                emit(Msg::Progress(format!("schematic geometry skipped: {e}")));
+                None
+            }
+        }
+    };
+
     let design_file = format!("{name}_design.json");
     let json = serde_json::to_string_pretty(&model).map_err(|e| e.to_string())?;
     std::fs::write(out_dir.join(&design_file), json).map_err(|e| e.to_string())?;
@@ -741,7 +762,7 @@ fn run_design_altium(
         schematic_svgs,
         pcb_svgs,
         pcb_geometry,
-        schematic_geometry: None,
+        schematic_geometry,
     };
     std::fs::write(
         out_dir.join("design_review_manifest.json"),

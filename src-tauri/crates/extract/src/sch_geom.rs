@@ -24,7 +24,7 @@ pub const SCH_GEOMETRY_SCHEMA: &str = "extract.sch.geometry.a0";
 
 /// Round to 0.1 µm — well below any real edit, keeps the JSON small and
 /// byte-deterministic (mirrors `ir::r4`).
-fn r4(v: f64) -> f64 {
+pub(crate) fn r4(v: f64) -> f64 {
     let r = (v * 1e4).round() / 1e4;
     if r == 0.0 { 0.0 } else { r } // normalise -0.0 so a signature never flips on sign
 }

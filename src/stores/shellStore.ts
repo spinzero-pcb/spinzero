@@ -49,13 +49,13 @@ export const useShellStore = create<ShellState>((set) => ({
     if (kind === "project") {
       await useProjectStore.getState().openProject(dir).catch(() => {});
     } else if (kind === "design") {
-      // A raw KiCad design folder — jump straight into New Project with it
+      // A raw KiCad/Altium design folder — jump straight into New Project with it
       // pre-filled instead of telling the user "not a project" (the old silent
       // failure on KiCad demo folders like complex_hierarchy).
       set({ wizardOpen: true, wizardInitialFolder: dir, err: null });
     } else {
       const msg =
-        "That folder isn’t a SpinZero project or a KiCad design. Pick the folder that contains your .kicad_pro file.";
+        "That folder isn’t a SpinZero project or an EDA design. Pick the folder that contains your .kicad_pro or .PrjPcb file.";
       set({ err: msg });
       useToastStore.getState().push({ kind: "error", title: "Nothing to open here", message: msg });
     }

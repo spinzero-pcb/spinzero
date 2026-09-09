@@ -732,3 +732,132 @@ fn every_drawn_uuid_resolves_through_the_cross_probe_indexes() {
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
+
+
+/// Every element the schematic geometry names is drawn under that id in the
+/// sheet SVG, and every sheet the manifest lists has geometry.
+///
+/// The diff engine reads the geometry and the viewer frames the change from the
+/// SVG group with the matching `data-uuid`. If the two disagree, the diff still
+/// reports the edit and clicking it lands nowhere — a failure with no error, so
+/// it is asserted rather than trusted.
+#[test]
+fn schematic_geometry_is_addressable_in_the_sheet_svgs() {
+    let Some(root) = corpus() else {
+        eprintln!("skipping: no Altium corpus");
+        return;
+    };
+    for (i, d) in designs(&root).iter().enumerate() {
+        let name = d.project.file_name().unwrap().to_string_lossy().into_owned();
+        let (dir, _model) = extract(d, &format!("schgeom{i}"));
+        let manifest: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.join("design_review_manifest.json")).unwrap(),
+        )
+        .unwrap();
+        let rel = manifest["schematic_geometry"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{name}: no schematic geometry in the manifest"));
+        let geom: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.join(rel)).unwrap()).unwrap();
+        assert_eq!(geom["units"], "mm", "{name}");
+
+        // file name -> the SVG rendered from it, so an element can be looked for
+        // in the sheet it belongs to rather than in all of them.
+        let mut svg_of: BTreeMap<String, String> = BTreeMap::new();
+        for entry in manifest["schematic_svgs"].as_array().unwrap() {
+            let file = entry["file"].as_str().unwrap();
+            let sheet = format!("{}.SchDoc", entry["sheet_name"].as_str().unwrap_or_default());
+            svg_of.insert(sheet, std::fs::read_to_string(dir.join(file)).unwrap());
+        }
+
+        let sheets = geom["sheets"].as_array().unwrap();
+        assert!(!sheets.is_empty(), "{name}: geometry names no sheets");
+        for sheet in sheets {
+            let file = sheet["file"].as_str().unwrap();
+            let Some(svg) = svg_of.get(file) else { continue };
+            let elems = sheet["elements"].as_array().unwrap();
+            assert!(!elems.is_empty(), "{name}: {file} has no elements");
+            // A component's own id must be drawn: it is the anchor a placement or
+            // a field edit lands on. The rest of the classes are checked in bulk
+            // below, because a symbol that draws nothing (an empty parameter, a
+            // hidden pin) deliberately emits no group (section 7).
+            let (mut hit, mut all) = (0usize, 0usize);
+            for e in elems {
+                let uuid = e["uuid"].as_str().unwrap();
+                let drawn = svg.contains(&format!(r#" data-uuid="{uuid}""#));
+                if e["kind"] == "symbol" {
+                    assert!(drawn, "{name}: {file} symbol {uuid} is in no SVG group");
+                }
+                all += 1;
+                hit += drawn as usize;
+            }
+            let share = hit as f64 / all as f64;
+            assert!(
+                share >= 0.9,
+                "{name}: {file}: only {hit}/{all} ({:.0}%) of the geometry is addressable",
+                share * 100.0
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+/// The board's pairing key names a real schematic instance of the same part.
+///
+/// `SOURCEUNIQUEID` is what the diff pairs footprints on across two revisions,
+/// so it has to be an identity and not a coincidence: unique per footprint, and
+/// its last segment a `UniqueID` the schematic actually wrote for that
+/// designator. The chain in front of it is the board's own record and can be
+/// stale (section 7, board authority), so only the leaf is checked.
+#[test]
+fn every_footprint_pairs_to_a_schematic_instance() {
+    let Some(root) = corpus() else {
+        eprintln!("skipping: no Altium corpus");
+        return;
+    };
+    for (i, d) in designs(&root).iter().enumerate() {
+        let name = d.project.file_name().unwrap().to_string_lossy().into_owned();
+        let (dir, model) = extract(d, &format!("pairing{i}"));
+        let g: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.join("pcb/geometry.json")).expect("geometry.json"),
+        )
+        .unwrap();
+
+        // Every schematic instance the design model knows, by designator.
+        let mut sch: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        for c in model["components"].as_array().unwrap() {
+            let dsg = c["designator"].as_str().unwrap_or_default().to_string();
+            if let Some(id) = c["svg_id"].as_str().filter(|s| !s.is_empty()) {
+                sch.entry(dsg).or_default().insert(id.to_string());
+            }
+        }
+
+        let comps = g["components"].as_array().unwrap();
+        let mut seen: BTreeMap<String, String> = BTreeMap::new();
+        let (mut resolved, mut total) = (0usize, 0usize);
+        for c in comps {
+            let dsg = c["ref"].as_str().unwrap_or_default().to_string();
+            let uuid = c["uuid"].as_str().unwrap_or_default().to_string();
+            assert!(!uuid.is_empty(), "{name}: {dsg} has no pairing key");
+            if let Some(other) = seen.insert(uuid.clone(), dsg.clone()) {
+                panic!("{name}: {other} and {dsg} share the pairing key {uuid}");
+            }
+            let leaf = uuid.rsplit(['\\', '/']).next().unwrap_or("").to_string();
+            total += 1;
+            if sch.get(&dsg).map(|ids| ids.contains(&leaf)).unwrap_or(false) {
+                resolved += 1;
+            }
+        }
+        assert!(total > 0, "{name}: no placed footprints");
+        // Not all of them: the board keeps footprints the schematic no longer has
+        // (a mechanical part placed on the board alone), which is a finding the
+        // review makes, not an extraction bug.
+        let share = resolved as f64 / total as f64;
+        assert!(
+            share >= 0.9,
+            "{name}: only {resolved}/{total} ({:.0}%) of footprints pair to a schematic instance",
+            share * 100.0
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
