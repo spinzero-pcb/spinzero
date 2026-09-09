@@ -129,8 +129,13 @@ fn find_enriched_csv(bom_dir: &Path) -> Option<PathBuf> {
 mod tests {
     use super::*;
 
-    fn fixture(csv: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("spinzero_bundle_{}", std::process::id()));
+    /// A bundle fixture of its own. The directory is named for the CALLER as
+    /// well as the process: both tests here write one and delete it, and sharing
+    /// one name let the empty-BOM fixture wipe the two-row one mid-read, which
+    /// failed whichever test lost the race.
+    fn fixture(tag: &str, csv: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("spinzero_bundle_{tag}_{}", std::process::id()));
         let bom = dir.join("bom");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&bom).expect("temp dir");
@@ -145,7 +150,7 @@ mod tests {
 
     #[test]
     fn bundle_holds_only_the_three_spec_files_and_no_project_name() {
-        let dir = fixture("Reference,Value\nR1,10k\nR2,4k7\n");
+        let dir = fixture("three_files", "Reference,Value\nR1,10k\nR2,4k7\n");
         let bundle = build(Some(dir.clone()), "automotive", "Secret Board", "kicad", None, 2)
             .expect("bundle");
         let names: Vec<&String> = bundle.files.keys().collect();
@@ -162,7 +167,7 @@ mod tests {
 
     #[test]
     fn an_empty_bom_is_refused_before_anything_is_uploaded() {
-        let dir = fixture("Reference,Value\n");
+        let dir = fixture("empty_bom", "Reference,Value\n");
         assert!(build(Some(dir.clone()), "default", "b", "kicad", None, 0).is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }

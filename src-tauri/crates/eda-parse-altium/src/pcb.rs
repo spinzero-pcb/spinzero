@@ -245,6 +245,10 @@ pub struct PcbDoc {
     /// Layer-stack regions beyond the first — the rigid-flex model, detected and
     /// reported rather than modelled (plan §4.5).
     pub substacks: Vec<String>,
+    /// Embedded 3D models, in `Models/Data` order.
+    pub models: Vec<Model>,
+    /// Where each model is placed (`ComponentBodies6`).
+    pub bodies: Vec<Body>,
     /// Streams read but not modelled, by stream and record count.
     pub skipped: BTreeMap<String, usize>,
 }
@@ -326,9 +330,17 @@ pub fn parse(doc: &Doc) -> PcbDoc {
         out.outline.push(g.outline);
     }
 
+    out.models = read_models(doc);
+    for r in doc.records("ComponentBodies6") {
+        let b = &r.payload;
+        let (Some(c), Some(len)) = (Common::parse(b), i32_at(b, 18)) else { continue };
+        let Some(text) = b.get(22..22 + len.max(0) as usize) else { continue };
+        out.bodies.push(Body { c, params: TextRecord::parse(text) });
+    }
+
     // Geometry we do not model yet, recorded so the bundle's `unresolved` block
     // can say what was skipped rather than stay silent.
-    for stream in ["ComponentBodies6", "Dimensions6", "Coordinates6", "EmbeddedBoards6"] {
+    for stream in ["Dimensions6", "Coordinates6", "EmbeddedBoards6"] {
         let n = doc.records(stream).len();
         if n > 0 {
             out.skipped.insert(stream.to_string(), n);
@@ -657,6 +669,70 @@ fn read_region(r: &Raw) -> Option<Region> {
         outline.push((units::board_mm(x as i64), units::board_mm(y as i64)));
     }
     Some(Region { c, params, outline })
+}
+
+/// An embedded 3D model: one `Models/Data` record plus the `Models/<n>` stream
+/// beside it.
+///
+/// Altium stores the model file itself, zlib-deflated, in a stream of its own,
+/// and `Models/Data`'s record order is the stream index. A board therefore
+/// carries its own MCAD geometry with no library to resolve, which is the whole
+/// reason the 3D artifact can be built from the board alone.
+#[derive(Debug, Clone, Default)]
+pub struct Model {
+    /// `{GUID}`, exactly as `ComponentBodies6` writes `MODELID`.
+    pub id: String,
+    /// The model's own file name, extension included (`DBV0005A.stp`).
+    pub name: String,
+    pub embedded: bool,
+    /// The model's own rotation about each axis, in degrees.
+    pub rot: (f64, f64, f64),
+    /// Standoff, in millimetres.
+    pub dz: f64,
+    /// The inflated file. Empty when the board only REFERENCES the model, which
+    /// is what `EMBED=FALSE` means: the file lives on the designer's machine.
+    pub data: Vec<u8>,
+}
+
+/// One placement of a model on the board (`ComponentBodies6`).
+///
+/// The record is a region's layout — the common header, a length-prefixed
+/// parameter block — and every 3D field is in the parameters, so this keeps the
+/// block whole rather than picking fields the caller may not want.
+#[derive(Debug, Clone)]
+pub struct Body {
+    pub c: Common,
+    pub params: TextRecord,
+}
+
+/// Read every embedded model, in `Models/Data` order.
+fn read_models(doc: &Doc) -> Vec<Model> {
+    use std::io::Read as _;
+    let mut out = Vec::new();
+    for (i, r) in doc.text_records("Models").iter().enumerate() {
+        let mut m = Model {
+            id: r.s("ID").to_string(),
+            name: r.s("NAME").to_string(),
+            embedded: r.b("EMBED"),
+            rot: (
+                r.f("ROTX").unwrap_or(0.0),
+                r.f("ROTY").unwrap_or(0.0),
+                r.f("ROTZ").unwrap_or(0.0),
+            ),
+            dz: units::board_mm(r.i("DZ").unwrap_or(0)),
+            data: Vec::new(),
+        };
+        // The stream is deflated. A model that does not inflate costs that one
+        // model, not the board — the same rule the schematic's images follow.
+        if let Some(z) = doc.cfb.stream_ci(&format!("Models/{i}")) {
+            let mut data = Vec::new();
+            if flate2::read::ZlibDecoder::new(z).read_to_end(&mut data).is_ok() {
+                m.data = data;
+            }
+        }
+        out.push(m);
+    }
+    out
 }
 
 /// A `u8`-length-prefixed 8-bit string, as the small pad and text blocks carry.

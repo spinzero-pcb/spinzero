@@ -14,7 +14,7 @@
 //! and the diff compares like with like. A Y flip also reverses the sense of
 //! every angle, which is why rotations are negated on the way out.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
 
 use eda_parse_altium::pcb::{self, PcbDoc, BOTTOM, KEEP_OUT, MULTI_LAYER, TOP};
@@ -173,12 +173,174 @@ pub fn extract_pcb(
         }
     };
     emit(Msg::Progress(format!("pcb: {} layer svgs", svgs.len())));
+    // A 3D artifact is worth having and never worth losing the board over.
+    if let Err(e) = write_models(&board, &g.components, out_dir, emit) {
+        emit(Msg::Progress(format!("models skipped: {e}")));
+    }
     Ok(BoardArtifacts {
         geometry: rel,
         svgs,
         theme: crate::altium::pcb_svg::board_theme(g),
         summary,
     })
+}
+
+/// Write `models/models.json` and every embedded 3D model beside it.
+///
+/// Altium carries its own MCAD geometry: each model is a zlib-deflated file in a
+/// stream of its own, and `ComponentBodies6` says where each one sits. So the
+/// artifact needs no library to resolve and nothing can be "unresolved" except a
+/// model the board only references — `EMBED=FALSE`, the file on the designer's
+/// machine — which is counted the way a linked image is.
+///
+/// The document is the shared `extract.models.a0`, so a 3D view reads one shape
+/// whatever drew the board. Two things are Altium's own and are named as such:
+/// `at` on a model, because the file states the model's placement absolutely
+/// rather than as an offset from the footprint, and `standoff`, which Altium
+/// keeps per body.
+fn write_models(
+    b: &PcbDoc,
+    components: &[CompDef],
+    out_dir: &Path,
+    emit: &mut dyn FnMut(Msg),
+) -> Result<usize, String> {
+    if b.bodies.is_empty() && b.models.is_empty() {
+        return Ok(0);
+    }
+    let models_dir = out_dir.join("models");
+    let files_dir = models_dir.join("files");
+    std::fs::create_dir_all(&files_dir).map_err(|e| e.to_string())?;
+
+    // id -> (file name written, format). Written once however many bodies place
+    // it: the corpus board embeds one model twice under two ids and 48 streams
+    // hold 33 distinct files.
+    let mut written: BTreeMap<&str, (String, String)> = BTreeMap::new();
+    let mut used: BTreeSet<String> = BTreeSet::new();
+    let mut not_embedded = 0usize;
+    for m in &b.models {
+        if m.id.is_empty() {
+            continue;
+        }
+        if m.data.is_empty() {
+            not_embedded += 1;
+            continue;
+        }
+        let stem = if m.name.trim().is_empty() { m.id.as_str() } else { m.name.trim() };
+        let mut name = slug(stem);
+        let mut n = 1;
+        while !used.insert(name.clone()) {
+            n += 1;
+            name = format!("{}_{n}", slug(stem));
+        }
+        let format = std::path::Path::new(stem)
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        std::fs::write(files_dir.join(&name), &m.data).map_err(|e| e.to_string())?;
+        written.insert(m.id.as_str(), (format!("files/{name}"), format));
+    }
+
+    let by_id: BTreeMap<&str, &pcb::Model> = b.models.iter().map(|m| (m.id.as_str(), m)).collect();
+    let mut per_component: BTreeMap<u16, Vec<serde_json::Value>> = BTreeMap::new();
+    let mut refs = 0usize;
+    for body in &b.bodies {
+        let id = body.params.s("MODELID");
+        if id.is_empty() {
+            continue;
+        }
+        let Some(owner) = body.c.component else { continue };
+        let Some(model) = by_id.get(id) else { continue };
+        refs += 1;
+        let mil = |k: &str| body.params.f(k).map(eda_parse_altium::units::mil_mm);
+        let (mx, my) = (mil("MODEL.2D.X").unwrap_or(0.0), mil("MODEL.2D.Y").unwrap_or(0.0));
+        let (x, y) = Flip.pt(mx, my);
+        let origin = b
+            .components
+            .get(usize::from(owner))
+            .map(|c| Flip.pt(c.x, c.y))
+            .unwrap_or((0.0, 0.0));
+        // A model may carry no name of its own — the motherboard embeds one that
+        // way — and the file is still real, so its id names it.
+        let path = if model.name.trim().is_empty() { id } else { model.name.trim() };
+        let mut entry = serde_json::json!({
+            "path": path,
+            "id": id,
+            // Where the board puts this model, in the bundle's own space.
+            "at": { "x": r4(x), "y": r4(y), "angle": r4(Flip.angle(body.params.f("MODEL.2D.ROTATION").unwrap_or(0.0))) },
+            // And the same thing as the offset from the footprint the KiCad path
+            // writes, so one reader serves both. It is taken from the placement
+            // ORIGIN, not from `CompDef.x/y`: that is the pad-anchor centroid
+            // (D2.4), which is the right answer for pick-and-place and the wrong
+            // one for a model whose own origin the library chose.
+            "offset": {
+                "x": r4(x - origin.0),
+                "y": r4(y - origin.1),
+                "z": r4(mil("MODEL.3D.DZ").unwrap_or(model.dz)),
+            },
+            "scale": { "x": 1.0, "y": 1.0, "z": 1.0 },
+            "rotate": {
+                "x": r4(body.params.f("MODEL.3D.ROTX").unwrap_or(model.rot.0)),
+                "y": r4(body.params.f("MODEL.3D.ROTY").unwrap_or(model.rot.1)),
+                "z": r4(body.params.f("MODEL.3D.ROTZ").unwrap_or(model.rot.2)),
+            },
+            "standoff": r4(mil("STANDOFFHEIGHT").unwrap_or(0.0)),
+            "height": r4(mil("OVERALLHEIGHT").unwrap_or(0.0)),
+        });
+        match written.get(id) {
+            Some((file, format)) => {
+                entry["file"] = serde_json::json!(file);
+                entry["format"] = serde_json::json!(format);
+            }
+            // The board names a model it does not carry. A 3D view that cannot
+            // show a part should say so, the way a linked image does.
+            None => entry["embedded"] = serde_json::json!(false),
+        }
+        per_component.entry(owner).or_default().push(entry);
+    }
+
+    let mut entries = Vec::new();
+    for (owner, models) in per_component {
+        let Some(c) = components.get(usize::from(owner)) else { continue };
+        entries.push(serde_json::json!({
+            "reference": c.reference,
+            "footprint": c.fp,
+            "layer": c.layer,
+            "uuid": c.uuid,
+            "at": { "x": c.x, "y": c.y, "angle": c.angle },
+            "models": models,
+        }));
+    }
+
+    let doc = serde_json::json!({
+        "schema": "extract.models.a0",
+        "count": entries.len(),
+        "refs": refs,
+        "files": written.len(),
+        "unresolved": not_embedded,
+        "models": entries,
+    });
+    std::fs::write(
+        models_dir.join("models.json"),
+        serde_json::to_string_pretty(&doc).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())?;
+    emit(Msg::Artifact("models/models.json".to_string()));
+    emit(Msg::Progress(format!(
+        "models: {refs} refs on {} footprints, {} files embedded, {not_embedded} referenced only",
+        entries.len(),
+        written.len()
+    )));
+    Ok(entries.len())
+}
+
+/// A model file name safe to write beside the bundle.
+fn slug(name: &str) -> String {
+    let s: String = name
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_' { c } else { '_' })
+        .collect();
+    s.trim_matches('_').to_string()
 }
 
 /// The geometry document plus what building it could not resolve.

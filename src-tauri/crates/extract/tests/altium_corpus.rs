@@ -992,3 +992,54 @@ fn every_variant_names_parts_the_design_places() {
     }
     assert!(seen_any, "the corpus defines variants; none were modelled");
 }
+
+/// Every 3D model the board embeds is written, and every model reference
+/// resolves to a footprint and a file.
+///
+/// Altium carries its own MCAD geometry: each model is a zlib-deflated file in a
+/// stream of its own and `ComponentBodies6` says where it goes, so the artifact
+/// needs no library to resolve. A reference that names a model the board does
+/// not carry is the one thing that can be missing, and it says so per model.
+#[test]
+fn embedded_models_are_written_and_every_reference_resolves() {
+    let Some(root) = corpus() else {
+        eprintln!("skipping: no Altium corpus");
+        return;
+    };
+    let mut boards_with_models = 0;
+    for (i, d) in designs(&root).iter().enumerate() {
+        let name = d.project.file_name().unwrap().to_string_lossy().into_owned();
+        let (dir, _model) = extract(d, &format!("models{i}"));
+        let path = dir.join("models/models.json");
+        if !path.exists() {
+            continue;
+        }
+        boards_with_models += 1;
+        let doc: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("models.json")).unwrap();
+        assert_eq!(doc["schema"], "extract.models.a0", "{name}");
+        let entries = doc["models"].as_array().expect("models array");
+        assert!(!entries.is_empty(), "{name}: a models.json with no models");
+        for e in entries {
+            let reference = e["reference"].as_str().unwrap_or_default();
+            assert!(!reference.is_empty(), "{name}: a model entry with no footprint");
+            for m in e["models"].as_array().into_iter().flatten() {
+                let path_name = m["path"].as_str().unwrap_or_default();
+                assert!(!path_name.is_empty(), "{name}: {reference} names an unnamed model");
+                // Either the file is beside the bundle, or the board only
+                // referenced it and the entry says so.
+                match m["file"].as_str() {
+                    Some(rel) => assert!(
+                        dir.join("models").join(rel).is_file(),
+                        "{name}: {reference} points at {rel}, which was not written"
+                    ),
+                    None => assert_eq!(
+                        m["embedded"], serde_json::json!(false),
+                        "{name}: {reference} has no file and does not say why"
+                    ),
+                }
+            }
+        }
+    }
+    assert!(boards_with_models > 0, "the corpus embeds 3D models; none were written");
+}
