@@ -7,11 +7,17 @@
 //! Connection points are compared **exactly**. The plan (§3.5) proposes the
 //! sheet's `HotSpotGridSize` as a tolerance, but that is the snap radius Altium
 //! uses while a wire is being drawn — 40 mil here, wide enough to join two
-//! parallel wires one grid step apart. What the files actually contain is
-//! on-grid geometry: every one of the corpus's sheet entries lands exactly on a
-//! wire endpoint. So exact endpoints plus point-on-segment containment (which is
-//! what joins a T-junction) is the model, and the count of pins that end up
-//! unconnected is reported so a tolerance problem shows as a number.
+//! parallel wires one grid step apart. What the files mostly contain is on-grid
+//! geometry: every one of the corpus's sheet entries lands exactly on a wire
+//! endpoint. So exact endpoints plus point-on-segment containment (which is what
+//! joins a T-junction) is the model.
+//!
+//! [`hot_spot_pass`] is the one exception, and it is a fallback rather than a
+//! tolerance: a pin whose free end touches nothing at all joins the nearest wire
+//! vertex inside the snap radius. It cannot change a connection the exact pass
+//! already made. The corpus needs it — four of `TR1`'s pins on the 5BR design
+//! end just short of the wire drawn to them — and every pin it joins is counted,
+//! along with the pins that stay unconnected, so both show as numbers.
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -53,6 +59,15 @@ pub struct SheetDiagnostics {
     pub hidden_supply_pins: usize,
     /// Bus polylines seen; buses are recorded, not expanded into member nets.
     pub buses: usize,
+    /// Hidden pins naming no supply whose pad a visible pin already claims. They
+    /// are a second connection point on that pad, so they get no terminal.
+    pub hidden_pins_without_net: usize,
+    /// Pins joined to a wire by the sheet's own snap radius rather than exactly.
+    pub pins_joined_by_hot_spot: usize,
+    /// Pins left unconnected because two wire vertices were equally near.
+    pub hot_spot_ambiguous: usize,
+    /// Net labels carrying no text. They name nothing and draw nothing.
+    pub unnamed_labels: usize,
 }
 
 /// Union-find over exact connection points.
@@ -60,17 +75,28 @@ pub struct SheetDiagnostics {
 struct Conn {
     parent: Vec<usize>,
     ids: HashMap<Pt, usize>,
+    /// How many elements registered each node. A node with one use is a point
+    /// nothing else in the sheet touches, which is what the hot-spot pass looks
+    /// for.
+    uses: Vec<u32>,
 }
 
 impl Conn {
     fn id(&mut self, p: Pt) -> usize {
         if let Some(&i) = self.ids.get(&p) {
+            self.uses[i] += 1;
             return i;
         }
         let i = self.parent.len();
         self.parent.push(i);
+        self.uses.push(1);
         self.ids.insert(p, i);
         i
+    }
+
+    /// Look a point up without registering a use.
+    fn at(&self, p: Pt) -> Option<usize> {
+        self.ids.get(&p).copied()
     }
 
     fn find(&mut self, x: usize) -> usize {
@@ -93,6 +119,82 @@ impl Conn {
             self.parent[ra] = rb;
         }
     }
+}
+
+/// Join a pin that reaches nothing to the nearest wire vertex inside the
+/// sheet's own snap radius.
+///
+/// Exact matching stays the rule (see the module header), and this runs only
+/// where exact matching found nothing at all. Altium snaps a pin's hot spot to a
+/// nearby wire end while the designer draws, and it keeps the connection when
+/// the two do not land on the same coordinate. `TR1` on the 5BR design is the
+/// corpus case: pins 8, 10, 12 and 14 end 0.53 and 0.87 sheet units short of the
+/// wire drawn to them, which is invisible on screen and cost four real
+/// connections.
+///
+/// Three conditions bound it, so it can only add a connection the design draws:
+///
+/// 1. The pin's free end touches **nothing** — no wire, no label, no port, no
+///    other pin. A pin already joined to anything is left alone.
+/// 2. Only a wire VERTEX counts as a target, not a point part-way along a
+///    segment. A pin that misses the middle of a wire is a broken design, not a
+///    snap.
+/// 3. One nearest vertex must win outright. Two at the same distance would be a
+///    coin flip between two nets, so the pin stays unconnected and
+///    `hot_spot_ambiguous` counts it.
+fn hot_spot_pass(sch: &SchDoc, conn: &mut Conn, pin_ends: &[(usize, Pt)], diag: &mut SheetDiagnostics) {
+    let tol = sch.sheet.hot_spot_grid;
+    if tol <= 0 {
+        return;
+    }
+    let limit = (tol as i128) * (tol as i128);
+    for &(node, p) in pin_ends {
+        if conn.uses[node] > 1 {
+            continue;
+        }
+        if sch
+            .wires
+            .iter()
+            .chain(&sch.buses)
+            .any(|w| w.pts.windows(2).any(|s| on_segment(s[0], s[1], p)))
+        {
+            continue;
+        }
+        let mut near: Vec<(i128, usize)> = Vec::new();
+        for v in sch.wires.iter().flat_map(|w| w.pts.iter()) {
+            let d = dist2(*v, p);
+            if d <= limit {
+                if let Some(target) = conn.at(*v) {
+                    near.push((d, target));
+                }
+            }
+        }
+        let Some(&(best, _)) = near.iter().min_by_key(|(d, _)| *d) else {
+            continue;
+        };
+        // A tie only matters between two DIFFERENT nets. Two ends of one wire
+        // equally near are one answer, not a choice.
+        let mut roots: Vec<usize> = near
+            .iter()
+            .filter(|(d, _)| *d == best)
+            .map(|&(_, t)| conn.find(t))
+            .collect();
+        roots.sort_unstable();
+        roots.dedup();
+        match roots.as_slice() {
+            [target] => {
+                conn.union(node, *target);
+                diag.pins_joined_by_hot_spot += 1;
+            }
+            _ => diag.hot_spot_ambiguous += 1,
+        }
+    }
+}
+
+/// Squared distance between two points, in coordinate units.
+fn dist2(a: Pt, b: Pt) -> i128 {
+    let (dx, dy) = ((a.x - b.x) as i128, (a.y - b.y) as i128);
+    dx * dx + dy * dy
 }
 
 /// True when `p` lies on the segment `a`-`b` (endpoints included). Integer maths
@@ -157,6 +259,8 @@ pub fn fragments(
 ) -> Vec<Frag> {
     let mut conn = Conn::default();
     let mut pins: Vec<(usize, Terminal)> = Vec::new();
+    // Each visible pin's free end, for the hot-spot pass below.
+    let mut pin_ends: Vec<(usize, Pt)> = Vec::new();
     let mut namers: Vec<Namer> = Vec::new();
     let mut elems: Vec<GElem> = Vec::new();
     // Implicit connections for hidden supply pins, keyed by net name.
@@ -185,7 +289,29 @@ pub fn fragments(
             Some(ch) => ch.designator(base),
             None => base.to_string(),
         };
+        // Pads the symbol draws a VISIBLE pin for. A hidden pin sharing one of
+        // these is a second connection point on the same pad, and the visible
+        // pin is the one the sheet can reach.
+        let drawn: std::collections::HashSet<&str> = super::design::placed_pins(c)
+            .filter(|p| !p.hidden())
+            .map(|p| p.number.as_str())
+            .collect();
         for pin in super::design::placed_pins(c) {
+            // A hidden pin is not drawn, so nothing on the sheet can reach it.
+            // It connects only through the supply its name or its
+            // `hidden_net_name` states. One that names no supply and shares its
+            // pad with a visible pin adds nothing but a second row: `TR1` on the
+            // 5BR design has five of those, and each one became its own
+            // `unconnected-(TR1-PadN)` net beside the connected pad.
+            //
+            // A hidden pin with a pad of its OWN keeps its terminal. That pad
+            // really is unconnected, and dropping it would hide an unconnected
+            // pad from the review, which is the opposite of the point.
+            let supply = pin.hidden().then(|| implicit_supply(pin)).flatten();
+            if pin.hidden() && supply.is_none() && drawn.contains(pin.number.as_str()) {
+                diag.hidden_pins_without_net += 1;
+                continue;
+            }
             let node = conn.id(pin.connection());
             elems.push(GElem { uuid: oid(&pin.uuid, "pin", pin.at), kind: GKind::Pin, node });
             pins.push((
@@ -197,10 +323,11 @@ pub fn fragments(
                     pin_type: sch::pin_type(pin.electrical).to_string(),
                 },
             ));
-            if pin.hidden() {
-                if let Some(net) = implicit_supply(pin) {
-                    implicit.push((node, net));
-                }
+            if let Some(net) = supply {
+                implicit.push((node, net));
+            }
+            if !pin.hidden() {
+                pin_ends.push((node, pin.connection()));
             }
         }
     }
@@ -211,14 +338,28 @@ pub fn fragments(
     }
     // Net labels match on strict fractional coordinates — the tolerance is
     // asymmetric, and a loose match attaches a label to the wrong net.
+    //
+    // A label with NO TEXT names nothing and draws nothing, so it is not a
+    // namer. Altium keeps a great many of them: 31 on one MCU144E1 sheet and 27
+    // on another. Each one carried the same empty merge key, and 112 fragments
+    // chained through it into a single 67-terminal net where the reference has
+    // 37 separate ones. An empty name is not a name.
     for l in &sch.net_labels {
+        if l.text.trim().is_empty() {
+            diag.unnamed_labels += 1;
+            continue;
+        }
         let node = conn.id(l.at);
         namers.push(Namer { node, text: l.text.clone(), kind: NameKind::NetLabel });
         elems.push(GElem { uuid: oid(&l.uuid, "nl", l.at), kind: GKind::Label, node });
     }
+    // A power port still DRAWS its rail symbol with no text, so it stays an
+    // addressable element. It just does not name the net.
     for p in &sch.power_ports {
         let node = conn.id(p.at);
-        namers.push(Namer { node, text: p.text.clone(), kind: NameKind::PowerPort });
+        if !p.text.trim().is_empty() {
+            namers.push(Namer { node, text: p.text.clone(), kind: NameKind::PowerPort });
+        }
         elems.push(GElem { uuid: oid(&p.uuid, "pp", p.at), kind: GKind::PowerPort, node });
     }
     // A port connects at BOTH edges; taking only its origin misses half of a
@@ -228,8 +369,13 @@ pub fn fragments(
         let node = conn.id(ts[0]);
         let far = conn.id(ts[1]);
         conn.union(node, far);
-        namers.push(Namer { node, text: p.name.clone(), kind: NameKind::Port });
-        port_links.push((node, p.name.clone()));
+        // A nameless port draws its outline but links to nothing: a hierarchy
+        // link keyed on an empty name would join every nameless port in the
+        // design.
+        if !p.name.trim().is_empty() {
+            namers.push(Namer { node, text: p.name.clone(), kind: NameKind::Port });
+            port_links.push((node, p.name.clone()));
+        }
         elems.push(GElem { uuid: oid(&p.uuid, "p", p.at), kind: GKind::Port, node });
     }
     // Sheet entries store no coordinate; theirs is computed from the parent
@@ -238,8 +384,10 @@ pub fn fragments(
         let child = format!("{sheet_path_uuids}{}/", s.uuid);
         for e in &s.entries {
             let node = conn.id(s.entry_point(e));
-            entry_links.push((node, child.clone(), e.name.clone()));
-            namers.push(Namer { node, text: e.name.clone(), kind: NameKind::SheetEntry });
+            if !e.name.trim().is_empty() {
+                entry_links.push((node, child.clone(), e.name.clone()));
+                namers.push(Namer { node, text: e.name.clone(), kind: NameKind::SheetEntry });
+            }
             elems.push(GElem {
                 uuid: oid(&e.uuid, "se", s.entry_point(e)),
                 kind: GKind::SheetEntry,
@@ -263,13 +411,15 @@ pub fn fragments(
             let on: Vec<usize> = coords
                 .iter()
                 .filter(|&&p| on_segment(a, b, p))
-                .map(|&p| conn.id(p))
+                .filter_map(|&p| conn.at(p))
                 .collect();
             for k in 1..on.len() {
                 conn.union(on[0], on[k]);
             }
         }
     }
+
+    hot_spot_pass(sch, &mut conn, &pin_ends, diag);
 
     // Gather each connected group.
     #[derive(Default)]
@@ -669,6 +819,75 @@ mod tests {
         let who: Vec<_> = vdd.terminals.iter().map(|t| t.designator.as_str()).collect();
         assert_eq!(who, vec!["C1", "U1"], "the hidden pin joins the rail");
         assert_eq!(d.hidden_supply_pins, 1);
+    }
+
+    /// A wire drawn a fraction short of a pin still connects it. Four of `TR1`'s
+    /// pins on the 5BR design end 0.53 and 0.87 sheet units inside the wire, a
+    /// gap of 5 to 9 mil that is invisible on screen and cost four real nets.
+    #[test]
+    fn a_pin_a_fraction_short_of_its_wire_still_joins_it() {
+        let short = Pt { x: 100 * UNIT + UNIT / 2, y: 100 * UNIT };
+        let sch = SchDoc {
+            sheet: sch::SheetProps { hot_spot_grid: 4 * UNIT, ..Default::default() },
+            components: vec![
+                comp("R1", vec![pin("1", "~", short, 32)]),
+                comp("R2", vec![pin("1", "~", p(100, 140), 32)]),
+            ],
+            wires: vec![Wire { pts: vec![p(100, 100), p(100, 140)], uuid: "w".into(), ..Default::default() }],
+            ..SchDoc::default()
+        };
+        let mut d = SheetDiagnostics::default();
+        let n = crate::netlist::merge_frags(fragments(&sch, "/", &CompileOptions::board_project(), None, &mut d));
+        assert_eq!(n.len(), 1, "one net, not a wire net plus an orphan pin");
+        assert_eq!(n[0].terminals.len(), 2);
+        assert_eq!(d.pins_joined_by_hot_spot, 1);
+    }
+
+    /// The snap radius never overrides an exact match, and never guesses. A pin
+    /// already on a wire is left alone, and two wire ends equally near leave the
+    /// pin unconnected rather than picking one of two nets.
+    #[test]
+    fn the_snap_radius_neither_overrides_nor_guesses() {
+        let sch = SchDoc {
+            sheet: sch::SheetProps { hot_spot_grid: 4 * UNIT, ..Default::default() },
+            components: vec![
+                comp("R1", vec![pin("1", "~", p(100, 100), 32)]),
+                comp("R2", vec![pin("1", "~", p(200, 100), 32)]),
+            ],
+            // R1 sits on its own wire. R2 sits exactly between two wire ends.
+            wires: vec![
+                Wire { pts: vec![p(100, 100), p(100, 140)], uuid: "w1".into(), ..Default::default() },
+                Wire { pts: vec![p(199, 100), p(199, 140)], uuid: "w2".into(), ..Default::default() },
+                Wire { pts: vec![p(201, 100), p(201, 140)], uuid: "w3".into(), ..Default::default() },
+            ],
+            ..SchDoc::default()
+        };
+        let mut d = SheetDiagnostics::default();
+        let n = crate::netlist::merge_frags(fragments(&sch, "/", &CompileOptions::board_project(), None, &mut d));
+        assert_eq!(d.pins_joined_by_hot_spot, 0, "R1 was already on its wire");
+        assert_eq!(d.hot_spot_ambiguous, 1, "R2 had two nets equally near");
+        let r2 = n.iter().find(|n| n.terminals.iter().any(|t| t.designator == "R2")).unwrap();
+        assert_eq!(r2.terminals.len(), 1, "R2 stays on a net of its own");
+    }
+
+    /// A hidden pin sharing a pad with a visible one is a second connection
+    /// point on that pad, not a second pad. `TR1` on the 5BR design has five,
+    /// and each one became its own `unconnected-(TR1-PadN)` net beside the
+    /// connected pad. A hidden pin with a pad of its OWN keeps its terminal: the
+    /// pad is unconnected, and the review has to be able to see that.
+    #[test]
+    fn a_hidden_pin_loses_its_terminal_only_to_a_visible_one() {
+        let hid = |n: &str| pin(n, "SENSE", p(500, 500), 32 | super::sch::PIN_HIDDEN_BIT);
+        let sch = SchDoc {
+            components: vec![comp("U1", vec![hid("1"), hid("9"), pin("1", "~", p(100, 100), 32)])],
+            ..SchDoc::default()
+        };
+        let mut d = SheetDiagnostics::default();
+        let n = crate::netlist::merge_frags(fragments(&sch, "/", &CompileOptions::board_project(), None, &mut d));
+        assert_eq!(d.hidden_pins_without_net, 1, "only the one sharing pad 1");
+        let mut pins: Vec<&str> = n.iter().flat_map(|n| n.terminals.iter()).map(|t| t.pin.as_str()).collect();
+        pins.sort_unstable();
+        assert_eq!(pins, vec!["1", "9"], "pad 9 stays visible as unconnected");
     }
 
     /// Corner case 19: `VCC` and `Vcc` are one net, reported under one spelling.

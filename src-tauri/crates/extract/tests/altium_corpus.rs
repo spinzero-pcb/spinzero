@@ -861,3 +861,69 @@ fn every_footprint_pairs_to_a_schematic_instance() {
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
+
+/// A designator names one component, whatever sheet its parts are drawn on.
+///
+/// Altium annotates a designator once per design, so two rows under one
+/// designator are two BOM lines for one physical part. `U1` on the MCU144E1
+/// design is four placements across three sheets, and grouping them per sheet
+/// produced three components, three BOM lines and a `pin_count` of 9 against the
+/// part's real 256.
+#[test]
+fn a_designator_names_exactly_one_component() {
+    let Some(root) = corpus() else {
+        eprintln!("skipping: no Altium corpus");
+        return;
+    };
+    for (i, d) in designs(&root).iter().enumerate() {
+        let name = d.project.file_name().unwrap().to_string_lossy().into_owned();
+        let (_dir, model) = extract(d, &format!("onerow{i}"));
+        let mut seen: BTreeSet<String> = BTreeSet::new();
+        for c in model["components"].as_array().unwrap() {
+            let dsg = c["designator"].as_str().unwrap_or_default().to_string();
+            assert!(!dsg.is_empty(), "{name}: a component with no designator");
+            assert!(seen.insert(dsg.clone()), "{name}: {dsg} appears more than once");
+        }
+    }
+}
+
+/// Every pad a symbol draws reaches the netlist.
+///
+/// A pad can carry several pin records — a symbol may draw one pad as two
+/// connection points, and a hidden pin may shadow a visible one — so the count
+/// is of distinct pads, on both sides. A pad that reaches no net at all is a
+/// silent loss: `TR1` on the 5BR design lost four of them to exact endpoint
+/// matching, and nothing failed.
+#[test]
+fn every_pad_a_symbol_draws_reaches_the_netlist() {
+    let Some(root) = corpus() else {
+        eprintln!("skipping: no Altium corpus");
+        return;
+    };
+    for (i, d) in designs(&root).iter().enumerate() {
+        let name = d.project.file_name().unwrap().to_string_lossy().into_owned();
+        let (_dir, model) = extract(d, &format!("pinreach{i}"));
+        let drawn: u64 = model["components"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["classification"]["pin_count"].as_u64().unwrap_or(0))
+            .sum();
+        let mut reached: BTreeSet<(String, String)> = BTreeSet::new();
+        for n in model["nets"].as_array().unwrap() {
+            for t in n["terminals"].as_array().into_iter().flatten() {
+                reached.insert((
+                    t["designator"].as_str().unwrap_or_default().to_string(),
+                    t["pin"].as_str().unwrap_or_default().to_string(),
+                ));
+            }
+        }
+        assert!(drawn > 0, "{name}: no pads drawn");
+        assert_eq!(
+            reached.len() as u64,
+            drawn,
+            "{name}: {drawn} pads drawn, {} reach a net",
+            reached.len()
+        );
+    }
+}

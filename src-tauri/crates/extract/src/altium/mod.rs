@@ -98,6 +98,19 @@ pub struct Unresolved {
     pub unconnected_pins: usize,
     /// Pins connected implicitly as hidden supply pins.
     pub hidden_supply_pins: usize,
+    /// Hidden pins naming no supply whose pad a visible pin already draws. They
+    /// are a second connection point on one pad, so they get no terminal. A
+    /// hidden pin with a pad of its own keeps one, and reads as unconnected.
+    pub hidden_pins_without_net: usize,
+    /// Pins joined to a wire by the sheet's snap radius rather than exactly,
+    /// because the wire drawn to them ends just short of the pin.
+    pub pins_joined_by_hot_spot: usize,
+    /// Pins left unconnected because two wire vertices were equally near, so
+    /// joining either would be a guess between two nets.
+    pub hot_spot_ambiguous: usize,
+    /// Net labels carrying no text. Altium keeps them, they draw nothing, and
+    /// they name nothing.
+    pub unnamed_labels: usize,
     /// Rigid-flex layer-stack regions the board declares. Detected and named;
     /// the substack itself is not modelled, so every primitive is placed against
     /// the master stack (plan §4.5).
@@ -458,19 +471,16 @@ pub fn build_design(
     free_document: bool,
 ) -> (crate::design::Design, SourceInfo) {
     let channels = channels_of(sheets, options);
-    let mut components = Vec::new();
-    let mut extra_svg_ids: Vec<(String, String)> = Vec::new();
+    let mut placements = Vec::new();
     let mut frags = Vec::new();
     let mut diag = netlist::SheetDiagnostics::default();
     for (s, channel) in sheets.iter().zip(&channels) {
-        let (mut c, extra) = design::build_components_on(
+        placements.extend(design::build_components_on(
             &s.sch,
             &s.info.sheet_path,
             &s.info.sheet_path_uuids,
             channel.as_ref(),
-        );
-        components.append(&mut c);
-        extra_svg_ids.extend(extra);
+        ));
         frags.extend(netlist::fragments(
             &s.sch,
             &s.info.sheet_path_uuids,
@@ -479,12 +489,19 @@ pub fn build_design(
             &mut diag,
         ));
     }
+    // Parts of one multi-part symbol can sit on different sheets, so the
+    // grouping runs over the whole design rather than per sheet.
+    let (components, extra_svg_ids) = design::group_parts(placements);
     let mut nets = crate::netlist::merge_frags(frags);
     netlist::consolidate_case(&mut nets);
 
     let mut unresolved = unresolved;
     unresolved.unconnected_pins = diag.unconnected_pins;
     unresolved.hidden_supply_pins = diag.hidden_supply_pins;
+    unresolved.hidden_pins_without_net = diag.hidden_pins_without_net;
+    unresolved.pins_joined_by_hot_spot = diag.pins_joined_by_hot_spot;
+    unresolved.hot_spot_ambiguous = diag.hot_spot_ambiguous;
+    unresolved.unnamed_labels = diag.unnamed_labels;
 
     let infos: Vec<SheetInfo> = sheets.iter().map(|s| s.info.clone()).collect();
     let mut model = crate::design::assemble(
@@ -570,17 +587,16 @@ pub fn build_components(
     options: &CompileOptions,
 ) -> Vec<crate::design::Component> {
     let channels = channels_of(sheets, options);
-    let mut out = Vec::new();
+    let mut placements = Vec::new();
     for (s, channel) in sheets.iter().zip(&channels) {
-        let (mut c, _) = design::build_components_on(
+        placements.extend(design::build_components_on(
             &s.sch,
             &s.info.sheet_path,
             &s.info.sheet_path_uuids,
             channel.as_ref(),
-        );
-        out.append(&mut c);
+        ));
     }
-    out
+    design::group_parts(placements).0
 }
 
 /// Assign a channel to every sheet placement whose document is placed more than

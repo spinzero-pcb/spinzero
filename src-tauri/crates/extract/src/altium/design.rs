@@ -105,23 +105,33 @@ fn bbox_mm(min: sch::Pt, max: sch::Pt, sheet_height: i64) -> Bbox {
     }
 }
 
-/// Build the component list for one sheet instance.
+/// One placed symbol record, before the parts of a component are grouped.
 ///
-/// Multi-part components — one physical part placed as several records sharing a
-/// designator — are grouped into one component with the union of their pins, the
-/// way KiCad units are handled. Their extra placement uuids are returned
-/// alongside so the caller can index every one of them back to the designator.
+/// A multi-part symbol writes one record per part, and Altium places those
+/// records on whatever sheet the designer wants. So grouping cannot happen here:
+/// see [`group_parts`].
+#[derive(Debug, Clone)]
+pub struct Placement {
+    pub component: Component,
+    /// `CurrentPartId`. Altium's primary part is 1, and it leads the group.
+    pub part_id: i64,
+    /// This placement's pin designators, in file order. The component's pin
+    /// count is the distinct union of these over every placement.
+    pub pins: Vec<String>,
+}
+
+/// Build the placement list for one sheet instance.
+///
+/// One entry per placed symbol record. The parts of a multi-part component are
+/// still separate here, because the other parts can be on other sheets.
 pub fn build_components_on(
     sch: &SchDoc,
     sheet_path: &str,
     sheet_path_uuids: &str,
     channel: Option<&Channel>,
-) -> (Vec<Component>, Vec<(String, String)>) {
+) -> Vec<Placement> {
     let params = sheet_params(sch);
-    let mut out: Vec<Component> = Vec::new();
-    // designator -> index in `out`, for grouping the parts of one component.
-    let mut at: BTreeMap<String, usize> = BTreeMap::new();
-    let mut extra_svg_ids: Vec<(String, String)> = Vec::new();
+    let mut out: Vec<Placement> = Vec::new();
 
     for c in &sch.components {
         let base = c.designator.trim().to_string();
@@ -133,27 +143,20 @@ pub fn build_components_on(
             None => base.clone(),
         };
         let pins: Vec<&sch::Pin> = placed_pins(c).collect();
-        if let Some(&i) = at.get(&designator) {
-            // Another part of a component already seen: union the pins and the
-            // extent, keep the first placement's identity.
-            let existing = &mut out[i];
-            existing.classification.pin_count += distinct_pins(&pins);
-            if let (Some(b), Some((min, max))) = (existing.bbox, c.bbox) {
-                existing.bbox = Some(union(b, bbox_mm(min, max, sch.sheet.height)));
-            }
-            for (k, v) in parameters_of(c, &params) {
-                existing.parameters.entry(k).or_insert(v);
-            }
-            if !c.uuid.is_empty() {
-                extra_svg_ids.push((c.uuid.clone(), designator.clone()));
-            }
-            continue;
-        }
 
         let prefix = crate::design::prefix_of(&designator);
-        let pin_count = distinct_pins(&pins);
-        at.insert(designator.clone(), out.len());
-        out.push(Component {
+        // A pin COUNT is a pad count, so records sharing a designator count
+        // once. A symbol may draw one pad as two connection points — `TR1` on
+        // the 5BR design has 16 pin records under 11 designators — and two
+        // placements of one ground symbol both draw pad 1. `group_parts` takes
+        // the distinct union over every placement, which is what the reference
+        // publishes: `DGND` on the 10KW gate-driver board is 1 pin, not 2.
+        let numbers: Vec<String> = pins.iter().map(|p| p.number.clone()).collect();
+        let pin_count = distinct(&numbers);
+        out.push(Placement {
+            part_id: c.current_part_id,
+            pins: numbers,
+            component: Component {
             designator: designator.clone(),
             svg_id: c.uuid.clone(),
             // Altium's "Comment" is KiCad's "Value", and it is routinely an
@@ -175,19 +178,83 @@ pub fn build_components_on(
                 kind: crate::design::classify(&prefix, pin_count).to_string(),
                 pin_count,
             },
-            parameters: parameters_of(c, &params),
-            bbox: c.bbox.map(|(min, max)| bbox_mm(min, max, sch.sheet.height)),
+                parameters: parameters_of(c, &params),
+                bbox: c.bbox.map(|(min, max)| bbox_mm(min, max, sch.sheet.height)),
+            },
         });
+    }
+    out
+}
+
+/// Group the placements of a whole design into one component per designator.
+///
+/// A multi-part symbol is one physical part written as one record per part, and
+/// Altium places the parts wherever the designer wants. `U1` on the MCU144E1
+/// design is four placements on three different sheets, so grouping per sheet
+/// leaves three components under one designator, three BOM lines, and a
+/// `pin_count` of 9 against the part's real 256. Annotation makes a designator
+/// unique across the design, so the designator is the key.
+///
+/// The **primary part leads**. Altium numbers the parts from 1, and part 1 is
+/// the placement whose sheet the reference publishes as the component's own.
+/// The extra placements' uuids are returned alongside, so every one of them
+/// still indexes back to the designator for cross-probing.
+pub fn group_parts(placements: Vec<Placement>) -> (Vec<Component>, Vec<(String, String)>) {
+    let mut out: Vec<Component> = Vec::new();
+    // designator -> (index in `out`, the leader's part id)
+    let mut at: BTreeMap<String, (usize, i64)> = BTreeMap::new();
+    // designator -> every pin designator any placement drew, for the pad count.
+    let mut pins: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut extra_svg_ids: Vec<(String, String)> = Vec::new();
+
+    for p in placements {
+        let Placement { component: c, part_id, pins: numbers } = p;
+        pins.entry(c.designator.clone()).or_default().extend(numbers);
+        let Some(&(i, leader_part)) = at.get(&c.designator) else {
+            at.insert(c.designator.clone(), (out.len(), part_id));
+            out.push(c);
+            continue;
+        };
+        let existing = &mut out[i];
+        existing.bbox = match (existing.bbox, c.bbox) {
+            (Some(a), Some(b)) => Some(union(a, b)),
+            (a, b) => a.or(b),
+        };
+        for (k, v) in c.parameters {
+            existing.parameters.entry(k).or_insert(v);
+        }
+        // A later placement with a lower part id is the primary one: it takes
+        // over the identity, the sheet and the artwork, and the placement it
+        // displaces becomes an extra id.
+        let displaced = if part_id < leader_part {
+            at.insert(existing.designator.clone(), (i, part_id));
+            let old = std::mem::replace(&mut existing.svg_id, c.svg_id);
+            existing.hierarchy = c.hierarchy;
+            old
+        } else {
+            c.svg_id
+        };
+        if !displaced.is_empty() {
+            extra_svg_ids.push((displaced, existing.designator.clone()));
+        }
+    }
+    for c in &mut out {
+        c.classification.pin_count =
+            distinct(pins.get(&c.designator).map(Vec::as_slice).unwrap_or(&[]));
+        c.classification.kind =
+            crate::design::classify(&c.classification.prefix, c.classification.pin_count)
+                .to_string();
     }
     out.sort_by(|a, b| a.designator.cmp(&b.designator));
     (out, extra_svg_ids)
 }
 
-fn distinct_pins(pins: &[&sch::Pin]) -> u32 {
-    let mut nums: Vec<&str> = pins.iter().map(|p| p.number.as_str()).collect();
-    nums.sort_unstable();
-    nums.dedup();
-    nums.len() as u32
+/// How many distinct strings a slice holds.
+fn distinct(v: &[String]) -> u32 {
+    let mut s: Vec<&str> = v.iter().map(String::as_str).collect();
+    s.sort_unstable();
+    s.dedup();
+    s.len() as u32
 }
 
 fn union(a: Bbox, b: Bbox) -> Bbox {
@@ -269,6 +336,11 @@ mod tests {
         SchDoc { components, ..SchDoc::default() }
     }
 
+    /// One sheet, built and grouped the way the pipeline builds it.
+    fn built(d: &SchDoc, sheet: &str, ch: Option<&Channel>) -> (Vec<Component>, Vec<(String, String)>) {
+        group_parts(build_components_on(d, sheet, sheet, ch))
+    }
+
     /// Corner case 5: a field whose text is `=Name` is a parameter reference.
     /// Reading it literally puts `=Value` in the BOM's value column.
     #[test]
@@ -284,7 +356,7 @@ mod tests {
     #[test]
     fn component_value_comes_from_the_evaluated_comment() {
         let d = doc(vec![comp("R1", vec![param("Value", "10k"), param("Comment", "=Value")], ComponentKind::Standard)]);
-        let (out, _) = build_components_on(&d, "/", "/", None);
+        let (out, _) = built(&d, "/", None);
         assert_eq!(out[0].value, "10k");
         assert_eq!(out[0].library_ref, "PCBLibraryData.SVNDbLib:R");
         assert_eq!(out[0].footprint, "RESC1608X55N");
@@ -300,7 +372,7 @@ mod tests {
             comp("LOGO1", vec![], ComponentKind::Graphical),
             comp("MP1", vec![], ComponentKind::Mechanical),
         ]);
-        let (out, _) = build_components_on(&d, "/", "/", None);
+        let (out, _) = built(&d, "/", None);
         let kind = |dsg: &str| {
             let c = out.iter().find(|c| c.designator == dsg).unwrap();
             (
@@ -313,11 +385,8 @@ mod tests {
         assert_eq!(kind("MP1"), ("true".into(), "mechanical".into()));
     }
 
-    /// One physical part placed as several records is one component, with its
-    /// pins unioned — not several BOM lines.
-    #[test]
-    fn multi_part_placements_group_into_one_component() {
-        let pin = |n: &str, part: i64| sch::Pin {
+    fn upin(n: &str, part: i64) -> sch::Pin {
+        sch::Pin {
             number: n.into(),
             name: n.into(),
             electrical: 4,
@@ -326,18 +395,80 @@ mod tests {
             part_id: part,
             uuid: format!("p{n}"),
             ..Default::default()
-        };
+        }
+    }
+
+    /// One physical part placed as several records is one component, with its
+    /// pins unioned — not several BOM lines.
+    #[test]
+    fn multi_part_placements_group_into_one_component() {
         let mut a = comp("U1", vec![], ComponentKind::Standard);
-        a.pins = vec![pin("1", 1), pin("2", 1)];
+        a.pins = vec![upin("1", 1), upin("2", 1)];
         let mut b = comp("U1", vec![], ComponentKind::Standard);
         b.current_part_id = 2;
         b.uuid = "U-U1-part2".into();
-        b.pins = vec![pin("3", 2), pin("4", 2)];
-        let (out, extra) = build_components_on(&doc(vec![a, b]), "/", "/", None);
+        b.pins = vec![upin("3", 2), upin("4", 2)];
+        let (out, extra) = built(&doc(vec![a, b]), "/", None);
         assert_eq!(out.len(), 1, "one designator, one component");
         assert_eq!(out[0].classification.pin_count, 4);
         assert_eq!(out[0].classification.kind, "ic");
         assert_eq!(extra, vec![("U-U1-part2".to_string(), "U1".to_string())]);
+    }
+
+    /// The parts of one symbol can be on DIFFERENT sheets. `U1` on the MCU144E1
+    /// design is four placements across three of them, and grouping per sheet
+    /// left three components under one designator, three BOM lines and a pin
+    /// count of 9 against the part's real 256.
+    #[test]
+    fn multi_part_placements_group_across_sheets() {
+        let part = |n: i64, uuid: &str, pins: Vec<sch::Pin>| {
+            let mut c = comp("U1", vec![], ComponentKind::Standard);
+            c.current_part_id = n;
+            c.uuid = uuid.into();
+            c.pins = pins;
+            c
+        };
+        // Walk order puts part 2 first, the way the corpus design does.
+        let two = part(2, "U-p2", vec![upin("3", 2), upin("4", 2)]);
+        let one = part(1, "U-p1", vec![upin("1", 1), upin("2", 1)]);
+        let three = part(3, "U-p3", vec![upin("5", 3)]);
+        let mut placements = build_components_on(&doc(vec![two]), "/GPIO/", "/g/", None);
+        placements.extend(build_components_on(&doc(vec![one]), "/ADC/", "/a/", None));
+        placements.extend(build_components_on(&doc(vec![three]), "/Clock/", "/c/", None));
+        let (out, extra) = group_parts(placements);
+
+        assert_eq!(out.len(), 1, "one designator, one component");
+        assert_eq!(out[0].classification.pin_count, 5, "every part's pins");
+        // The primary part leads even when another part is walked first: the
+        // reference publishes part 1's sheet as the component's own.
+        assert_eq!(out[0].hierarchy.sheet_path, "/ADC/");
+        assert_eq!(out[0].svg_id, "U-p1");
+        let mut ids: Vec<&str> = extra.iter().map(|(u, _)| u.as_str()).collect();
+        ids.sort_unstable();
+        assert_eq!(ids, vec!["U-p2", "U-p3"], "every placement still indexes back");
+    }
+
+    /// A pin count is a PAD count, across every placement of the component. Two
+    /// records may share a designator inside one symbol (`TR1` on the 5BR design
+    /// draws one pad as two connection points), and two placements of one ground
+    /// symbol both draw pad 1 — which is why the reference publishes `DGND` on
+    /// the 10KW gate-driver board as 1 pin and per-placement addition said 2.
+    #[test]
+    fn a_pin_count_is_the_distinct_pads_of_every_placement() {
+        let mut c = comp("TR1", vec![], ComponentKind::Standard);
+        c.pins = vec![upin("1", 1), upin("2", 1), upin("2", 1), upin("3", 1)];
+        let (out, _) = built(&doc(vec![c]), "/", None);
+        assert_eq!(out[0].classification.pin_count, 3, "three pads, four records");
+
+        let one = |uuid: &str| {
+            let mut g = comp("DGND", vec![], ComponentKind::Standard);
+            g.uuid = uuid.into();
+            g.pins = vec![upin("1", 1)];
+            g
+        };
+        let (out, _) = built(&doc(vec![one("a"), one("b")]), "/", None);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].classification.pin_count, 1, "two placements, one pad");
     }
 
     /// A document placed twice is two channels, and each channel's parts carry
@@ -350,8 +481,8 @@ mod tests {
             format: "$Component_$ChannelIndex".into(),
         };
         let d = doc(vec![comp("C31", vec![], ComponentKind::Standard)]);
-        let (a, _) = build_components_on(&d, "/A/", "/a/", Some(&ch(1)));
-        let (b, _) = build_components_on(&d, "/B/", "/b/", Some(&ch(2)));
+        let (a, _) = built(&d, "/A/", Some(&ch(1)));
+        let (b, _) = built(&d, "/B/", Some(&ch(2)));
         assert_eq!(a[0].designator, "C31_1");
         assert_eq!(b[0].designator, "C31_2");
         assert_eq!(a[0].hierarchy.base_designator, "C31");
@@ -376,7 +507,7 @@ mod tests {
         };
         let mut c = comp("R1", vec![], ComponentKind::Standard);
         c.pins = vec![pin("1", 0), pin("2", 0), pin("1", 1), pin("2", 1), pin("1", 2), pin("2", 2)];
-        let (out, _) = build_components_on(&doc(vec![c]), "/", "/", None);
+        let (out, _) = built(&doc(vec![c]), "/", None);
         assert_eq!(out[0].classification.pin_count, 2);
     }
 }
