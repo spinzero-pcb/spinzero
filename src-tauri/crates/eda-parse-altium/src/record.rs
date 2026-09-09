@@ -386,7 +386,26 @@ fn decode_utf8(bytes: &[u8]) -> String {
 pub fn decode(bytes: &[u8]) -> String {
     match std::str::from_utf8(bytes) {
         Ok(s) => s.to_string(),
-        Err(_) => bytes.iter().map(|&b| b as char).collect(),
+        Err(_) => bytes.iter().map(|&b| cp1252(b)).collect(),
+    }
+}
+
+/// One 8-bit byte as CP1252, which is what Altium writes on a Western system.
+///
+/// Latin-1 and CP1252 agree everywhere except `0x80`-`0x9F`, where Latin-1 has
+/// C1 control codes and CP1252 has the punctuation a designer actually types:
+/// the motherboard's disclaimer opens with `0x93`, a left double quote, and
+/// reading it as Latin-1 put a control character into the SVG and the design
+/// JSON. An undefined slot keeps its code point rather than inventing one.
+fn cp1252(b: u8) -> char {
+    const HIGH: [u16; 32] = [
+        0x20AC, 0x0081, 0x201A, 0x0192, 0x201E, 0x2026, 0x2020, 0x2021, 0x02C6, 0x2030, 0x0160,
+        0x2039, 0x0152, 0x008D, 0x017D, 0x008F, 0x0090, 0x2018, 0x2019, 0x201C, 0x201D, 0x2022,
+        0x2013, 0x2014, 0x02DC, 0x2122, 0x0161, 0x203A, 0x0153, 0x009D, 0x017E, 0x0178,
+    ];
+    match b {
+        0x80..=0x9F => char::from_u32(u32::from(HIGH[usize::from(b) - 0x80])).unwrap_or(b as char),
+        _ => b as char,
     }
 }
 
@@ -433,7 +452,10 @@ mod tests {
         payload.extend_from_slice(&[0x8E, 0x8E]); // a literal 0x8E byte
         payload.push(0);
         let r = TextRecord::parse(&payload);
-        assert_eq!(r.s("TEXT"), "a|b\u{8e}");
+        // The doubled escape is what lets a real `0x8E` byte survive, and in
+        // CP1252 that byte is a capital Z with caron: the character the
+        // designer typed, and the reason Altium had to escape it at all.
+        assert_eq!(r.s("TEXT"), "a|b\u{17d}");
     }
 
     /// Corner case 3: the same field is spelled differently per document kind.

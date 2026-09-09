@@ -455,6 +455,9 @@ pub struct SchText {
     pub orientation: i64,
     pub mirrored: bool,
     pub show_border: bool,
+    /// `WordWrap`: the frame wraps its text to its own box. Altium's default is
+    /// on, and every frame in the corpus sets it.
+    pub word_wrap: bool,
     /// True when the text belongs to the drawing sheet's template rather than to
     /// the design — Altium's analogue of KiCad's worksheet.
     pub template: bool,
@@ -1093,6 +1096,7 @@ pub fn parse_records(recs: Vec<TextRecord>) -> SchDoc {
                     orientation: r.i("Orientation").unwrap_or(0),
                     mirrored: r.b("IsMirrored"),
                     show_border: r.b("ShowBorder"),
+                    word_wrap: !r.has("WordWrap") || r.b("WordWrap"),
                     template,
                     uuid: r.s("UniqueID").to_string(),
                 });

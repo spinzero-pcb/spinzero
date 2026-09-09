@@ -86,6 +86,31 @@ pub fn sheet_zones(style: i64) -> (i64, i64, i64) {
     }
 }
 
+/// Width of a string in EMs, estimated from the character classes of Times New
+/// Roman — the face the whole corpus uses.
+///
+/// This is an estimate, not a measurement: the renderer has no font metrics, and
+/// the alternative for a text frame is no wrapping at all, which puts a 3468
+/// character disclaimer on one line running off the page. The classes below are
+/// Times' own proportions to within a few percent, so a wrapped line lands
+/// within a word of where Altium puts it.
+pub fn text_width_em(text: &str) -> f64 {
+    text.chars().map(char_width_em).sum()
+}
+
+/// One character's advance, in ems.
+fn char_width_em(c: char) -> f64 {
+    match c {
+        ' ' => 0.25,
+        'i' | 'j' | 'l' | 'I' | '.' | ',' | ';' | ':' | '\'' | '|' | '!' | '`' => 0.28,
+        'f' | 't' | 'r' | '(' | ')' | '[' | ']' | '/' | '\\' => 0.33,
+        'm' | 'w' | 'M' | 'W' => 0.83,
+        '0'..='9' => 0.5,
+        'A'..='Z' => 0.67,
+        _ => 0.5,
+    }
+}
+
 /// Altium colours are BGR integers, not RGB. `#RRGGBB` out.
 pub fn bgr_hex(v: i64) -> String {
     let v = v as u32;

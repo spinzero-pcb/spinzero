@@ -1338,16 +1338,29 @@ fn emit_free_text(s: &mut String, ctx: &Ctx, t: &SchText) {
                 c(x), c(y), c(bw), c(bh), c(units::sch_line_width_mm(1))
             );
         }
-        // A frame lays its lines out from the top of the box; the file's own
-        // newlines are the only break, because Altium's word wrap depends on
-        // font metrics this renderer does not measure.
+        // A frame lays its lines out from the top of the box, breaking on the
+        // file's own newlines and then on the box width when the frame asks to
+        // wrap — which every frame in the corpus does. The width is estimated
+        // from Times' character classes rather than measured, so a break can
+        // land a word out; the alternative was a 3468-character disclaimer on
+        // one line running off the page.
         let (_, size, _, _) = ctx.font(t.font);
         let inner_x = match t.justify % 3 {
             0 => x,
             1 => x + bw / 2.0,
             _ => x + bw,
         };
-        for (i, line) in text.lines().enumerate() {
+        // `~1` is Altium's own paragraph break inside a frame, and it is the
+        // ONLY break the motherboard's disclaimer has — 3468 characters with no
+        // newline in them and twenty tildes.
+        let source = text.replace("~1", "
+");
+        let lines: Vec<String> = if t.word_wrap && bw > 0.0 {
+            source.lines().flat_map(|l| wrap(l, bw / size)).collect()
+        } else {
+            source.lines().map(str::to_string).collect()
+        };
+        for (i, line) in lines.iter().enumerate() {
             let at = px_to_pt(ctx, inner_x, y + size * (i as f64 + 0.9));
             emit_text(s, ctx, line, at, t.font, t.justify % 3, t.orientation, &t.color, ctx.class("note"));
         }
@@ -1355,6 +1368,37 @@ fn emit_free_text(s: &mut String, ctx: &Ctx, t: &SchText) {
         emit_text(s, ctx, &text, t.at, t.font, t.justify, t.orientation, &t.color, ctx.class("note"));
     }
     s.push_str("</g>");
+}
+
+/// Break one line to a box `ems` wide, on spaces.
+///
+/// Greedy, which is what Altium does, and it never drops a word: a single word
+/// too long for the box takes a line of its own and overruns rather than being
+/// cut, because a truncated word reads as a different word.
+fn wrap(line: &str, ems: f64) -> Vec<String> {
+    if ems <= 0.0 || units::text_width_em(line) <= ems {
+        return vec![line.to_string()];
+    }
+    let mut out: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    for word in line.split(' ') {
+        if cur.is_empty() {
+            cur.push_str(word);
+            continue;
+        }
+        let candidate = units::text_width_em(&cur) + units::text_width_em(" ") + units::text_width_em(word);
+        if candidate <= ems {
+            cur.push(' ');
+            cur.push_str(word);
+        } else {
+            out.push(std::mem::take(&mut cur));
+            cur.push_str(word);
+        }
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    out
 }
 
 /// Running min/max of the drawn extent.
@@ -1624,7 +1668,7 @@ mod tests {
             sheet: a4(),
             texts: vec![
                 SchText {
-                    kind: TextKind::Label,
+                    word_wrap: true,                    kind: TextKind::Label,
                     at: Pt { x: U, y: U },
                     corner: None,
                     text: "=SheetNumber".into(),
@@ -1639,7 +1683,7 @@ mod tests {
                     uuid: "t1".into(),
                 },
                 SchText {
-                    kind: TextKind::Label,
+                    word_wrap: true,                    kind: TextKind::Label,
                     at: Pt { x: U, y: 2 * U },
                     corner: None,
                     text: "=PRJ_Customer".into(),
@@ -1714,7 +1758,7 @@ mod tests {
                 uuid: "bl".into(),
             }],
             texts: vec![SchText {
-                kind: TextKind::Note,
+                    word_wrap: true,                kind: TextKind::Note,
                 at: Pt { x: 5 * U, y: 5 * U },
                 corner: Some(Pt { x: 15 * U, y: 2 * U }),
                 text: "one\ntwo".into(),
