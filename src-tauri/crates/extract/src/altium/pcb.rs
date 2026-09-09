@@ -55,6 +55,78 @@ impl Flip {
     }
 }
 
+/// The rigid-flex stack, with every GUID resolved to the name the designer
+/// typed. `None` for a board with a single stack, which is every ordinary board
+/// — the block is absent rather than empty so a reviewer is never shown a
+/// one-region "stackup" that says nothing.
+fn stackup(b: &PcbDoc) -> Option<crate::altium::StackupInfo> {
+    if b.substacks.is_empty() {
+        return None;
+    }
+    let name_of = |id: &str| -> String {
+        b.substacks.iter().find(|s| s.id == id).map(|s| s.name.clone()).unwrap_or_default()
+    };
+    let layer_name = |id: u8| -> String {
+        b.layers.get(&id).map(|l| l.name.clone()).unwrap_or_else(|| format!("layer {id}"))
+    };
+    Some(crate::altium::StackupInfo {
+        substacks: b
+            .substacks
+            .iter()
+            .map(|s| crate::altium::SubstackInfo {
+                name: s.name.clone(),
+                is_flex: s.is_flex,
+                copper_layers: s.layers.iter().map(|id| layer_name(*id)).collect(),
+                layers: s.layer_names.clone(),
+            })
+            .collect(),
+        drill_pairs: b
+            .drill_pairs
+            .iter()
+            .map(|d| crate::altium::DrillPairInfo {
+                low: d.low.clone(),
+                high: d.high.clone(),
+                substacks: d.substacks.iter().map(|g| name_of(g)).filter(|n| !n.is_empty()).collect(),
+            })
+            .collect(),
+        regions: b
+            .board_regions
+            .iter()
+            .map(|r| crate::altium::BoardRegionInfo {
+                name: r.name.clone(),
+                substack: name_of(&r.substack_id),
+                bends: r
+                    .bends
+                    .iter()
+                    .map(|d| {
+                        let (ax, ay) = Flip.pt(d.a.0, d.a.1);
+                        let (bx, by) = Flip.pt(d.b.0, d.b.1);
+                        crate::altium::BendInfo {
+                            angle_deg: r4(d.angle_deg),
+                            radius_mm: r4(d.radius_mm),
+                            from: [ax, ay],
+                            to: [bx, by],
+                        }
+                    })
+                    .collect(),
+            })
+            .collect(),
+    })
+}
+
+/// Outline regions naming a substack the board does not declare. Such a region
+/// draws on the master stack, which on a flex ribbon is the wrong layer count,
+/// so it is worth counting rather than silently absorbing.
+fn regions_without_substack(b: &PcbDoc) -> usize {
+    if b.substacks.is_empty() {
+        return 0;
+    }
+    b.board_regions
+        .iter()
+        .filter(|r| !b.substacks.iter().any(|s| s.id == r.substack_id))
+        .count()
+}
+
 /// Everything the caller needs to describe the board it just extracted.
 pub struct BoardSummary {
     pub layers: usize,
@@ -66,8 +138,10 @@ pub struct BoardSummary {
     pub rules: Vec<pcb::Rule>,
     /// Net classes from `Classes6`, for the design model's `net_name_to_classes`.
     pub net_classes: Vec<(String, Vec<String>)>,
-    /// Layer-stack regions detected but not modelled (plan §4.5).
-    pub substacks: Vec<String>,
+    /// The rigid-flex layer stack, when the board declares substacks.
+    pub stackup: Option<crate::altium::StackupInfo>,
+    /// Outline regions naming a substack the board does not declare.
+    pub regions_without_substack: usize,
     /// Board streams read but not modelled, by stream and record count.
     pub skipped: BTreeMap<String, usize>,
     /// Altium special strings drawn verbatim because this build has no value
@@ -141,7 +215,8 @@ pub fn extract_pcb(
         vias: g.vias.len(),
         rules: board.rules.clone(),
         net_classes: board.net_classes.clone(),
-        substacks: board.substacks.clone(),
+        stackup: stackup(&board),
+        regions_without_substack: regions_without_substack(&board),
         skipped: board.skipped.clone(),
         unresolved_specials: built.unresolved_specials,
     };

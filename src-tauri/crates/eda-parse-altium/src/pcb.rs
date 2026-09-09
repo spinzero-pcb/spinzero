@@ -227,6 +227,78 @@ pub struct Layer {
     pub enabled: bool,
 }
 
+/// One layer-stack region of a rigid-flex board — Altium's own word is a
+/// **substack**, written as `V9_SUBSTACK<n>_*` in `Board6`.
+///
+/// A rigid-flex board is not one stackup. Each region of the board outline is
+/// built from its own subset of the master layer list: the rigid areas carry the
+/// full copper count, the flex ribbons between them carry two. A reviewer who
+/// reads only the master stack sees a ten-layer board and cannot tell that the
+/// ribbon joining two halves of it is two layers of polyimide.
+#[derive(Debug, Clone, Default)]
+pub struct Substack {
+    /// GUID, in braces. This is the key `LAYERPAIR<n>SUBSTACK_<m>`, the
+    /// per-layer `CONTEXT` flags and `BoardRegions`' `LAYERSTACKID` all join on.
+    pub id: String,
+    /// The name the designer gave it (`MAIN_RIGID_STACK`, `EAST_FLEX_EXTENTION`).
+    pub name: String,
+    /// True when the region bends. `ISFLEX`.
+    pub is_flex: bool,
+    /// `TYPE`, kept as written — Altium's substack kind, which this reader does
+    /// not have a corpus wide enough to name.
+    pub kind: i64,
+    /// Legacy ids of the copper layers this substack actually builds, in master
+    /// stack order. Empty when the board declares no per-layer membership.
+    pub layers: Vec<u8>,
+    /// Names of every stack entry the substack enables, copper and dielectric
+    /// alike, in master stack order. A flex region's coverlay and adhesive are
+    /// here and have no legacy id, so they cannot reach `layers`.
+    pub layer_names: Vec<String>,
+}
+
+/// A drill span — `LAYERPAIR<n>*`. On a rigid-flex board a span belongs to the
+/// substacks it is drilled in, which is why a plain "top to bottom" reading of a
+/// drill file is wrong on a board whose regions have different bottoms.
+#[derive(Debug, Clone, Default)]
+pub struct DrillPair {
+    /// Span ends as `Board6` names them (`TOP`, `MID2`, `BOTTOM`).
+    pub low: String,
+    pub high: String,
+    /// GUIDs of the substacks this span is drilled in, in file order.
+    pub substacks: Vec<String>,
+    pub drill_guide: bool,
+    pub drill_drawing: bool,
+}
+
+/// A bend line — where a flex region folds. `BENDINGLINE<n>`, a semicolon list.
+#[derive(Debug, Clone, Default)]
+pub struct BendLine {
+    /// Fold angle in degrees, as written (`9E1` is 90).
+    pub angle_deg: f64,
+    /// Bend radius, millimetres.
+    pub radius_mm: f64,
+    /// Which fold of the region this is, when the board numbers them.
+    pub fold_index: i64,
+    /// The line itself, millimetres, Y-up like every other primitive here.
+    pub a: (f64, f64),
+    pub b: (f64, f64),
+}
+
+/// A region of the board outline, bound to the substack that builds it.
+/// `BoardRegions` reuses the binary region record and carries the linkage in its
+/// parameter payload.
+#[derive(Debug, Clone, Default)]
+pub struct BoardRegion {
+    /// `NAME`, when the region has one. The master region usually does not.
+    pub name: String,
+    /// `LAYERSTACKID` — the substack GUID, empty on a board with one stack.
+    pub substack_id: String,
+    /// Outline ring, millimetres.
+    pub outline: Vec<(f64, f64)>,
+    /// The folds drawn on this region.
+    pub bends: Vec<BendLine>,
+}
+
 /// A whole `.PcbDoc`.
 #[derive(Debug, Clone, Default)]
 pub struct PcbDoc {
@@ -247,9 +319,13 @@ pub struct PcbDoc {
     pub outline: Vec<Vec<(f64, f64)>>,
     /// Net classes (`Classes6` `KIND=0`): class name -> member net names.
     pub net_classes: Vec<(String, Vec<String>)>,
-    /// Layer-stack regions beyond the first — the rigid-flex model, detected and
-    /// reported rather than modelled (plan §4.5).
-    pub substacks: Vec<String>,
+    /// The board's layer-stack regions — the rigid-flex model. A board with one
+    /// stack declares none.
+    pub substacks: Vec<Substack>,
+    /// Drill spans, and the substacks each is drilled in.
+    pub drill_pairs: Vec<DrillPair>,
+    /// Board-outline regions, each bound to the substack that builds it.
+    pub board_regions: Vec<BoardRegion>,
     /// Embedded 3D models, in `Models/Data` order.
     pub models: Vec<Model>,
     /// Where each model is placed (`ComponentBodies6`).
@@ -267,6 +343,7 @@ pub fn parse(doc: &Doc) -> PcbDoc {
 
     if let Some(board) = doc.text_records("Board6").first() {
         read_layers(board, &mut out);
+        read_substacks(board, &mut out);
     }
     for r in doc.text_records("Nets6") {
         out.nets.push(Net {
@@ -330,10 +407,12 @@ pub fn parse(doc: &Doc) -> PcbDoc {
     // keep-out line work the caller already emits on the `edge` role.
     for r in doc.records("BoardRegions") {
         let Some(g) = read_region(&r) else { continue };
-        let name = g.params.s("NAME").to_string();
-        if !out.outline.is_empty() && !name.is_empty() {
-            out.substacks.push(name);
-        }
+        out.board_regions.push(BoardRegion {
+            name: g.params.s("NAME").to_string(),
+            substack_id: normalise_guid(g.params.s("LAYERSTACKID")),
+            outline: g.outline.clone(),
+            bends: read_bend_lines(&g.params),
+        });
         out.outline.push(g.outline);
     }
 
@@ -439,6 +518,106 @@ fn read_layers(b: &TextRecord, out: &mut PcbDoc) {
     if !out.stack.contains(&BOTTOM) {
         out.stack.push(BOTTOM);
     }
+}
+
+/// A GUID compared without its braces or case, which is how the same substack is
+/// spelled in `V9_SUBSTACK<n>_ID`, in a `CONTEXT` key and in a region's
+/// `LAYERSTACKID`. Returned in the brace-less upper-case form everything here
+/// joins on.
+fn normalise_guid(s: &str) -> String {
+    s.trim().trim_start_matches('{').trim_end_matches('}').to_ascii_uppercase()
+}
+
+/// The rigid-flex model: the substacks, which layers each one builds, the drill
+/// spans, all from `Board6`.
+///
+/// **The per-layer membership flag is inverted.** `V9_STACK_LAYER<i>_{guid}CONTEXT`
+/// is `0` when layer `i` IS in that substack and `1` when it is not. Reading it
+/// the obvious way makes every flex ribbon the thickest part of the board, which
+/// is the exact silent-wrong-answer this reader exists to avoid — the corpus
+/// board reads 17 copper layers on its rigid stack and 2 on each flex ribbon,
+/// and inverted it reads the other way round.
+fn read_substacks(b: &TextRecord, out: &mut PcbDoc) {
+    let mut subs: Vec<Substack> = Vec::new();
+    for n in 0.. {
+        let Some(id) = b.get(&format!("V9_SUBSTACK{n}_ID")) else { break };
+        if id.trim().is_empty() {
+            break;
+        }
+        subs.push(Substack {
+            id: normalise_guid(id),
+            name: b.s(&format!("V9_SUBSTACK{n}_NAME")).to_string(),
+            is_flex: b.b(&format!("V9_SUBSTACK{n}_ISFLEX")),
+            kind: b.i(&format!("V9_SUBSTACK{n}_TYPE")).unwrap_or(0),
+            layers: Vec::new(),
+            layer_names: Vec::new(),
+        });
+    }
+
+    // Master stack order, as the V9 table writes it: entry index -> (name,
+    // legacy id when it has one). A dielectric, a coverlay and mechanical 17+
+    // have no legacy id and are still part of the substack.
+    let mut entries: Vec<(usize, String, Option<u8>)> = Vec::new();
+    for i in 0..=512 {
+        let Some(name) = b.get(&format!("V9_STACK_LAYER{i}_NAME")) else { continue };
+        let legacy = b
+            .i(&format!("V9_STACK_LAYER{i}_LAYERID"))
+            .and_then(|raw| legacy_of_v9(raw as u32));
+        entries.push((i, name.to_string(), legacy));
+    }
+
+    for s in subs.iter_mut() {
+        for (i, name, legacy) in &entries {
+            // 0 is "in this substack". Absent means the board never wrote a flag
+            // for the pair, which Altium treats as in.
+            let key = format!("V9_STACK_LAYER{i}_{{{}}}CONTEXT", s.id);
+            if b.i(&key).unwrap_or(0) != 0 {
+                continue;
+            }
+            s.layer_names.push(name.clone());
+            if let Some(l) = legacy {
+                s.layers.push(*l);
+            }
+        }
+    }
+    out.substacks = subs;
+
+    for n in 0.. {
+        let Some(low) = b.get(&format!("LAYERPAIR{n}LOW")) else { break };
+        let mut substacks = Vec::new();
+        for m in 0.. {
+            let Some(g) = b.get(&format!("LAYERPAIR{n}SUBSTACK_{m}")) else { break };
+            substacks.push(normalise_guid(g));
+        }
+        out.drill_pairs.push(DrillPair {
+            low: low.to_string(),
+            high: b.s(&format!("LAYERPAIR{n}HIGH")).to_string(),
+            substacks,
+            drill_guide: b.b(&format!("LAYERPAIR{n}DRILLGUIDE")),
+            drill_drawing: b.b(&format!("LAYERPAIR{n}DRILLDRAWING")),
+        });
+    }
+}
+
+/// `BENDINGLINE<n>` on a board region: seven semicolon-separated fields —
+/// angle, radius, fold index, then the two ends. Coordinates are Altium's
+/// 1/10000 mil, the same unit every other primitive uses.
+fn read_bend_lines(p: &TextRecord) -> Vec<BendLine> {
+    let mut out = Vec::new();
+    for n in 0.. {
+        let Some(raw) = p.get(&format!("BENDINGLINE{n}")) else { break };
+        let f: Vec<&str> = raw.split(';').map(str::trim).collect();
+        let num = |i: usize| -> f64 { f.get(i).and_then(|t| t.parse::<f64>().ok()).unwrap_or(0.0) };
+        let coord = |i: usize| units::board_mm(num(i) as i64);
+        out.push(BendLine {
+            angle_deg: num(0),
+            radius_mm: coord(1),
+            fold_index: num(2) as i64,
+            a: (coord(3), coord(4)),
+            b: (coord(5), coord(6)),
+        });
+    }
+    out
 }
 
 /// Decode a V7/V9 layer id into the legacy id primitives use, when it has one.

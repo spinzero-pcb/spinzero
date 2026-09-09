@@ -688,7 +688,9 @@ fn run_design_altium(
                         values: r.fields,
                     })
                     .collect();
-                source.unresolved.board_substacks = summary.substacks;
+                source.board_stackup = summary.stackup;
+                source.unresolved.board_regions_without_substack =
+                    summary.regions_without_substack;
                 source.unresolved.board_unresolved_specials = summary.unresolved_specials;
                 for (stream, n) in summary.skipped {
                     *source.unresolved.skipped_records.entry(stream).or_default() += n;

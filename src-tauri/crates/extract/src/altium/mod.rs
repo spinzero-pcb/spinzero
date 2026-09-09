@@ -126,10 +126,12 @@ pub struct Unresolved {
     /// name would short every member together, so no link is made and the
     /// members meet by name instead.
     pub bus_range_links_not_made: usize,
-    /// Rigid-flex layer-stack regions the board declares. Detected and named;
-    /// the substack itself is not modelled, so every primitive is placed against
-    /// the master stack (plan §4.5).
-    pub board_substacks: Vec<String>,
+    /// Rigid-flex regions of the board outline bound to no substack the board
+    /// declares. The region draws, and which stack builds it is unknown — so its
+    /// layer count is the master stack's, which on a flex ribbon is wrong. The
+    /// stack itself is modelled in `board_stackup`; this counts what did not
+    /// resolve.
+    pub board_regions_without_substack: usize,
     /// Board special strings drawn verbatim because the extraction has no value
     /// for them — a drill legend, a print date.
     pub board_unresolved_specials: usize,
@@ -184,6 +186,64 @@ pub struct RuleInfo {
     pub values: BTreeMap<String, String>,
 }
 
+/// One layer-stack region of a rigid-flex board, as the review reads it.
+///
+/// GUIDs are resolved to the names the designer typed, because a reviewer
+/// reasons about `EAST_FLEX_EXTENTION`, not `{8E2616F1-…}`.
+#[derive(Debug, Clone, Serialize)]
+pub struct SubstackInfo {
+    pub name: String,
+    /// True when the region bends.
+    pub is_flex: bool,
+    /// Copper layer names this region builds, in stack order. The count is the
+    /// number a fabricator would call this part of the board.
+    pub copper_layers: Vec<String>,
+    /// Every stack entry the region enables — dielectrics, coverlay and
+    /// adhesive included, which is what makes a flex ribbon a flex ribbon.
+    pub layers: Vec<String>,
+}
+
+/// A drill span and the regions it is drilled in.
+#[derive(Debug, Clone, Serialize)]
+pub struct DrillPairInfo {
+    pub low: String,
+    pub high: String,
+    /// Substack names, or empty on a board with one stack.
+    pub substacks: Vec<String>,
+}
+
+/// A fold in a flex region.
+#[derive(Debug, Clone, Serialize)]
+pub struct BendInfo {
+    pub angle_deg: f64,
+    pub radius_mm: f64,
+    /// The fold line, millimetres, in the bundle's Y-down space.
+    pub from: [f64; 2],
+    pub to: [f64; 2],
+}
+
+/// One region of the board outline, bound to the stack that builds it.
+#[derive(Debug, Clone, Serialize)]
+pub struct BoardRegionInfo {
+    pub name: String,
+    /// Name of the substack this region is built from, empty when unbound.
+    pub substack: String,
+    pub bends: Vec<BendInfo>,
+}
+
+/// The board's layer stack when it has more than one — the rigid-flex model.
+///
+/// A rigid-flex board is several stackups sharing one outline, and a review that
+/// reads only the master stack cannot see that the ribbon joining two halves of
+/// a ten-layer board is two layers of polyimide with a bend radius. Absent for a
+/// board with a single stack, which is every ordinary board.
+#[derive(Debug, Clone, Serialize)]
+pub struct StackupInfo {
+    pub substacks: Vec<SubstackInfo>,
+    pub drill_pairs: Vec<DrillPairInfo>,
+    pub regions: Vec<BoardRegionInfo>,
+}
+
 /// Source-tool block added to the design model for Altium designs.
 #[derive(Debug, Clone, Serialize)]
 pub struct SourceInfo {
@@ -191,6 +251,9 @@ pub struct SourceInfo {
     pub compile: CompileSettings,
     /// The board's design rules. Empty for a design with no board.
     pub board_rules: Vec<RuleInfo>,
+    /// The rigid-flex layer stack, when the board declares substacks.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub board_stackup: Option<StackupInfo>,
     /// Every variant the project defines. Empty for a design with none.
     pub variants: Vec<VariantInfo>,
     pub unresolved: Unresolved,
@@ -599,6 +662,7 @@ pub fn build_design(
         tool: "altium".to_string(),
         compile: CompileSettings::new(options, free_document),
         board_rules: Vec::new(),
+        board_stackup: None,
         variants: resolved,
         unresolved,
     };
