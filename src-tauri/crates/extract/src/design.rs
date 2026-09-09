@@ -123,10 +123,10 @@ pub fn prefix_of(designator: &str) -> String {
 pub fn classify(prefix: &str, pin_count: u32) -> &'static str {
     match prefix {
         "MH" => "mounting_hole",
-        // `bom.rs` already excludes these classes from the BOM; until now
-        // nothing produced them, so a fiducial and a test point were ordered as
-        // parts. The reference leaves both off its BOM and keeps `!PCB1` on it,
-        // which is why the board itself is not classified here.
+        // `bom.rs` already excludes this class from the BOM; until now nothing
+        // produced it, so ten fiducials were ordered as parts. The reference
+        // leaves them off its BOM too.
+        //
         "FID" | "FD" => "fiducial",
         "TP" | "TSTPNT" => "test_point",
         "U" | "IC" | "A" | "AR" => "ic",
@@ -549,9 +549,17 @@ pub fn assemble(
                 bbox = Some(bbox.map_or(*b, |acc| acc.union(*b)));
             }
         }
-        net_name_to_classes
-            .entry(n.name.clone())
-            .or_insert_with(|| vec!["Default".to_string()]);
+        // A net's own classes come from the schematic when it states any — an
+        // Altium directive dropped on the wire — and are `Default` otherwise,
+        // which is what a KiCad project without class rules has.
+        let stated = n.classes.clone();
+        net_name_to_classes.entry(n.name.clone()).or_insert_with(|| {
+            if stated.is_empty() {
+                vec!["Default".to_string()]
+            } else {
+                stated
+            }
+        });
         nets.push(DesignNet {
             uid: format!("{:012x}", i + 1),
             auto_named: n.driver_kind == "pin",

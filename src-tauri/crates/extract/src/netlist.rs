@@ -89,6 +89,8 @@ impl Graphical {
 pub struct Net {
     pub name: String,
     pub driver_kind: String,
+    /// Classes the schematic itself places on this net, merged across sheets.
+    pub classes: Vec<String>,
     pub terminals: Vec<Terminal>,
     pub graphical: Graphical,
     /// The net's graphical elements bucketed by the sheet INSTANCE they were drawn
@@ -188,6 +190,10 @@ pub struct Frag {
     /// entry or port that carries it, with `PowerPortNamesTakePriority` swapping
     /// the top two. [`driver_rank`] is KiCad's answer and the default.
     pub rank: u8,
+    /// Net classes this fragment's own sheet places on it. Altium writes them as
+    /// a directive dropped on a wire (`RECORD=43`); KiCad names them in the
+    /// project file, so its fragments carry none.
+    pub classes: Vec<String>,
     /// The sheet instance (`sheet_path_uuids`) this fragment was computed on, kept
     /// through the merge so the resulting net knows which of its graphical elements
     /// live on which instance (see `Net::by_sheet`).
@@ -442,6 +448,7 @@ pub fn fragments(sch: &Schematic, sheet_path: &str, sheet_path_uuids: &str) -> V
             keys,
             name,
             rank: driver_rank(&driver_kind),
+            classes: Vec::new(),
             driver_kind,
             sheet: sheet_path_uuids.to_string(),
         });
@@ -491,12 +498,14 @@ pub fn merge_frags(frags: Vec<Frag>) -> Vec<Net> {
     let mut nets = Vec::new();
     for (_root, idxs) in by_root {
         let mut terminals = Vec::new();
+        let mut classes: Vec<String> = Vec::new();
         let mut graphical = Graphical::default();
         let mut by_sheet: BTreeMap<String, Graphical> = BTreeMap::new();
         let mut best: Option<(u8, String, String)> = None; // (rank, name, driver)
         for &i in &idxs {
             let f = slots[i].take().unwrap();
             terminals.extend(f.terminals);
+            classes.extend(f.classes);
             // Each fragment's graphical elements belong to its sheet instance; keep
             // that attribution (per instance) and accumulate the flat union too.
             by_sheet.entry(f.sheet).or_default().extend(f.graphical.clone());
@@ -514,6 +523,8 @@ pub fn merge_frags(frags: Vec<Frag>) -> Vec<Net> {
         }
         terminals.sort_by(|a, b| (&a.designator, &a.pin).cmp(&(&b.designator, &b.pin)));
         terminals.dedup();
+        classes.sort();
+        classes.dedup();
         if terminals.is_empty() {
             continue;
         }
@@ -528,6 +539,7 @@ pub fn merge_frags(frags: Vec<Frag>) -> Vec<Net> {
         nets.push(Net {
             name,
             driver_kind,
+            classes,
             terminals,
             graphical,
             by_sheet,

@@ -79,9 +79,12 @@ pub struct Unresolved {
     pub buses_not_expanded: usize,
     /// Harness objects seen. Recorded, not expanded.
     pub harness_objects: usize,
-    /// Parameter sets (net-class and other directives) seen but not applied to
-    /// `net_name_to_classes`.
-    pub directives_not_applied: usize,
+    /// Directives (`RECORD=43`) that state no class this reader knows. Their
+    /// class names reach `net_name_to_classes`; these state none.
+    pub directives_without_a_class: usize,
+    /// Directives that state a class but sit where no net reaches them, so the
+    /// class lands on nothing.
+    pub directives_without_a_net: usize,
     /// `RECORD=211` regions. The plan reads these as compile masks; in this
     /// corpus every component inside one is also on the board, so applying them
     /// would drop 65 real parts. They are reported, not applied — see
@@ -360,7 +363,7 @@ pub fn load_hierarchy(
     check_hierarchy_links(&out, &mut unresolved);
     for s in &out {
         unresolved.buses_not_expanded += s.sch.buses.len();
-        unresolved.directives_not_applied += s.sch.param_sets.len();
+
         // Two record types mask a sheet: the FileHeader region and the blanket
         // in the Additional stream. Counting only the first reports zero on a
         // sheet that is visibly masked in Altium.
@@ -514,6 +517,7 @@ pub fn build_design(
     unresolved: Unresolved,
     free_document: bool,
     variants: &[eda_parse_altium::Variant],
+    project_params: &BTreeMap<String, String>,
 ) -> (crate::design::Design, SourceInfo) {
     let channels = channels_of(sheets, options);
     let mut placements = Vec::new();
@@ -525,6 +529,7 @@ pub fn build_design(
             &s.info.sheet_path,
             &s.info.sheet_path_uuids,
             channel.as_ref(),
+            project_params,
         ));
         frags.extend(netlist::fragments(
             &s.sch,
@@ -548,6 +553,8 @@ pub fn build_design(
     unresolved.pins_joined_by_hot_spot = diag.pins_joined_by_hot_spot;
     unresolved.hot_spot_ambiguous = diag.hot_spot_ambiguous;
     unresolved.unnamed_labels = diag.unnamed_labels;
+    unresolved.directives_without_a_class = diag.directives_without_a_class;
+    unresolved.directives_without_a_net = diag.directives_without_a_net;
     unresolved.bus_range_links_not_made = diag.bus_range_links_not_made;
 
     let infos: Vec<SheetInfo> = sheets.iter().map(|s| s.info.clone()).collect();
@@ -706,6 +713,7 @@ pub(crate) fn bus_range(text: &str) -> Option<(String, Vec<String>)> {
 pub fn build_components(
     sheets: &[LoadedSheet],
     options: &CompileOptions,
+    project_params: &BTreeMap<String, String>,
 ) -> Vec<crate::design::Component> {
     let channels = channels_of(sheets, options);
     let mut placements = Vec::new();
@@ -715,6 +723,7 @@ pub fn build_components(
             &s.info.sheet_path,
             &s.info.sheet_path_uuids,
             channel.as_ref(),
+            project_params,
         ));
     }
     design::group_parts(placements).0

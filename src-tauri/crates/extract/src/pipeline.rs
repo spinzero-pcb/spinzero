@@ -621,6 +621,7 @@ fn run_design_altium(
         unresolved,
         free_document,
         &variants,
+        &project_params,
     );
     emit(Msg::Progress(format!(
         "compile options: {} scope, sheet-entry names {}, port names {}",
@@ -630,13 +631,13 @@ fn run_design_altium(
     )));
     let u = &source.unresolved;
     emit(Msg::Progress(format!(
-        "unresolved: {} missing sheets, {} entries without a port, {} ports without an entry,          {} unconnected pins, {} buses, {} directives, {} regions not applied",
+        "unresolved: {} missing sheets, {} entries without a port, {} ports without an entry,          {} unconnected pins, {} buses, {} directives not applied, {} regions not applied",
         u.missing_sheets.len(),
         u.sheet_entries_without_port.len(),
         u.ports_without_sheet_entry.len(),
         u.unconnected_pins,
         u.buses_not_expanded,
-        u.directives_not_applied,
+        u.directives_without_a_class + u.directives_without_a_net,
         u.compile_mask_candidates_not_applied,
     )));
     std::fs::create_dir_all(out_dir).map_err(|e| e.to_string())?;
@@ -798,7 +799,7 @@ pub fn load_components(project: &Path) -> Result<(String, Vec<Component>), Strin
         let mut sink = |_: Msg| {};
         let h = crate::altium::load_hierarchy(project, &mut sink)?;
         let (name, opts, sheets) = (h.name, h.options, h.sheets);
-        let mut components = crate::altium::build_components(&sheets, &opts);
+        let mut components = crate::altium::build_components(&sheets, &opts, &h.project_params);
         components.sort_by(|a, b| a.designator.cmp(&b.designator));
         return Ok((name, components));
     }

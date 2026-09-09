@@ -68,6 +68,12 @@ pub struct SheetDiagnostics {
     pub hot_spot_ambiguous: usize,
     /// Net labels carrying no text. They name nothing and draw nothing.
     pub unnamed_labels: usize,
+    /// Directives that state no class this reader knows. They are drawn and
+    /// counted, not applied.
+    pub directives_without_a_class: usize,
+    /// Directives that state a class but sit on nothing a net reaches, so the
+    /// class lands nowhere.
+    pub directives_without_a_net: usize,
     /// Ports and sheet entries whose name is a bus RANGE. They carry a bundle,
     /// not a net, and this extraction does not expand the members.
     pub bus_range_links_not_made: usize,
@@ -299,6 +305,8 @@ pub fn fragments(
     // Each visible pin's free end, for the hot-spot pass below.
     let mut pin_ends: Vec<(usize, Pt)> = Vec::new();
     let mut namers: Vec<Namer> = Vec::new();
+    // Net classes a directive states, by the node it sits on.
+    let mut directives: Vec<(usize, String)> = Vec::new();
     let mut elems: Vec<GElem> = Vec::new();
     // Implicit connections for hidden supply pins, keyed by net name.
     let mut implicit: Vec<(usize, String)> = Vec::new();
@@ -366,6 +374,28 @@ pub fn fragments(
             if !pin.hidden() {
                 pin_ends.push((node, pin.connection()));
             }
+        }
+    }
+
+    // A directive dropped on a wire states the net's class. Altium's own two
+    // shapes are here: `ClassName` on a net-class directive, and
+    // `DifferentialPairClassName` on a `DIFFPAIR`, which is the strongest layout
+    // signal a schematic can carry. Both are the file's own words, not a
+    // vocabulary invented here.
+    for ps in &sch.param_sets {
+        let node = conn.id(ps.at);
+        let mut named = false;
+        for p in &ps.parameters {
+            let key = p.name.trim().to_ascii_uppercase();
+            if (key == "CLASSNAME" || key == "DIFFERENTIALPAIRCLASSNAME")
+                && !p.text.trim().is_empty()
+            {
+                directives.push((node, p.text.trim().to_string()));
+                named = true;
+            }
+        }
+        if !named {
+            diag.directives_without_a_class += 1;
         }
     }
 
@@ -488,6 +518,7 @@ pub fn fragments(
         entries: Vec<String>,
         ports: Vec<String>,
         implicit: Vec<String>,
+        classes: Vec<String>,
         entry_links: Vec<(String, String)>,
         port_links: Vec<String>,
         graphical: Graphical,
@@ -496,6 +527,10 @@ pub fn fragments(
     for (node, t) in pins {
         let r = conn.find(node);
         groups.entry(r).or_default().terminals.push(t);
+    }
+    for (node, class) in directives {
+        let r = conn.find(node);
+        groups.entry(r).or_default().classes.push(class);
     }
     for n in namers {
         let r = conn.find(n.node);
@@ -542,6 +577,7 @@ pub fn fragments(
             && (g.entries.is_empty() || !opts.allow_sheet_entry_net_names)
             && (g.ports.is_empty() || !opts.allow_port_net_names));
         if g.terminals.is_empty() && g.entry_links.is_empty() && g.port_links.is_empty() && !named {
+            diag.directives_without_a_net += g.classes.len();
             continue;
         }
         if g.terminals.len() == 1 && !named && g.entry_links.is_empty() && g.port_links.is_empty() {
@@ -584,6 +620,7 @@ pub fn fragments(
             keys,
             name,
             rank,
+            classes: g.classes,
             driver_kind,
             sheet: sheet_path_uuids.to_string(),
         });

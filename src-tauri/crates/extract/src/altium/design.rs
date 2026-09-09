@@ -47,10 +47,16 @@ impl Channel {
 /// Resolve a field that may be an expression.
 ///
 /// A value beginning `=` is a parameter reference (`Comment==Value`,
-/// `Text==SheetNumber`) resolved against component, sheet and project
-/// parameters. When it resolves empty we fall back to the literal text, which is
-/// what Altium itself displays.
-pub fn evaluate(text: &str, component: &[Param], sheet: &BTreeMap<String, String>) -> String {
+/// `Text==SheetNumber`) resolved against component, then sheet, then PROJECT
+/// parameters — the `PRJ_*` values a `.PrjPcb` defines, which is where a title
+/// block's fields and some component fields point. When it resolves empty we
+/// fall back to the literal text, which is what Altium itself displays.
+pub fn evaluate(
+    text: &str,
+    component: &[Param],
+    sheet: &BTreeMap<String, String>,
+    project: &BTreeMap<String, String>,
+) -> String {
     let Some(name) = text.strip_prefix('=') else {
         return text.to_string();
     };
@@ -59,13 +65,12 @@ pub fn evaluate(text: &str, component: &[Param], sheet: &BTreeMap<String, String
         .iter()
         .find(|p| p.name.eq_ignore_ascii_case(name))
         .map(|p| p.text.clone());
+    let find = |m: &BTreeMap<String, String>| {
+        m.iter().find(|(k, _)| k.eq_ignore_ascii_case(name)).map(|(_, v)| v.clone())
+    };
     let resolved = from_component
-        .or_else(|| {
-            sheet
-                .iter()
-                .find(|(k, _)| k.eq_ignore_ascii_case(name))
-                .map(|(_, v)| v.clone())
-        })
+        .or_else(|| find(sheet))
+        .or_else(|| find(project))
         .unwrap_or_default();
     if resolved.is_empty() || resolved.starts_with('=') {
         text.to_string()
@@ -129,6 +134,7 @@ pub fn build_components_on(
     sheet_path: &str,
     sheet_path_uuids: &str,
     channel: Option<&Channel>,
+    project: &BTreeMap<String, String>,
 ) -> Vec<Placement> {
     let params = sheet_params(sch);
     let mut out: Vec<Placement> = Vec::new();
@@ -161,7 +167,7 @@ pub fn build_components_on(
             svg_id: c.uuid.clone(),
             // Altium's "Comment" is KiCad's "Value", and it is routinely an
             // expression pointing at another parameter.
-            value: evaluate(c.param("Comment").unwrap_or(""), &c.parameters, &params),
+            value: evaluate(c.param("Comment").unwrap_or(""), &c.parameters, &params, project),
             footprint: c.footprint.clone(),
             library_ref: c.library_ref.clone(),
             description: description(c),
@@ -178,7 +184,7 @@ pub fn build_components_on(
                 kind: crate::design::classify(&prefix, pin_count).to_string(),
                 pin_count,
             },
-                parameters: parameters_of(c, &params),
+                parameters: parameters_of(c, &params, project),
                 bbox: c.bbox.map(|(min, max)| bbox_mm(min, max, sch.sheet.height)),
             },
         });
@@ -302,13 +308,17 @@ fn source_library(c: &SchComponent) -> Option<String> {
 /// `bom.rs` runs unchanged; `altium_component_kind` carries the source truth
 /// next to it. Hidden parameters are kept (KiCad hidden properties are too) —
 /// they are just not drawn.
-fn parameters_of(c: &SchComponent, sheet: &BTreeMap<String, String>) -> BTreeMap<String, String> {
+fn parameters_of(
+    c: &SchComponent,
+    sheet: &BTreeMap<String, String>,
+    project: &BTreeMap<String, String>,
+) -> BTreeMap<String, String> {
     let mut m: BTreeMap<String, String> = BTreeMap::new();
     for p in &c.parameters {
         if p.name.is_empty() {
             continue;
         }
-        m.insert(p.name.clone(), evaluate(&p.text, &c.parameters, sheet));
+        m.insert(p.name.clone(), evaluate(&p.text, &c.parameters, sheet, project));
     }
     if let Some(lib) = source_library(c) {
         m.insert(SOURCE_LIB_PARAM.into(), lib);
@@ -364,7 +374,7 @@ mod tests {
 
     /// One sheet, built and grouped the way the pipeline builds it.
     fn built(d: &SchDoc, sheet: &str, ch: Option<&Channel>) -> (Vec<Component>, Vec<(String, String)>) {
-        group_parts(build_components_on(d, sheet, sheet, ch))
+        group_parts(build_components_on(d, sheet, sheet, ch, &BTreeMap::new()))
     }
 
     /// Corner case 5: a field whose text is `=Name` is a parameter reference.
@@ -373,10 +383,16 @@ mod tests {
     fn expression_fields_resolve_against_parameters() {
         let params = vec![param("Value", "10k"), param("Comment", "=Value")];
         let sheet = BTreeMap::from([("Revision".to_string(), "B".to_string())]);
-        assert_eq!(evaluate("=Value", &params, &sheet), "10k");
-        assert_eq!(evaluate("=Revision", &params, &sheet), "B", "sheet params resolve too");
-        assert_eq!(evaluate("=Missing", &params, &sheet), "=Missing", "empty falls back");
-        assert_eq!(evaluate("plain", &params, &sheet), "plain");
+        let project = BTreeMap::from([("PRJ_Title".to_string(), "Eval board".to_string())]);
+        assert_eq!(evaluate("=Value", &params, &sheet, &project), "10k");
+        assert_eq!(evaluate("=Revision", &params, &sheet, &project), "B", "sheet params resolve too");
+        assert_eq!(
+            evaluate("=PRJ_Title", &params, &sheet, &project),
+            "Eval board",
+            "project parameters resolve after the sheet's"
+        );
+        assert_eq!(evaluate("=Missing", &params, &sheet, &project), "=Missing", "empty falls back");
+        assert_eq!(evaluate("plain", &params, &sheet, &project), "plain");
     }
 
     #[test]
@@ -459,9 +475,9 @@ mod tests {
         let two = part(2, "U-p2", vec![upin("3", 2), upin("4", 2)]);
         let one = part(1, "U-p1", vec![upin("1", 1), upin("2", 1)]);
         let three = part(3, "U-p3", vec![upin("5", 3)]);
-        let mut placements = build_components_on(&doc(vec![two]), "/GPIO/", "/g/", None);
-        placements.extend(build_components_on(&doc(vec![one]), "/ADC/", "/a/", None));
-        placements.extend(build_components_on(&doc(vec![three]), "/Clock/", "/c/", None));
+        let mut placements = build_components_on(&doc(vec![two]), "/GPIO/", "/g/", None, &BTreeMap::new());
+        placements.extend(build_components_on(&doc(vec![one]), "/ADC/", "/a/", None, &BTreeMap::new()));
+        placements.extend(build_components_on(&doc(vec![three]), "/Clock/", "/c/", None, &BTreeMap::new()));
         let (out, extra) = group_parts(placements);
 
         assert_eq!(out.len(), 1, "one designator, one component");

@@ -19,7 +19,12 @@ use serde::Serialize;
 use crate::design::Component;
 
 /// Classification buckets excluded from the BOM (mechanical / fab artefacts).
-const EXCLUDED_CLASSES: &[&str] = &["mounting_hole", "fiducial", "test_point", "pcb"];
+// A test point is NOT here, though a mounting hole, a fiducial and the board
+// itself are. Those three are never a purchased line item; a test point often
+// is — the eval design's four are a Harwin connector with a footprint and an
+// MPN, and the reference bills them. Whether one is a part is what
+// `kicad_in_bom` says, and both front-ends set it from the file.
+const EXCLUDED_CLASSES: &[&str] = &["mounting_hole", "fiducial", "pcb"];
 
 /// A resolved sourcing/compliance field.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

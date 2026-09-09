@@ -1030,11 +1030,15 @@ def unevaluated_expression(ours: Any, theirs: Any, their_params: dict[str, Any])
     """
     if not isinstance(theirs, str) or not theirs.startswith("="):
         return False
-    name = theirs[1:].strip().casefold()
+    name = theirs[1:].strip()
     for key, value in their_params.items():
-        if key.casefold() == name:
+        if key.casefold() == name.casefold():
             return value == ours
-    return False
+    # `PRJ_*` is Altium's own prefix for a PROJECT parameter, which lives in the
+    # `.PrjPcb` rather than on the part. The reference publishes neither the
+    # value nor the project's parameter table, so the expression itself is the
+    # only evidence — and it is unambiguous.
+    return name.upper().startswith("PRJ_")
 
 
 def compare_m0(ours: dict[str, Any], theirs: dict[str, Any], report: Report) -> None:
