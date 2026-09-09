@@ -402,10 +402,9 @@ pub fn fragments(
         }
     }
 
-    // Union every registered point lying on each wire segment. Buses are walked
-    // too so a bus stays one fragment, but bus ranges are not expanded.
+    // Union every registered point lying on each WIRE segment.
     let coords: Vec<Pt> = conn.ids.keys().copied().collect();
-    for w in sch.wires.iter().chain(&sch.buses) {
+    for w in &sch.wires {
         for seg in w.pts.windows(2) {
             let (a, b) = (seg[0], seg[1]);
             let on: Vec<usize> = coords
@@ -416,6 +415,20 @@ pub fn fragments(
             for k in 1..on.len() {
                 conn.union(on[0], on[k]);
             }
+        }
+    }
+    // A BUS is not a net. It joins only its own vertices, so a multi-segment bus
+    // stays one fragment and nothing else is pulled onto it. Altium connects a
+    // wire to a bus through a bus entry and the result is a bus MEMBER, which is
+    // a name this extraction does not expand (`buses_not_expanded`).
+    //
+    // Treating a bus like a wire made it swallow everything drawn across it: on
+    // the 10KW gate-driver board one `GND_X_[1...12]` bus became a single
+    // 96-terminal net where the reference has twelve, one per member.
+    for b in &sch.buses {
+        let on: Vec<usize> = b.pts.iter().filter_map(|&p| conn.at(p)).collect();
+        for k in 1..on.len() {
+            conn.union(on[0], on[k]);
         }
     }
 
@@ -888,6 +901,34 @@ mod tests {
         let mut pins: Vec<&str> = n.iter().flat_map(|n| n.terminals.iter()).map(|t| t.pin.as_str()).collect();
         pins.sort_unstable();
         assert_eq!(pins, vec!["1", "9"], "pad 9 stays visible as unconnected");
+    }
+
+    /// A bus is not a net. A wire drawn across one, and a pin on that wire, must
+    /// not join the bus: on the 10KW gate-driver board one `GND_X_[1...12]` bus
+    /// crossed the sheet and swallowed 96 terminals where the reference has
+    /// twelve nets, one per bus member.
+    #[test]
+    fn a_bus_does_not_swallow_what_is_drawn_across_it() {
+        let sch = SchDoc {
+            components: vec![
+                comp("R1", vec![pin("1", "~", p(100, 100), 32)]),
+                comp("R2", vec![pin("1", "~", p(300, 100), 32)]),
+            ],
+            // One horizontal bus, and two separate vertical wires crossing it.
+            buses: vec![Wire { pts: vec![p(0, 100), p(400, 100)], uuid: "b".into(), ..Default::default() }],
+            wires: vec![
+                Wire { pts: vec![p(100, 100), p(100, 200)], uuid: "w1".into(), ..Default::default() },
+                Wire { pts: vec![p(300, 100), p(300, 200)], uuid: "w2".into(), ..Default::default() },
+            ],
+            net_labels: vec![
+                NetLabel { at: p(100, 200), text: "A".into(), uuid: "l1".into(), ..Default::default() },
+                NetLabel { at: p(300, 200), text: "B".into(), uuid: "l2".into(), ..Default::default() },
+            ],
+            ..SchDoc::default()
+        };
+        let n = nets(&sch, &CompileOptions::board_project());
+        let named: Vec<&str> = n.iter().map(|n| n.name.as_str()).collect();
+        assert_eq!(named, vec!["A", "B"], "two nets, not one");
     }
 
     /// Corner case 19: `VCC` and `Vcc` are one net, reported under one spelling.
