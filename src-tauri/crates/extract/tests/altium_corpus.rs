@@ -159,7 +159,8 @@ fn bundle_matches_the_shared_shape_contract() {
         "OPEN_COLLECTOR", "OPEN_EMITTER",
     ];
     const CLASSES: &[&str] = &[
-        "ic", "connector", "crystal", "passive_2pin", "mounting_hole", "unknown",
+        "ic", "connector", "crystal", "passive_2pin", "mounting_hole", "fiducial",
+        "test_point", "unknown",
     ];
     const DRIVERS: &[&str] =
         &["global_power_pin", "global_label", "hier_label", "local_label", "pin"];

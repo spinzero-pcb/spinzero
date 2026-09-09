@@ -163,8 +163,8 @@ pub fn build_components_on(
             // expression pointing at another parameter.
             value: evaluate(c.param("Comment").unwrap_or(""), &c.parameters, &params),
             footprint: c.footprint.clone(),
-            library_ref: library_ref(c),
-            description: c.description.clone(),
+            library_ref: c.library_ref.clone(),
+            description: description(c),
             hierarchy: Hierarchy {
                 base_designator: base.clone(),
                 channel: channel.map(|c| c.name.clone()),
@@ -263,13 +263,36 @@ fn union(a: Bbox, b: Bbox) -> Bbox {
     Bbox { x: x0, y: y0, w: x1 - x0, h: y1 - y0 }
 }
 
-/// `LibReference`, qualified by the source library when the file names one.
-fn library_ref(c: &SchComponent) -> String {
-    if c.source_library.is_empty() || c.source_library == "*" {
+/// The part's description, falling back to the library symbol's own name.
+///
+/// A placement carries `ComponentDescription` only when the designer filled it
+/// in. Twelve parts across two corpus designs leave it out, and an EMPTY
+/// description is not merely uninformative: `bom.rs` groups on it, so every part
+/// without one collapses onto a single BOM line — `Neutral` and `Line` landed on
+/// the 5BR test-point row. The symbol's `LibReference` is what the file has to
+/// say about the part (`24V to 5V2A`, `10mH_A-B-C-N`), and it is what the
+/// reference publishes for exactly these parts.
+fn description(c: &SchComponent) -> String {
+    if c.description.trim().is_empty() {
         c.library_ref.clone()
     } else {
-        format!("{}:{}", c.source_library, c.library_ref)
+        c.description.clone()
     }
+}
+
+/// Parameter key carrying the library a symbol was placed from.
+pub const SOURCE_LIB_PARAM: &str = "altium_source_library";
+
+/// The source library a symbol came from, when the file names one.
+///
+/// This used to be folded into `library_ref` as `<library>:<symbol>`, and that
+/// cost BOM lines: `DC1` and `DC2` on the 10KW motherboard are the same
+/// `24V to 5V2A` symbol placed from two libraries, and the qualified name split
+/// one part into two rows. The library is provenance, not identity, so it has a
+/// key of its own and `library_ref` is Altium's `LibReference` — which is what
+/// the reference publishes too.
+fn source_library(c: &SchComponent) -> Option<String> {
+    (!c.source_library.is_empty() && c.source_library != "*").then(|| c.source_library.clone())
 }
 
 /// Every parameter of the component, expression-resolved, plus the two flags the
@@ -286,6 +309,9 @@ fn parameters_of(c: &SchComponent, sheet: &BTreeMap<String, String>) -> BTreeMap
             continue;
         }
         m.insert(p.name.clone(), evaluate(&p.text, &c.parameters, sheet));
+    }
+    if let Some(lib) = source_library(c) {
+        m.insert(SOURCE_LIB_PARAM.into(), lib);
     }
     m.insert(KIND_PARAM.into(), c.kind.as_str().into());
     m.insert("kicad_in_bom".into(), c.kind.in_bom().to_string());
@@ -358,7 +384,8 @@ mod tests {
         let d = doc(vec![comp("R1", vec![param("Value", "10k"), param("Comment", "=Value")], ComponentKind::Standard)]);
         let (out, _) = built(&d, "/", None);
         assert_eq!(out[0].value, "10k");
-        assert_eq!(out[0].library_ref, "PCBLibraryData.SVNDbLib:R");
+        assert_eq!(out[0].library_ref, "R", "the symbol, not the library it came from");
+        assert_eq!(out[0].parameters[SOURCE_LIB_PARAM], "PCBLibraryData.SVNDbLib");
         assert_eq!(out[0].footprint, "RESC1608X55N");
         assert_eq!(out[0].hierarchy.sheet_path_uuids, "/");
     }

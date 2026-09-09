@@ -1147,6 +1147,7 @@ COMPONENT_FIELDS = ("value", "footprint", "library_ref", "description")
 # counterpart in the file or in the reference — an intended divergence, §7.
 SYNTHESISED_PARAMETERS = {
     "ALTIUM_COMPONENT_KIND",
+    "ALTIUM_SOURCE_LIBRARY",
     "KICAD_DNP",
     "KICAD_IN_BOM",
     "KICAD_ON_BOARD",
@@ -1158,10 +1159,6 @@ def normalise_components(design: dict[str, Any]) -> dict[str, dict[str, Any]]:
     for component in design.get("components", []):
         designator = component.get("designator") or ""
         entry = {field: component.get(field) for field in COMPONENT_FIELDS}
-        # We qualify the symbol reference with the library it came from
-        # (`PCBLibraryData.SVNDbLib:CAP-…`); the reference reports the bare
-        # reference. Intended (§7) — compare the part that names the symbol.
-        entry["library_ref"] = (entry["library_ref"] or "").rsplit(":", 1)[-1]
         classification = component.get("classification") or {}
         entry["kind"] = classification.get("type")
         entry["pin_count"] = classification.get("pin_count")

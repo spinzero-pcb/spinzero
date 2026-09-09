@@ -251,9 +251,6 @@ impl Mapping {
 
 /// True if a component should appear in the BOM.
 fn in_bom(c: &Component) -> bool {
-    if c.designator.starts_with('!') {
-        return false;
-    }
     if EXCLUDED_CLASSES.contains(&c.classification.kind.as_str()) {
         return false;
     }

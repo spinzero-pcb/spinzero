@@ -123,6 +123,12 @@ pub fn prefix_of(designator: &str) -> String {
 pub fn classify(prefix: &str, pin_count: u32) -> &'static str {
     match prefix {
         "MH" => "mounting_hole",
+        // `bom.rs` already excludes these classes from the BOM; until now
+        // nothing produced them, so a fiducial and a test point were ordered as
+        // parts. The reference leaves both off its BOM and keeps `!PCB1` on it,
+        // which is why the board itself is not classified here.
+        "FID" | "FD" => "fiducial",
+        "TP" | "TSTPNT" => "test_point",
         "U" | "IC" | "A" | "AR" => "ic",
         "J" | "P" | "CN" | "CON" => "connector",
         "X" | "Y" | "XTAL" => "crystal",
@@ -220,7 +226,13 @@ pub fn build_components_on(
             parameters.insert(p.key.clone(), p.value.clone());
         }
         parameters.insert("kicad_dnp".into(), bool_str(sym.dnp));
-        parameters.insert("kicad_in_bom".into(), bool_str(sym.in_bom));
+        // A `!`-prefixed reference is KiCad's marker for a symbol that is not a
+        // BOM part. The rule lives here, in the KiCad builder, rather than in
+        // the shared `bom.rs`, because Altium designates a REAL part that way:
+        // `!PCB1` on the MCU144E1 design is the printed circuit board itself,
+        // and the reference publishes it as a BOM line.
+        let in_bom = sym.in_bom && !designator.starts_with('!');
+        parameters.insert("kicad_in_bom".into(), bool_str(in_bom));
         parameters.insert("kicad_on_board".into(), bool_str(sym.on_board));
 
         out.push(Component {
