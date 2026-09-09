@@ -1216,14 +1216,39 @@ def normalise_nets(design: dict[str, Any]) -> dict[str, list[str]]:
     `unconnected-(…)` name the review skills already read.  An intended
     divergence (plan §7); the count of what was dropped is reported.
     """
+    parts = part_suffixes(design)
     out: dict[str, list[str]] = {}
     for net in design.get("nets", []):
         terminals = sorted(
-            f"{t.get('designator')}.{t.get('pin')}" for t in net.get("terminals", [])
+            f"{parts.get(t.get('designator'), t.get('designator'))}.{t.get('pin')}"
+            for t in net.get("terminals", [])
         )
         if len(terminals) < 2:
             continue
         out[net.get("name") or ""] = terminals
+    return out
+
+
+def part_suffixes(design: dict[str, Any]) -> dict[str, str]:
+    """`Q1A` -> `Q1` for a multi-part symbol's terminals.
+
+    Altium shows the parts of one component as `Q1A` and `Q1B`, and the
+    reference names its TERMINALS that way while its component table still says
+    `Q1` — so its own netlist names a designator its own BOM does not have. We
+    name both `Q1`, because a terminal has to resolve to the component and to the
+    footprint pad it lands on, and pad 2 belongs to `Q1`. The mapping is built
+    from the reference's own component list: a terminal designator that is not a
+    component, but becomes one when a trailing letter is removed, is a part.
+    """
+    known = {c.get("designator") for c in design.get("components") or []}
+    out: dict[str, str] = {}
+    for net in design.get("nets", []):
+        for terminal in net.get("terminals", []):
+            designator = terminal.get("designator") or ""
+            if designator in known or designator in out or len(designator) < 2:
+                continue
+            if designator[-1].isalpha() and designator[:-1] in known:
+                out[designator] = designator[:-1]
     return out
 
 

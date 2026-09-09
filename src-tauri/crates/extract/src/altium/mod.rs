@@ -111,6 +111,10 @@ pub struct Unresolved {
     /// Net labels carrying no text. Altium keeps them, they draw nothing, and
     /// they name nothing.
     pub unnamed_labels: usize,
+    /// Ports and sheet entries whose name is a bus RANGE. Linking on the bundle
+    /// name would short every member together, so no link is made and the
+    /// members meet by name instead.
+    pub bus_range_links_not_made: usize,
     /// Rigid-flex layer-stack regions the board declares. Detected and named;
     /// the substack itself is not modelled, so every primitive is placed against
     /// the master stack (plan §4.5).
@@ -502,6 +506,7 @@ pub fn build_design(
     unresolved.pins_joined_by_hot_spot = diag.pins_joined_by_hot_spot;
     unresolved.hot_spot_ambiguous = diag.hot_spot_ambiguous;
     unresolved.unnamed_labels = diag.unnamed_labels;
+    unresolved.bus_range_links_not_made = diag.bus_range_links_not_made;
 
     let infos: Vec<SheetInfo> = sheets.iter().map(|s| s.info.clone()).collect();
     let mut model = crate::design::assemble(
@@ -558,7 +563,7 @@ fn bus_aliases(sheets: &[LoadedSheet]) -> Vec<crate::design::BusAliasInfo> {
 /// Split a bus-range label into its name and members. `GATE_[1...12]` is
 /// `GATE_` over `GATE_1 … GATE_12`. Ranges are capped so a malformed label
 /// cannot allocate without bound.
-fn bus_range(text: &str) -> Option<(String, Vec<String>)> {
+pub(crate) fn bus_range(text: &str) -> Option<(String, Vec<String>)> {
     const MAX_MEMBERS: i64 = 1024;
     let open = text.find('[')?;
     let close = text.rfind(']')?;

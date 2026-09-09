@@ -68,6 +68,9 @@ pub struct SheetDiagnostics {
     pub hot_spot_ambiguous: usize,
     /// Net labels carrying no text. They name nothing and draw nothing.
     pub unnamed_labels: usize,
+    /// Ports and sheet entries whose name is a bus RANGE. They carry a bundle,
+    /// not a net, and this extraction does not expand the members.
+    pub bus_range_links_not_made: usize,
 }
 
 /// Union-find over exact connection points.
@@ -189,6 +192,40 @@ fn hot_spot_pass(sch: &SchDoc, conn: &mut Conn, pin_ends: &[(usize, Pt)], diag: 
             _ => diag.hot_spot_ambiguous += 1,
         }
     }
+}
+
+/// Sort key that reads a trailing number as a number: `R86` before `R101`.
+///
+/// The whole designator is split at its first digit, so the prefix orders
+/// alphabetically and the index numerically. A designator with no digits, or one
+/// whose digits do not parse, keeps its text and sorts on that.
+fn natural(t: &Terminal) -> (&str, i64, &str, i64, &str) {
+    let (dp, dn, dr) = split_index(&t.designator);
+    let (pp, pn, _) = split_index(&t.pin);
+    (dp, dn, dr, pn, pp)
+}
+
+/// A string split into (alphabetic head, number, tail). `C25A` -> ("C", 25, "A").
+fn split_index(s: &str) -> (&str, i64, &str) {
+    let Some(at) = s.find(|c: char| c.is_ascii_digit()) else {
+        return (s, i64::MAX, "");
+    };
+    let digits = s[at..].len() - s[at..].trim_start_matches(|c: char| c.is_ascii_digit()).len();
+    let n = s[at..at + digits].parse().unwrap_or(i64::MAX);
+    (&s[..at], n, &s[at + digits..])
+}
+
+/// True when a port or sheet-entry name is a bus RANGE rather than a net.
+///
+/// `GND_X_[1...12]` names twelve members, and a hierarchy link keyed on the
+/// bundle joins all twelve into one net — and then, through the parent that
+/// carries three such entries, joins three channels' worth. On the 10KW
+/// gate-driver board that made `GND_A_S4` a 24-terminal net where the reference
+/// has three of eight. Bus members are not expanded here (`buses_not_expanded`),
+/// so the honest answer is no link at all: the members still meet by name under
+/// global scope, and nothing is shorted that the design does not short.
+fn bundle_link(name: &str) -> bool {
+    super::bus_range(name).is_some()
 }
 
 /// Squared distance between two points, in coordinate units.
@@ -373,8 +410,12 @@ pub fn fragments(
         // link keyed on an empty name would join every nameless port in the
         // design.
         if !p.name.trim().is_empty() {
-            namers.push(Namer { node, text: p.name.clone(), kind: NameKind::Port });
-            port_links.push((node, p.name.clone()));
+            if bundle_link(&p.name) {
+                diag.bus_range_links_not_made += 1;
+            } else {
+                namers.push(Namer { node, text: p.name.clone(), kind: NameKind::Port });
+                port_links.push((node, p.name.clone()));
+            }
         }
         elems.push(GElem { uuid: oid(&p.uuid, "p", p.at), kind: GKind::Port, node });
     }
@@ -385,8 +426,12 @@ pub fn fragments(
         for e in &s.entries {
             let node = conn.id(s.entry_point(e));
             if !e.name.trim().is_empty() {
-                entry_links.push((node, child.clone(), e.name.clone()));
-                namers.push(Namer { node, text: e.name.clone(), kind: NameKind::SheetEntry });
+                if bundle_link(&e.name) {
+                    diag.bus_range_links_not_made += 1;
+                } else {
+                    entry_links.push((node, child.clone(), e.name.clone()));
+                    namers.push(Namer { node, text: e.name.clone(), kind: NameKind::SheetEntry });
+                }
             }
             elems.push(GElem {
                 uuid: oid(&e.uuid, "se", s.entry_point(e)),
@@ -627,7 +672,11 @@ fn name_group(
     if let Some(x) = entries.iter().chain(ports).min() {
         return (x.clone(), "hier_label".into(), RANK_HIER_FALLBACK);
     }
-    let Some(t) = terminals.first() else {
+    // Altium auto-names after the NUMERICALLY first terminal, not the
+    // alphabetically first: a net on `C3` and `C25` is `NetC3_1`, and string
+    // order picks `C25`. The board's own net table is the oracle, and the
+    // reference agrees with it on all four of the corpus's cases.
+    let Some(t) = terminals.iter().min_by(|a, b| natural(a).cmp(&natural(b))) else {
         return (String::new(), "pin".into(), RANK_AUTO);
     };
     if terminals.len() == 1 {
@@ -958,6 +1007,29 @@ mod tests {
         let n = nets(&sch, &CompileOptions::board_project());
         let named: Vec<&str> = n.iter().map(|n| n.name.as_str()).collect();
         assert_eq!(named, vec!["A", "B"], "two nets, not one");
+    }
+
+    /// Altium auto-names an unnamed net after the numerically first terminal.
+    /// String order puts `C25` before `C3`, and the board's own net table says
+    /// `NetC3_1`.
+    #[test]
+    fn an_auto_named_net_takes_its_numerically_first_terminal() {
+        let sch = SchDoc {
+            components: vec![
+                comp("C25", vec![pin("1", "~", p(100, 100), 32)]),
+                comp("C3", vec![pin("1", "~", p(100, 140), 32)]),
+                comp("R18", vec![pin("2", "~", p(100, 180), 32)]),
+            ],
+            wires: vec![Wire {
+                pts: vec![p(100, 100), p(100, 180)],
+                uuid: "w".into(),
+                ..Default::default()
+            }],
+            ..SchDoc::default()
+        };
+        let n = nets(&sch, &CompileOptions::board_project());
+        assert_eq!(n.len(), 1);
+        assert_eq!(n[0].name, "NetC3_1");
     }
 
     /// Corner case 19: `VCC` and `Vcc` are one net, reported under one spelling.
