@@ -811,7 +811,7 @@ pub fn parse_binary_pin(b: &[u8]) -> Option<Pin> {
     let mut i = 12usize;
     // A Pascal string: one length byte then that many bytes, decoded the way
     // every other 8-bit Altium field is.
-    let mut pascal = |i: &mut usize| -> Option<String> {
+    let pascal = |i: &mut usize| -> Option<String> {
         let n = *b.get(*i)? as usize;
         *i += 1;
         let s = crate::record::decode(b.get(*i..*i + n)?);

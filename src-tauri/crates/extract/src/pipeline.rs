@@ -656,7 +656,6 @@ fn run_design_altium(
     // Board geometry, when a `.PcbDoc` belongs to this project. A board that is
     // absent or unreadable leaves the design model intact — a schematic-only
     // review is a real review — and says so rather than failing the run.
-    let mut source = source;
     let mut pcb_svgs: Vec<serde_json::Value> = Vec::new();
     let pcb_geometry = match crate::altium::pcb::board_beside(project) {
         Some(board) => match crate::altium::pcb::extract_pcb(&board, out_dir, emit) {
