@@ -834,7 +834,13 @@ pub fn parse_records(recs: Vec<TextRecord>) -> SchDoc {
                     conglomerate: r.i("PinConglomerate").unwrap_or(0),
                     length: r.i("PinLength").unwrap_or(0),
                     at: pt(r, "Location.X", "Location.Y"),
-                    part_id: r.i("OwnerPartId").unwrap_or(1),
+                    // An ABSENT `OwnerPartId` is not part 1. The pin belongs to
+                    // the placement that owns the record, whatever part that
+                    // placement draws, which is what `-1` already means here.
+                    // Four pins in the corpus omit the key — an op-amp's V+ and
+                    // V- on `TI-OPA-8_2` — and defaulting to 1 dropped the two
+                    // on the part-2 placement, which the reference draws.
+                    part_id: r.i("OwnerPartId").unwrap_or(-1),
                     display_mode: r.i("OwnerPartDisplayMode").unwrap_or(0),
                     uuid: r.s("UniqueID").to_string(),
                     hidden_net_name: r.s("HiddenNetName").to_string(),

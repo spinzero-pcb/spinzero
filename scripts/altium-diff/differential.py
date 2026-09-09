@@ -512,6 +512,15 @@ def ref_render(cfg: Config, design: Design, out: Path) -> dict[str, Any] | None:
             key = REF_CLASS.get(str(record.get("kind", "")).lower())
             if key is None:
                 continue
+            # The reference emits an operation record for every primitive the
+            # placement OWNS, then marks the ones it does not put on the page.
+            # A multi-part symbol is where that shows: the MCU144E1 ADC sheet
+            # places part 1 of `U1` and the reference lists all 334 of the
+            # symbol's pins, 186 of them flagged. Altium draws only the placed
+            # part's pins (plan corner case 32), and so do we, so the flag is
+            # the reference's own statement of what is on the page.
+            if record.get("skip_svg"):
+                continue
             if key in TEXT_CLASSES and not any(
                 op.get("type") == "gotString" for op in record.get("operations", [])
             ):
@@ -977,6 +986,57 @@ def fold_utf8(fields: dict[str, str]) -> dict[str, str]:
     return plain
 
 
+def reference_mojibake(ours: Any, theirs: Any) -> bool:
+    """True when the two values are the same text and the reference mis-decoded it.
+
+    A `%UTF8%` pair spells the escape character as its UTF-8 encoding, so
+    un-escaping the BYTES splits the sequence and the decode falls back to a
+    Latin-1 reading of UTF-8 bytes: `0Â°` for `0°`. Our reader un-escapes in the
+    character domain instead (notes D8.1), and the reference still does not, so
+    the two disagree on 339 values that are one string. Recognising the exact
+    double encoding is the test — anything else stays a difference.
+    """
+    if not isinstance(ours, str) or not isinstance(theirs, str) or ours == theirs:
+        return False
+    try:
+        return ours.encode("utf-8").decode("latin-1") == theirs
+    except (UnicodeDecodeError, UnicodeEncodeError):
+        return False
+
+
+def pipe_escape_kept(ours: Any, theirs: Any) -> bool:
+    """True when the only difference is Altium's `0xA6` escape for a pipe.
+
+    A value that itself contains a record — `Record=PageOptions|Center…` inside
+    one field — writes its separators as `0xA6` so they do not break the outer
+    record's framing. Plan corner case 2 makes that an escape and we un-escape
+    it; the reference keeps the broken-bar character. Both read the same bytes,
+    and 253 of the corpus's decoded values differ only here.
+    """
+    if not isinstance(ours, str) or not isinstance(theirs, str) or ours == theirs:
+        return False
+    return "¦" in theirs and theirs.replace("¦", "|") == ours
+
+
+def unevaluated_expression(ours: Any, theirs: Any, their_params: dict[str, Any]) -> bool:
+    """True when the reference kept `=Name` where we resolved it to the same value.
+
+    Plan corner case 5: a parameter value beginning `=` is a reference to another
+    parameter, and reading it literally puts `=Value` in the BOM's value column.
+    We evaluate it; the reference does not. The two agree whenever resolving the
+    reference's own expression against the reference's own parameters yields what
+    we wrote — so that is the test, and a value the reference cannot resolve
+    stays a difference.
+    """
+    if not isinstance(theirs, str) or not theirs.startswith("="):
+        return False
+    name = theirs[1:].strip().casefold()
+    for key, value in their_params.items():
+        if key.casefold() == name:
+            return value == ours
+    return False
+
+
 def compare_m0(ours: dict[str, Any], theirs: dict[str, Any], report: Report) -> None:
     our_streams = ours["streams"]
     their_streams = theirs["streams"]
@@ -1043,6 +1103,7 @@ def compare_m0(ours: dict[str, Any], theirs: dict[str, Any], report: Report) -> 
 def compare_field_maps(
     ours: dict[str, dict[str, str]], theirs: dict[str, dict[str, str]], report: Report
 ) -> None:
+    mojibake = 0
     only_ours = set(ours) - set(theirs)
     only_theirs = set(theirs) - set(ours)
     for key in sorted(only_ours)[:EXAMPLES]:
@@ -1059,10 +1120,17 @@ def compare_field_maps(
                 report.add("decoded field only the reference has", f"{key} {field}")
             elif b is None:
                 report.add("decoded field only we have", f"{key} {field}")
+            elif reference_mojibake(a, b) or pipe_escape_kept(a, b):
+                mojibake += 1
             else:
                 report.add(
                     "decoded value", f"{key} {field}: ours {short(a)!r} vs ref {short(b)!r}"
                 )
+    if mojibake:
+        report.note(
+            f"{mojibake} decoded values where the reference kept a byte we un-escape "
+            "(notes D8.1, plan corner case 2); the text is the same"
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -1167,6 +1235,10 @@ def compare_m1_design(
     ours: dict[str, Any], theirs: dict[str, Any], report: Report, design: "Design | None" = None
 ) -> None:
     mine, yours = normalise_components(ours), normalise_components(theirs)
+    # Two ways the reference states the same fact differently. Both are counted
+    # and named rather than reported one row at a time.
+    mojibake = 0
+    unevaluated = 0
 
     # A project-less directory is ONE design to us — the loader walks every
     # schematic beside the entry file — and ONE SHEET to the reference, whose
@@ -1200,11 +1272,18 @@ def compare_m1_design(
     for designator in sorted(set(mine) & set(yours)):
         a, b = mine[designator], yours[designator]
         for field in COMPONENT_FIELDS + ("pin_count",):
-            if a[field] != b[field]:
-                report.add(
-                    f"component {field}",
-                    f"{designator}: ours {short(a[field])!r} vs ref {short(b[field])!r}",
-                )
+            if a[field] == b[field]:
+                continue
+            if unevaluated_expression(a[field], b[field], b["parameters"]):
+                unevaluated += 1
+                continue
+            if reference_mojibake(a[field], b[field]) or pipe_escape_kept(a[field], b[field]):
+                mojibake += 1
+                continue
+            report.add(
+                f"component {field}",
+                f"{designator}: ours {short(a[field])!r} vs ref {short(b[field])!r}",
+            )
         if a["kind"] != b["kind"]:
             # Vocabularies are ours by design (plan §7); reported separately so
             # a genuine classification difference is not buried in field noise.
@@ -1219,12 +1298,30 @@ def compare_m1_design(
         if extra:
             report.add("parameter keys only we have", f"{designator}: {short(sorted(extra))}")
         for key in sorted(set(a["parameters"]) & set(b["parameters"])):
-            if a["parameters"][key] != b["parameters"][key]:
-                report.add(
-                    "parameter value",
-                    f"{designator} {key}: ours {short(a['parameters'][key])!r}"
-                    f" vs ref {short(b['parameters'][key])!r}",
-                )
+            mine_v, their_v = a["parameters"][key], b["parameters"][key]
+            if mine_v == their_v:
+                continue
+            if unevaluated_expression(mine_v, their_v, b["parameters"]):
+                unevaluated += 1
+                continue
+            if reference_mojibake(mine_v, their_v) or pipe_escape_kept(mine_v, their_v):
+                mojibake += 1
+                continue
+            report.add(
+                "parameter value",
+                f"{designator} {key}: ours {short(mine_v)!r} vs ref {short(their_v)!r}",
+            )
+
+    if unevaluated:
+        report.note(
+            f"{unevaluated} values the reference kept as `=Name` and we resolved to "
+            "the same text (plan corner case 5)"
+        )
+    if mojibake:
+        report.note(
+            f"{mojibake} values the reference decoded as Latin-1 over UTF-8 bytes "
+            "(notes D8.1); the text is the same"
+        )
 
     for name in duplicate_net_names(ours):
         report.add("net name we emit more than once", name)

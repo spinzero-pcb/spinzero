@@ -169,7 +169,8 @@ pub fn palette(sheets: &[&SchDoc]) -> BTreeMap<String, String> {
         for n in &doc.no_ercs {
             vote("no_connect", &n.color);
         }
-        for l in &doc.net_labels {
+        // An empty label is not drawn, so its colour is not a vote.
+        for l in doc.net_labels.iter().filter(|l| !l.text.trim().is_empty()) {
             vote("label_local", &l.color);
         }
         for p in &doc.ports {
@@ -662,6 +663,13 @@ pub fn render_sheet(doc: &SchDoc, ctx: &SheetCtx, palette: &BTreeMap<String, Str
     }
 
     for l in &doc.net_labels {
+        // A label with no text draws nothing (D3.7), and it names nothing
+        // either — see `altium::netlist`. Altium keeps 69 of them on the
+        // MCU144E1 design, and an empty group is one the viewer counts and can
+        // never show.
+        if l.text.trim().is_empty() {
+            continue;
+        }
         let _ = write!(
             s,
             r#"<g data-primitive="label"{}>"#,
@@ -1333,7 +1341,7 @@ fn every_point(doc: &SchDoc) -> Vec<Pt> {
     for j in &doc.junctions {
         out.push(j.at);
     }
-    for l in &doc.net_labels {
+    for l in doc.net_labels.iter().filter(|l| !l.text.trim().is_empty()) {
         out.push(l.at);
     }
     for p in &doc.power_ports {

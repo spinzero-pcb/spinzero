@@ -237,7 +237,9 @@ fn build_sheet(file: &str, doc: &SchDoc) -> SheetGeom {
         push(oid(&n.uuid, "nc", n.at), "no_connect", &p1(n.at), sig);
     }
 
-    for l in &doc.net_labels {
+    // A label with no text draws no SVG group, so it gets no row: a row with no
+    // group is a change the viewer can report and never frame.
+    for l in doc.net_labels.iter().filter(|l| !l.text.trim().is_empty()) {
         let sig = format!("label|{}|f{}|r{}|{}", l.text, l.font, l.orientation, l.color);
         push(oid(&l.uuid, "nl", l.at), "label", &p1(l.at), sig);
     }
