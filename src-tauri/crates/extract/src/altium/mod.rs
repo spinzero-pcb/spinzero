@@ -263,6 +263,28 @@ pub struct BoardRegionInfo {
     pub bends: Vec<BendInfo>,
 }
 
+/// A whole child board placed inside this one — Altium's board-in-board, and
+/// how an assembly panel is drawn.
+///
+/// The child document is referenced by a path on the designer's own machine and
+/// is NOT followed, so what is modelled is the placement. It matters to a review
+/// because a panel's real part count is the child board's multiplied by
+/// `instances`, and nothing else in the extraction knows that.
+#[derive(Debug, Clone, Serialize)]
+pub struct EmbeddedBoardInfo {
+    pub document_path: String,
+    /// Placement origin, millimetres, in the bundle's Y-down space.
+    pub at: [f64; 2],
+    pub rotation: f64,
+    pub mirrored: bool,
+    pub rows: i64,
+    pub columns: i64,
+    pub row_spacing_mm: f64,
+    pub column_spacing_mm: f64,
+    /// Copies of the child board this placement puts on the panel.
+    pub instances: i64,
+}
+
 /// The board's layer stack when it has more than one — the rigid-flex model.
 ///
 /// A rigid-flex board is several stackups sharing one outline, and a review that
@@ -288,6 +310,8 @@ pub struct SourceInfo {
     pub board_stackup: Option<StackupInfo>,
     /// The signal harnesses the design draws. Empty for a design with none.
     pub harnesses: Vec<HarnessInfo>,
+    /// Child boards placed inside this one. Empty for an ordinary board.
+    pub embedded_boards: Vec<EmbeddedBoardInfo>,
     /// Every variant the project defines. Empty for a design with none.
     pub variants: Vec<VariantInfo>,
     pub unresolved: Unresolved,
@@ -772,6 +796,7 @@ pub fn build_design(
         board_rules: Vec::new(),
         board_stackup: None,
         harnesses: Vec::new(),
+        embedded_boards: Vec::new(),
         variants: resolved,
         unresolved,
     };

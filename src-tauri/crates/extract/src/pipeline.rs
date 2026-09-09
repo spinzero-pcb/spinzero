@@ -700,6 +700,7 @@ fn run_design_altium(
                     })
                     .collect();
                 source.board_stackup = summary.stackup;
+                source.embedded_boards = summary.embedded_boards;
                 source.unresolved.board_regions_without_substack =
                     summary.regions_without_substack;
                 source.unresolved.board_unresolved_specials = summary.unresolved_specials;

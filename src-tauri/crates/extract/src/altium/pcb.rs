@@ -114,6 +114,28 @@ fn stackup(b: &PcbDoc) -> Option<crate::altium::StackupInfo> {
     })
 }
 
+/// Child boards placed inside this one, in the bundle's Y-down space.
+fn embedded_boards(b: &PcbDoc) -> Vec<crate::altium::EmbeddedBoardInfo> {
+    b.embedded_boards
+        .iter()
+        .map(|e| {
+            let (x, y) = Flip.pt(e.x, e.y);
+            crate::altium::EmbeddedBoardInfo {
+                document_path: e.document_path.clone(),
+                at: [x, y],
+                rotation: Flip.angle(e.rotation),
+                mirrored: e.mirrored,
+                rows: e.rows,
+                columns: e.columns,
+                // A pitch is a distance, so the flip does not touch it.
+                row_spacing_mm: r4(e.row_spacing),
+                column_spacing_mm: r4(e.column_spacing),
+                instances: e.instances(),
+            }
+        })
+        .collect()
+}
+
 /// Outline regions naming a substack the board does not declare. Such a region
 /// draws on the master stack, which on a flex ribbon is the wrong layer count,
 /// so it is worth counting rather than silently absorbing.
@@ -142,6 +164,8 @@ pub struct BoardSummary {
     pub stackup: Option<crate::altium::StackupInfo>,
     /// Outline regions naming a substack the board does not declare.
     pub regions_without_substack: usize,
+    /// Child boards placed inside this one.
+    pub embedded_boards: Vec<crate::altium::EmbeddedBoardInfo>,
     /// Board streams read but not modelled, by stream and record count.
     pub skipped: BTreeMap<String, usize>,
     /// Altium special strings drawn verbatim because this build has no value
@@ -217,6 +241,7 @@ pub fn extract_pcb(
         net_classes: board.net_classes.clone(),
         stackup: stackup(&board),
         regions_without_substack: regions_without_substack(&board),
+        embedded_boards: embedded_boards(&board),
         skipped: board.skipped.clone(),
         unresolved_specials: built.unresolved_specials,
     };

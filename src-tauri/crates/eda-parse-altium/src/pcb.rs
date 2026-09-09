@@ -299,6 +299,40 @@ pub struct BoardRegion {
     pub bends: Vec<BendLine>,
 }
 
+/// Another board placed inside this one — `EmbeddedBoards6`.
+///
+/// This is Altium's board-in-board: a whole child `.PcbDoc`, referenced by
+/// path, dropped onto this document and optionally stepped into a grid. It is
+/// how an assembly panel is drawn, and it is the reason a panel's part count is
+/// not the part count of the board it repeats.
+///
+/// The child document is NOT followed. Its path is relative to a machine this
+/// extraction does not have, so what is modelled is the placement — where, how
+/// many, how far apart — and the reference by name.
+#[derive(Debug, Clone, Default)]
+pub struct EmbeddedBoard {
+    /// `DOCUMENTPATH` — the child `.PcbDoc`, as the file spells it.
+    pub document_path: String,
+    /// Placement origin, millimetres, Y-up like every other primitive here.
+    pub x: f64,
+    pub y: f64,
+    pub rotation: f64,
+    pub mirrored: bool,
+    /// Step-and-repeat grid. A single placement is 1 x 1.
+    pub rows: i64,
+    pub columns: i64,
+    /// Grid pitch, millimetres.
+    pub row_spacing: f64,
+    pub column_spacing: f64,
+}
+
+impl EmbeddedBoard {
+    /// How many copies of the child board this placement puts on the panel.
+    pub fn instances(&self) -> i64 {
+        self.rows.max(1) * self.columns.max(1)
+    }
+}
+
 /// A whole `.PcbDoc`.
 #[derive(Debug, Clone, Default)]
 pub struct PcbDoc {
@@ -326,6 +360,8 @@ pub struct PcbDoc {
     pub drill_pairs: Vec<DrillPair>,
     /// Board-outline regions, each bound to the substack that builds it.
     pub board_regions: Vec<BoardRegion>,
+    /// Whole child boards placed inside this one (`EmbeddedBoards6`).
+    pub embedded_boards: Vec<EmbeddedBoard>,
     /// Embedded 3D models, in `Models/Data` order.
     pub models: Vec<Model>,
     /// Where each model is placed (`ComponentBodies6`).
@@ -416,6 +452,7 @@ pub fn parse(doc: &Doc) -> PcbDoc {
         out.outline.push(g.outline);
     }
 
+    out.embedded_boards = read_embedded_boards(&doc.text_records("EmbeddedBoards6"));
     out.models = read_models(doc);
     out.rules = read_rules(doc);
     for r in doc.records("ComponentBodies6") {
@@ -426,12 +463,19 @@ pub fn parse(doc: &Doc) -> PcbDoc {
     }
 
     // Geometry we do not model yet, recorded so the bundle's `unresolved` block
-    // can say what was skipped rather than stay silent.
-    for stream in ["Dimensions6", "Coordinates6", "EmbeddedBoards6"] {
+    // can say what was skipped rather than stay silent. `EmbeddedBoards6` has
+    // left this list: its records are read above.
+    for stream in ["Dimensions6", "Coordinates6"] {
         let n = doc.records(stream).len();
         if n > 0 {
             out.skipped.insert(stream.to_string(), n);
         }
+    }
+    // A record the embedded-board reader rejected is still a record: say so
+    // rather than let a malformed placement vanish.
+    let placed = doc.records("EmbeddedBoards6").len();
+    if placed > out.embedded_boards.len() {
+        out.skipped.insert("EmbeddedBoards6".to_string(), placed - out.embedded_boards.len());
     }
     out
 }
@@ -597,6 +641,31 @@ fn read_substacks(b: &TextRecord, out: &mut PcbDoc) {
             drill_drawing: b.b(&format!("LAYERPAIR{n}DRILLDRAWING")),
         });
     }
+}
+
+/// `EmbeddedBoards6` — length-prefixed `|KEY=VALUE|` records, one per placed
+/// child board. A record naming no document is dropped: it places nothing.
+pub fn read_embedded_boards(recs: &[TextRecord]) -> Vec<EmbeddedBoard> {
+    recs.iter()
+        .filter_map(|r| {
+            let path = r.s("DOCUMENTPATH").trim().to_string();
+            if path.is_empty() {
+                return None;
+            }
+            let coord = |k: &str| units::board_mm(r.i(k).unwrap_or(0));
+            Some(EmbeddedBoard {
+                document_path: path,
+                x: coord("X"),
+                y: coord("Y"),
+                rotation: r.f("ROTATION").unwrap_or(0.0),
+                mirrored: r.b("MIRROR"),
+                rows: r.i("ROWCOUNT").unwrap_or(1).max(1),
+                columns: r.i("COLCOUNT").unwrap_or(1).max(1),
+                row_spacing: coord("ROWSPACING"),
+                column_spacing: coord("COLSPACING"),
+            })
+        })
+        .collect()
 }
 
 /// `BENDINGLINE<n>` on a board region: seven semicolon-separated fields —
@@ -996,6 +1065,42 @@ fn pascal(b: &[u8]) -> String {
 mod tests {
     use super::*;
     use crate::record::Mode;
+
+    /// An embedded board is a whole child `.PcbDoc` placed on this one, stepped
+    /// into a grid. Unlike the other three readers this one has no fixture:
+    /// `EmbeddedBoards6` is zero bytes on every corpus board and the reference
+    /// parser reads the stream without being able to author it, so the record
+    /// is built here from the field names the reference decodes. The FRAMING is
+    /// not being guessed at — it is the same length-prefixed text framing the
+    /// document walker already detects.
+    #[test]
+    fn an_embedded_board_is_a_placement_of_a_child_document() {
+        let recs = vec![
+            TextRecord::parse(
+                br"|DOCUMENTPATH=Panel\Widget.PcbDoc|X=1000000|Y=2000000|ROTATION=90|MIRROR=TRUE|ROWCOUNT=2|COLCOUNT=3|ROWSPACING=500000|COLSPACING=400000| ",
+            ),
+            // A record naming no document places nothing.
+            TextRecord::parse(b"|X=10|Y=20| "),
+        ];
+        let boards = read_embedded_boards(&recs);
+        assert_eq!(boards.len(), 1, "the pathless record is dropped");
+        let b = &boards[0];
+        assert_eq!(b.document_path, r"Panel\Widget.PcbDoc");
+        assert!((b.x - units::board_mm(1_000_000)).abs() < 1e-9);
+        assert_eq!(b.rotation, 90.0);
+        assert!(b.mirrored);
+        assert_eq!((b.rows, b.columns), (2, 3));
+        assert_eq!(b.instances(), 6, "a 2 x 3 panel is six boards, not one");
+    }
+
+    /// A single placement still counts as one, so a board with no grid does not
+    /// read as zero copies of itself.
+    #[test]
+    fn a_placement_with_no_grid_is_one_board() {
+        let recs = vec![TextRecord::parse(b"|DOCUMENTPATH=A.PcbDoc|X=0|Y=0| ")];
+        let boards = read_embedded_boards(&recs);
+        assert_eq!(boards[0].instances(), 1);
+    }
 
     /// Corner case 22: a primitive names its layer by the LEGACY id while the
     /// stack is described in the V9 form. Without the mapping, a design whose
