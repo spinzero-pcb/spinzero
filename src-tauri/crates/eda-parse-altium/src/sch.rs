@@ -222,6 +222,8 @@ pub struct Component {
     pub designator_color: String,
     pub designator_font: i64,
     pub designator_orientation: i64,
+    /// The designator text is mirrored, so its horizontal anchor reverses.
+    pub designator_mirrored: bool,
 }
 
 impl Component {
@@ -769,6 +771,7 @@ pub fn parse_records(recs: Vec<TextRecord>) -> SchDoc {
                     designator_color: String::new(),
                     designator_font: 1,
                     designator_orientation: 0,
+                    designator_mirrored: false,
                 });
             }
             Some(15) => {
@@ -864,6 +867,7 @@ pub fn parse_records(recs: Vec<TextRecord>) -> SchDoc {
                     comp.designator_color = color(r);
                     comp.designator_font = r.i("FontID").unwrap_or(1);
                     comp.designator_orientation = r.i("Orientation").unwrap_or(0);
+                    comp.designator_mirrored = r.b("IsMirrored");
                 }
             }
             41 => {

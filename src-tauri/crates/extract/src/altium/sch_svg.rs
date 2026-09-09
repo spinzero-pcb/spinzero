@@ -333,6 +333,25 @@ impl Ctx<'_> {
 /// `text-anchor` and `dominant-baseline` pair. The vertical sense flips with the
 /// Y axis: Altium's "bottom" is below the anchor in a Y-up sheet, which is the
 /// baseline once the page is the other way up.
+/// A mirrored text's justification, with its horizontal half reversed.
+///
+/// Altium keeps mirrored text READABLE — it never draws the glyphs backwards —
+/// and reverses which side of its anchor the string runs to, so a designator
+/// still sits outside the symbol it labels rather than across it. The corpus
+/// mirrors 2683 strings: 2484 parameters, 122 free texts and 77 designators.
+fn mirror_justify(justify: i64, mirrored: bool) -> i64 {
+    if !mirrored {
+        return justify;
+    }
+    let j = justify.clamp(0, 8);
+    (j / 3) * 3
+        + match j % 3 {
+            0 => 2,
+            2 => 0,
+            middle => middle,
+        }
+}
+
 fn anchor(justify: i64) -> (&'static str, &'static str) {
     let j = justify.clamp(0, 8);
     let h = match j % 3 {
@@ -1029,7 +1048,7 @@ fn emit_component(s: &mut String, ctx: &Ctx, comp: &sch::Component) {
             &comp.designator,
             comp.designator_at,
             comp.designator_font,
-            0,
+            mirror_justify(0, comp.designator_mirrored),
             comp.designator_orientation,
             &comp.designator_color,
             ctx.class("reference"),
@@ -1053,7 +1072,8 @@ fn emit_component(s: &mut String, ctx: &Ctx, comp: &sch::Component) {
             continue;
         }
         let _ = write!(s, r#"<g data-primitive="text" data-kind="field"{}>"#, uuid_attr(&p.uuid));
-        emit_text(s, ctx, &text, p.at, p.font, p.justify, p.orientation, &p.color, ctx.class(key));
+        let justify = mirror_justify(p.justify, p.mirrored);
+        emit_text(s, ctx, &text, p.at, p.font, justify, p.orientation, &p.color, ctx.class(key));
         s.push_str("</g>");
     }
     s.push_str("</g>");
@@ -1362,10 +1382,12 @@ fn emit_free_text(s: &mut String, ctx: &Ctx, t: &SchText) {
         };
         for (i, line) in lines.iter().enumerate() {
             let at = px_to_pt(ctx, inner_x, y + size * (i as f64 + 0.9));
-            emit_text(s, ctx, line, at, t.font, t.justify % 3, t.orientation, &t.color, ctx.class("note"));
+            let justify = mirror_justify(t.justify % 3, t.mirrored);
+            emit_text(s, ctx, line, at, t.font, justify, t.orientation, &t.color, ctx.class("note"));
         }
     } else {
-        emit_text(s, ctx, &text, t.at, t.font, t.justify, t.orientation, &t.color, ctx.class("note"));
+        let justify = mirror_justify(t.justify, t.mirrored);
+        emit_text(s, ctx, &text, t.at, t.font, justify, t.orientation, &t.color, ctx.class("note"));
     }
     s.push_str("</g>");
 }
@@ -1830,5 +1852,25 @@ mod tests {
         assert_eq!(markup("R\\E\\S\\E\\T\\"), ("RESET".to_string(), true));
         assert_eq!(markup("PLAIN"), ("PLAIN".to_string(), false));
         assert_eq!(markup("C:\\x"), ("C:x".to_string(), false), "a lone slash is not a bar");
+    }
+}
+
+#[cfg(test)]
+mod mirror_tests {
+    use super::mirror_justify;
+
+    /// Altium keeps mirrored text readable and reverses which side of its
+    /// anchor the string runs to. The corpus mirrors 2683 strings, and drawing
+    /// them with the un-mirrored anchor puts a designator across the symbol it
+    /// labels instead of beside it.
+    #[test]
+    fn a_mirrored_text_reverses_its_horizontal_anchor_only() {
+        assert_eq!(mirror_justify(0, false), 0, "an un-mirrored text is untouched");
+        assert_eq!(mirror_justify(0, true), 2, "left becomes right");
+        assert_eq!(mirror_justify(2, true), 0, "right becomes left");
+        assert_eq!(mirror_justify(1, true), 1, "centred stays centred");
+        // The vertical half is a different axis and does not move.
+        assert_eq!(mirror_justify(6, true), 8);
+        assert_eq!(mirror_justify(7, true), 7);
     }
 }
