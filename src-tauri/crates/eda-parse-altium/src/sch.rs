@@ -278,6 +278,9 @@ pub struct Port {
     pub text_color: String,
     pub area_color: String,
     pub font: i64,
+    /// `HarnessType` — the bundle this port carries, when it carries one. A
+    /// harness port links to a harness DEFINITION, not to a single net.
+    pub harness_type: String,
 }
 
 impl Port {
@@ -285,6 +288,50 @@ impl Port {
     pub fn terminals(&self) -> [Pt; 2] {
         [self.at, Pt { x: self.at.x + self.width * UNIT, y: self.at.y }]
     }
+}
+
+/// One named signal inside a harness connector (`RECORD=216`).
+///
+/// Like a sheet entry, it stores no connection point of its own: the position
+/// comes from the parent connector's rectangle and `DistanceFromTop`.
+#[derive(Debug, Clone, Default)]
+pub struct HarnessEntry {
+    pub name: String,
+    pub distance_from_top: i64,
+    pub uuid: String,
+    pub color: String,
+}
+
+/// A harness connector (`RECORD=215`) — the brace that gathers several signals
+/// into one bundle, with its entries and the harness type it declares.
+///
+/// A harness is Altium's bus with named members instead of a range. The type
+/// name (`I2C`) is carried by an owned `RECORD=217`, and the project may also
+/// keep the same definition in a `.Harness` sidecar as `I2C=SDA,SCL`.
+#[derive(Debug, Clone, Default)]
+pub struct HarnessConnector {
+    pub at: Pt,
+    pub w: i64,
+    pub h: i64,
+    /// Which edge the entries leave from. 1 = right, 2 = left, 3 = top, 4 = bottom.
+    pub side: i64,
+    /// The type name from the owned `RECORD=217`, empty when the sheet draws none.
+    pub harness_type: String,
+    pub entries: Vec<HarnessEntry>,
+    pub uuid: String,
+    pub color: String,
+}
+
+/// A signal harness (`RECORD=218`) — the polyline that carries a bundle.
+///
+/// It is drawn like a bus and it is a bundle like a bus: it is NOT a net, and
+/// its members are harness-local names.
+#[derive(Debug, Clone, Default)]
+pub struct SignalHarness {
+    pub pts: Vec<Pt>,
+    pub uuid: String,
+    pub width: i64,
+    pub color: String,
 }
 
 /// A sheet entry (`RECORD=16`) on a sheet symbol. It stores no connection point;
@@ -544,6 +591,10 @@ pub struct SchDoc {
     pub texts: Vec<SchText>,
     pub no_ercs: Vec<NoErc>,
     pub images: Vec<SchImage>,
+    /// Harness connectors (`RECORD=215`) with their entries and type.
+    pub harness_connectors: Vec<HarnessConnector>,
+    /// Signal harnesses (`RECORD=218`) — the polylines carrying the bundles.
+    pub signal_harnesses: Vec<SignalHarness>,
     /// Blankets (`RECORD=225`, in the `Additional` stream) — the closed regions
     /// a designer draws to exclude part of a sheet from compilation. They are
     /// drawn and counted, never applied: see `altium::netlist`.
@@ -682,6 +733,16 @@ pub fn parse(doc: &Doc) -> SchDoc {
     // document's `Additional` stream, which is why a sheet whose histogram shows
     // no region record can still have three of them drawn on it.
     out.blankets = parse_blankets(&doc.text_records("Additional"));
+    // Harness objects live in `Additional` too, and a sheet may write them to
+    // either stream, so both are read and the results concatenated.
+    let (mut hc, mut sh) = parse_harnesses(&doc.text_records("Additional"));
+    let (hc2, sh2) = parse_harnesses(
+        &raw.iter().map(|r| TextRecord::parse(&r.payload)).collect::<Vec<_>>(),
+    );
+    hc.extend(hc2);
+    sh.extend(sh2);
+    out.harness_connectors = hc;
+    out.signal_harnesses = sh;
     // An image record names its source path; the bytes are in `Storage` under
     // that same path. A logo whose blob is missing keeps its record — the
     // renderer draws the frame it occupies rather than silently losing the box.
@@ -715,6 +776,89 @@ pub fn parse_blankets(recs: &[TextRecord]) -> Vec<Graphic> {
             })
         })
         .collect()
+}
+
+/// A `.Harness` definition file: one `TYPE=ENTRY,ENTRY` line per harness.
+///
+/// Altium generates the file from the connectors a sheet draws, and the
+/// designer may LOCK it — after which the definition and the drawing can
+/// disagree, which is a compile violation and so worth reading separately from
+/// what any one sheet happens to draw.
+pub fn parse_harness_definition(text: &str) -> Vec<(String, Vec<String>)> {
+    text.lines()
+        .filter_map(|line| {
+            let (name, members) = line.trim().split_once('=')?;
+            let name = name.trim();
+            if name.is_empty() {
+                return None;
+            }
+            let members = members
+                .split(',')
+                .map(str::trim)
+                .filter(|m| !m.is_empty())
+                .map(str::to_string)
+                .collect();
+            Some((name.to_string(), members))
+        })
+        .collect()
+}
+
+/// Harness objects from a record list: connectors with their entries and type,
+/// and the signal-harness polylines.
+///
+/// Ownership is positional. A `RECORD=216` entry and a `RECORD=217` type carry
+/// `OwnerIndexAdditionalList=T` — they are owned within the *`Additional` list*,
+/// not the sheet's record numbering — and the corpus writes no `OwnerIndex` on
+/// them at all. So each belongs to the nearest preceding `RECORD=215`, which is
+/// the order Altium writes them in. An entry before any connector is dropped
+/// rather than guessed at.
+pub fn parse_harnesses(recs: &[TextRecord]) -> (Vec<HarnessConnector>, Vec<SignalHarness>) {
+    let mut connectors: Vec<HarnessConnector> = Vec::new();
+    let mut harnesses = Vec::new();
+    for r in recs {
+        match r.record_type() {
+            Some(215) => connectors.push(HarnessConnector {
+                at: pt(r, "Location.X", "Location.Y"),
+                w: r.i("XSize").unwrap_or(0),
+                h: r.i("YSize").unwrap_or(0),
+                side: r.i("HarnessConnectorSide").unwrap_or(0),
+                harness_type: String::new(),
+                entries: Vec::new(),
+                uuid: r.s("UniqueID").to_string(),
+                color: color(r),
+            }),
+            Some(216) => {
+                if let Some(c) = connectors.last_mut() {
+                    c.entries.push(HarnessEntry {
+                        name: r.s("Name").to_string(),
+                        distance_from_top: r.i("DistanceFromTop").unwrap_or(0),
+                        uuid: r.s("UniqueID").to_string(),
+                        color: color(r),
+                    });
+                }
+            }
+            // The type label. Altium draws it as text, and its `Text` is the
+            // harness type the ports match on.
+            Some(217) => {
+                if let Some(c) = connectors.last_mut() {
+                    c.harness_type = r.s("Text").to_string();
+                }
+            }
+            Some(218) => {
+                let pts = polyline(r);
+                if pts.len() >= 2 {
+                    harnesses.push(SignalHarness {
+                        pts,
+                        uuid: r.s("UniqueID").to_string(),
+                        width: r.i("LineWidth").unwrap_or(0),
+                        color: color(r),
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+    (connectors, harnesses)
 }
 
 /// Build the document from its already-decoded `FileHeader` records.
@@ -974,6 +1118,7 @@ pub fn parse_records(recs: Vec<TextRecord>) -> SchDoc {
                 text_color: units::bgr_hex(r.i("TextColor").unwrap_or(0)),
                 area_color: units::bgr_hex(r.i("AreaColor").unwrap_or(0xFF_FF_FF)),
                 font: r.i("FontID").unwrap_or(1),
+                harness_type: r.s("HarnessType").to_string(),
             }),
             25 => out.net_labels.push(NetLabel {
                 at: pt(r, "Location.X", "Location.Y"),
@@ -1130,6 +1275,9 @@ pub fn parse_records(recs: Vec<TextRecord>) -> SchDoc {
                     None => out.graphics.push(g),
                 }
             }
+            // Harness objects are read by `parse_harnesses`, over whichever
+            // stream carries them, so they are not a silent drop here.
+            215..=218 => {}
             // Silent-drop guard: everything not modelled is counted by type.
             // 46/47/48 are implementation-list detail with nothing to draw.
             _ => *out.skipped.entry(t).or_default() += 1,

@@ -24,8 +24,34 @@ use crate::design::SheetInfo;
 /// Maximum hierarchy depth walked — a backstop against pathological cycles.
 const MAX_SHEET_DEPTH: usize = 32;
 
-/// Harness record types (§4.4). Recorded, not expanded, until M5.
-const HARNESS_RECORDS: [i64; 4] = [215, 216, 217, 218];
+/// A signal harness the design draws, as the review reads it.
+///
+/// A harness is Altium's bus with named members instead of a range, and it is
+/// treated the same way here: the BUNDLE is modelled, and its members are NOT
+/// expanded into nets. The rule is the plan's own (§4.4) and the reason is the
+/// one that governs buses — member names are bundle-local, so `SDA` inside an
+/// `I2C` harness and `SDA` inside a `SENSOR` harness are different signals, and
+/// a bare-name union would short them together. Altium's own compiled net name
+/// for a harness member is not documented anywhere this project can cite, and
+/// guessing at the spelling would put an invented net in a review.
+#[derive(Debug, Clone, Serialize)]
+pub struct HarnessInfo {
+    /// The type the connector declares (`I2C`), or empty when it draws none.
+    pub harness_type: String,
+    /// The member signals, in the order the connector lists them.
+    pub entries: Vec<String>,
+    /// Sheet the connector is drawn on.
+    pub sheet: String,
+    /// Names of the ports on that sheet carrying this harness type. This is the
+    /// link the plan asks for: a harness connector reaches the hierarchy
+    /// through a port, and without it the bundle stops at the sheet edge.
+    pub ports: Vec<String>,
+    /// Whether a `.Harness` definition file declares the same members. `None`
+    /// when the project ships no definition for this type; `Some(false)` is a
+    /// locked definition that has drifted from the drawing, which Altium itself
+    /// reports as a violation.
+    pub matches_definition: Option<bool>,
+}
 
 /// One parsed sheet instance: its place in the hierarchy plus the document.
 pub struct LoadedSheet {
@@ -77,8 +103,14 @@ pub struct Unresolved {
     pub ports_without_sheet_entry: Vec<String>,
     /// Buses seen. Bus ranges are not expanded into member nets.
     pub buses_not_expanded: usize,
-    /// Harness objects seen. Recorded, not expanded.
-    pub harness_objects: usize,
+    /// Harness member signals left inside their bundle. A harness is a bundle
+    /// like a bus, its member names are bundle-local, and Altium's compiled
+    /// name for a member is not documented — so the bundle is modelled
+    /// (`harnesses`) and the members are not made into nets.
+    pub harness_members_not_expanded: usize,
+    /// Harness connectors reaching no port on their own sheet. The bundle stops
+    /// at the sheet edge, so nothing carries it up the hierarchy.
+    pub harnesses_without_a_port: usize,
     /// Directives (`RECORD=43`) that state no class this reader knows. Their
     /// class names reach `net_name_to_classes`; these state none.
     pub directives_without_a_class: usize,
@@ -254,6 +286,8 @@ pub struct SourceInfo {
     /// The rigid-flex layer stack, when the board declares substacks.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub board_stackup: Option<StackupInfo>,
+    /// The signal harnesses the design draws. Empty for a design with none.
+    pub harnesses: Vec<HarnessInfo>,
     /// Every variant the project defines. Empty for a design with none.
     pub variants: Vec<VariantInfo>,
     pub unresolved: Unresolved,
@@ -301,6 +335,9 @@ pub struct Hierarchy {
     /// Every `[ProjectVariantN]` the project defines, unresolved. Empty for a
     /// loose document, which has no project file to define one.
     pub variants: Vec<eda_parse_altium::Variant>,
+    /// The signal harnesses the design draws, resolved against the project's
+    /// `.Harness` definitions.
+    pub harnesses: Vec<HarnessInfo>,
 }
 
 pub fn load_hierarchy(
@@ -458,16 +495,87 @@ pub fn load_hierarchy(
         unresolved.linked_images_not_embedded +=
             s.sch.images.iter().filter(|i| i.data.is_empty()).count();
         for (t, n) in &s.sch.skipped {
-            if HARNESS_RECORDS.contains(t) {
-                unresolved.harness_objects += n;
-            }
             *unresolved
                 .skipped_records
                 .entry(format!("RECORD={t}"))
                 .or_default() += n;
         }
     }
-    Ok(Hierarchy { name, options, sheets: out, unresolved, project_params, variants })
+    let definitions = harness_definitions(project);
+    let harnesses = resolve_harnesses(&out, &definitions);
+    unresolved.harness_members_not_expanded =
+        harnesses.iter().map(|h| h.entries.len()).sum();
+    unresolved.harnesses_without_a_port =
+        harnesses.iter().filter(|h| h.ports.is_empty()).count();
+    Ok(Hierarchy { name, options, sheets: out, unresolved, project_params, variants, harnesses })
+}
+
+/// Every `TYPE=MEMBER,MEMBER` line of every `.Harness` file beside the project.
+///
+/// Altium keeps the definition in its own file rather than in the schematic, so
+/// a design can declare a harness type no sheet draws, and a locked definition
+/// can disagree with the connector that generated it.
+fn harness_definitions(project: &Path) -> BTreeMap<String, Vec<String>> {
+    let mut out = BTreeMap::new();
+    let Some(dir) = project.parent() else { return out };
+    let Ok(rd) = std::fs::read_dir(dir) else { return out };
+    for e in rd.flatten() {
+        let p = e.path();
+        if !p.extension().is_some_and(|x| x.eq_ignore_ascii_case("harness")) {
+            continue;
+        }
+        let Ok(bytes) = std::fs::read(&p) else { continue };
+        let text = String::from_utf8_lossy(&bytes);
+        for (name, members) in sch::parse_harness_definition(&text) {
+            out.insert(name.to_ascii_uppercase(), members);
+        }
+    }
+    out
+}
+
+/// The harnesses the design draws, each linked to the ports that carry it off
+/// the sheet and checked against the project's own definition.
+///
+/// The port link is by harness TYPE, which is how Altium itself matches them: a
+/// port declares `HarnessType=I2C` and any connector on that sheet declaring
+/// `I2C` is what it carries. A connector with no type declared can be matched to
+/// nothing, and says so by reaching no port.
+fn resolve_harnesses(
+    sheets: &[LoadedSheet],
+    definitions: &BTreeMap<String, Vec<String>>,
+) -> Vec<HarnessInfo> {
+    let mut out = Vec::new();
+    for s in sheets {
+        for c in &s.sch.harness_connectors {
+            let entries: Vec<String> = c.entries.iter().map(|e| e.name.clone()).collect();
+            let key = c.harness_type.to_ascii_uppercase();
+            let ports = if key.is_empty() {
+                Vec::new()
+            } else {
+                s.sch
+                    .ports
+                    .iter()
+                    .filter(|p| p.harness_type.eq_ignore_ascii_case(&c.harness_type))
+                    .map(|p| p.name.clone())
+                    .collect()
+            };
+            // Order is the drawing's, so compare as sets: the definition file
+            // lists members in its own order and a reorder is not a drift.
+            let matches_definition = definitions.get(&key).map(|d| {
+                let a: BTreeSet<&str> = d.iter().map(String::as_str).collect();
+                let b: BTreeSet<&str> = entries.iter().map(String::as_str).collect();
+                a == b
+            });
+            out.push(HarnessInfo {
+                harness_type: c.harness_type.clone(),
+                entries,
+                sheet: s.info.filename.clone(),
+                ports,
+                matches_definition,
+            });
+        }
+    }
+    out
 }
 
 /// Depth-first walk of the sheet hierarchy, assigning sequential sheet numbers.
@@ -663,6 +771,7 @@ pub fn build_design(
         compile: CompileSettings::new(options, free_document),
         board_rules: Vec::new(),
         board_stackup: None,
+        harnesses: Vec::new(),
         variants: resolved,
         unresolved,
     };

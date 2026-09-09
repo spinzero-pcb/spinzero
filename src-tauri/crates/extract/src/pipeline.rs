@@ -606,6 +606,7 @@ fn run_design_altium(
         unresolved,
         project_params,
         variants,
+        harnesses,
     } = h;
     let filename = project
         .file_name()
@@ -623,6 +624,16 @@ fn run_design_altium(
         &variants,
         &project_params,
     );
+    let mut source = source;
+    source.harnesses = harnesses;
+    if !source.harnesses.is_empty() {
+        emit(Msg::Progress(format!(
+            "harnesses: {} bundles, {} member signals, {} reaching no port",
+            source.harnesses.len(),
+            source.unresolved.harness_members_not_expanded,
+            source.unresolved.harnesses_without_a_port,
+        )));
+    }
     emit(Msg::Progress(format!(
         "compile options: {} scope, sheet-entry names {}, port names {}",
         source.compile.hierarchy_mode,

@@ -128,3 +128,61 @@ fn bend_lines_arrive_in_millimetres() {
         }
     }
 }
+
+/// The harness connector, its entries and its type. All four harness records
+/// live in the `Additional` stream, which is why a sheet whose `FileHeader`
+/// histogram shows none can still draw a bundle.
+#[test]
+fn a_harness_connector_carries_its_entries_and_its_type() {
+    let doc = Doc::open(&fixture("harness.SchDoc")).expect("harness fixture opens");
+    let s = eda_parse_altium::sch::parse(&doc);
+
+    assert_eq!(s.harness_connectors.len(), 1);
+    let c = &s.harness_connectors[0];
+    assert_eq!(c.harness_type, "I2C", "the RECORD=217 label names the bundle");
+    let names: Vec<&str> = c.entries.iter().map(|e| e.name.as_str()).collect();
+    assert_eq!(names, ["SDA", "SCL"], "entries in the order the connector lists them");
+    assert!(c.w > 0 && c.h > 0, "the connector has a body to draw");
+
+    assert_eq!(s.signal_harnesses.len(), 1, "one polyline carries the bundle");
+    assert!(s.signal_harnesses[0].pts.len() >= 2);
+
+    // The port is the link out of the sheet, and it names the bundle by type
+    // rather than by any one member.
+    let carriers: Vec<&str> = s
+        .ports
+        .iter()
+        .filter(|p| !p.harness_type.is_empty())
+        .map(|p| p.harness_type.as_str())
+        .collect();
+    assert_eq!(carriers, ["I2C"]);
+}
+
+/// A harness is a bundle, so no member of it becomes a net here. The bundle is
+/// modelled and the members stay inside it — the same contract buses keep,
+/// because `SDA` inside `I2C` and `SDA` inside `SENSOR` are different signals.
+#[test]
+fn a_harness_member_is_not_a_net_label() {
+    let doc = Doc::open(&fixture("harness.SchDoc")).expect("harness fixture opens");
+    let s = eda_parse_altium::sch::parse(&doc);
+    for l in &s.net_labels {
+        assert!(
+            !["SDA", "SCL"].contains(&l.text.as_str()),
+            "harness member {:?} reached the sheet as a net label",
+            l.text
+        );
+    }
+    // And the records are no longer counted as dropped.
+    for t in [215i64, 216, 217, 218] {
+        assert!(!s.skipped.contains_key(&t), "RECORD={t} is parsed, not skipped");
+    }
+}
+
+/// The `.Harness` sidecar is the definition Altium generates and the designer
+/// may lock, after which it can disagree with the drawing.
+#[test]
+fn a_harness_definition_file_lists_its_members() {
+    let d = eda_parse_altium::sch::parse_harness_definition("I2C=SDA,SCL\r\n");
+    assert_eq!(d, vec![("I2C".to_string(), vec!["SDA".to_string(), "SCL".to_string()])]);
+    assert!(eda_parse_altium::sch::parse_harness_definition("\n=nothing\n").is_empty());
+}
