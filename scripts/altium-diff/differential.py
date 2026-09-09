@@ -1198,9 +1198,10 @@ def duplicate_net_names(design: dict[str, Any]) -> list[str]:
     """Net names emitted more than once.
 
     A net name is the handle every downstream reader uses — the board
-    cross-check, the net classes, a finding that quotes a net. Two nets under one
-    name is a defect on its own, and it also HIDES a naming difference from the
-    comparison below, which is keyed by name.
+    cross-check, the net classes, a finding that quotes a net. It is not by
+    itself a defect: Altium compiles two nets called `P5V` on the eval design,
+    and both tools report them. It IS a difference when one side repeats a name
+    the other does not, so only that is reported.
     """
     seen: dict[str, int] = {}
     for net in design.get("nets", []):
@@ -1228,7 +1229,17 @@ def normalise_nets(design: dict[str, Any]) -> dict[str, list[str]]:
         )
         if len(terminals) < 2:
             continue
-        out[net.get("name") or ""] = terminals
+        # A NAME can belong to more than one net, on both sides: the eval design
+        # labels `P5V` on one sheet and ports it on others, and Altium compiles
+        # two nets called `P5V`. Keying by name alone dropped one of them from
+        # the comparison entirely and made the survivor look short of terminals.
+        name = net.get("name") or ""
+        key = name
+        n = 1
+        while key in out:
+            n += 1
+            key = f"{name}#{n}"
+        out[key] = terminals
     return out
 
 
@@ -1351,9 +1362,13 @@ def compare_m1_design(
             "(notes D8.1); the text is the same"
         )
 
-    for name in duplicate_net_names(ours):
+    # A repeated net name is only a difference when the two sides disagree about
+    # it. Both tools emit `P5V` twice on the eval design, because the design
+    # says so.
+    mine_dup, their_dup = duplicate_net_names(ours), duplicate_net_names(theirs)
+    for name in sorted(set(mine_dup) - set(their_dup)):
         report.add("net name we emit more than once", name)
-    for name in duplicate_net_names(theirs):
+    for name in sorted(set(their_dup) - set(mine_dup)):
         report.add("net name the reference emits more than once", name)
 
     our_nets, their_nets = normalise_nets(ours), normalise_nets(theirs)

@@ -101,8 +101,12 @@ pub struct Unresolved {
     /// and the picture is not.
     pub linked_images_not_embedded: usize,
     /// Component pins on a net of their own — no wire, label or port at their
-    /// location. A connectivity-model problem shows up here as a number.
+    /// location, and no marker saying so. A connectivity-model problem shows up
+    /// here as a number.
     pub unconnected_pins: usize,
+    /// Pins the designer marked no-connect: open on purpose. Counted apart from
+    /// the ones above, because a review reads the two very differently.
+    pub pins_marked_no_connect: usize,
     /// Pins connected implicitly as hidden supply pins.
     pub hidden_supply_pins: usize,
     /// Hidden pins naming no supply whose pad a visible pin already draws. They
@@ -548,6 +552,7 @@ pub fn build_design(
     let mut unresolved = unresolved;
     let resolved = resolve_variants(variants, &mut components, &mut unresolved);
     unresolved.unconnected_pins = diag.unconnected_pins;
+    unresolved.pins_marked_no_connect = diag.pins_marked_no_connect;
     unresolved.hidden_supply_pins = diag.hidden_supply_pins;
     unresolved.hidden_pins_without_net = diag.hidden_pins_without_net;
     unresolved.pins_joined_by_hot_spot = diag.pins_joined_by_hot_spot;

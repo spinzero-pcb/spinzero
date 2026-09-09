@@ -53,8 +53,11 @@ fn implicit_supply(pin: &sch::Pin) -> Option<String> {
 /// What the netlist pass could not settle on one sheet.
 #[derive(Debug, Default, Clone)]
 pub struct SheetDiagnostics {
-    /// Component pins with no wire, junction, label or port at their location.
+    /// Component pins with no wire, junction, label or port at their location,
+    /// and no marker saying that is deliberate.
     pub unconnected_pins: usize,
+    /// Pins the designer marked no-connect. Open on purpose, not by omission.
+    pub pins_marked_no_connect: usize,
     /// Pins connected implicitly because they are hidden supply pins.
     pub hidden_supply_pins: usize,
     /// Bus polylines seen; buses are recorded, not expanded into member nets.
@@ -307,6 +310,8 @@ pub fn fragments(
     let mut namers: Vec<Namer> = Vec::new();
     // Net classes a directive states, by the node it sits on.
     let mut directives: Vec<(usize, String)> = Vec::new();
+    // Nodes a no-connect marker sits on.
+    let mut no_connect: Vec<usize> = Vec::new();
     let mut elems: Vec<GElem> = Vec::new();
     // Implicit connections for hidden supply pins, keyed by net name.
     let mut implicit: Vec<(usize, String)> = Vec::new();
@@ -397,6 +402,16 @@ pub fn fragments(
         if !named {
             diag.directives_without_a_class += 1;
         }
+    }
+
+    // A no-connect marker is the designer SAYING a pin is meant to reach
+    // nothing. Without it every deliberately-open pin reads the same as a
+    // missed wire: the MCU144E1 design has 201 unconnected pins and most of them
+    // are marked. It joins nothing — it only makes the pin's own node shared, so
+    // the group can be told apart.
+    for n in &sch.no_ercs {
+        let node = conn.id(n.at);
+        no_connect.push(node);
     }
 
     for j in &sch.junctions {
@@ -519,6 +534,7 @@ pub fn fragments(
         ports: Vec<String>,
         implicit: Vec<String>,
         classes: Vec<String>,
+        no_connect: bool,
         entry_links: Vec<(String, String)>,
         port_links: Vec<String>,
         graphical: Graphical,
@@ -531,6 +547,10 @@ pub fn fragments(
     for (node, class) in directives {
         let r = conn.find(node);
         groups.entry(r).or_default().classes.push(class);
+    }
+    for node in no_connect {
+        let r = conn.find(node);
+        groups.entry(r).or_default().no_connect = true;
     }
     for n in namers {
         let r = conn.find(n.node);
@@ -581,7 +601,11 @@ pub fn fragments(
             continue;
         }
         if g.terminals.len() == 1 && !named && g.entry_links.is_empty() && g.port_links.is_empty() {
-            diag.unconnected_pins += 1;
+            if g.no_connect {
+                diag.pins_marked_no_connect += 1;
+            } else {
+                diag.unconnected_pins += 1;
+            }
         }
         diag.hidden_supply_pins += g.implicit.len();
         g.terminals
@@ -599,10 +623,16 @@ pub fn fragments(
         }
         let label_global = opts.hierarchy_mode == eda_parse_altium::HierarchyMode::Global;
         for x in &g.labels {
+            let up = x.to_ascii_uppercase();
+            // A net label carrying a POWER PORT's name is NOT thereby global.
+            // The eval design labels `P5V` on one sheet and ports it on others,
+            // and bridging the two gave one net where Altium has two — the
+            // reference emits `P5V` and `SGND` twice as well, which is the whole
+            // evidence there is, and it says the label's scope stands.
             if label_global {
-                keys.push(format!("G:{}", x.to_ascii_uppercase()));
+                keys.push(format!("G:{up}"));
             } else {
-                keys.push(format!("L:{sheet_path_uuids}\u{0}{}", x.to_ascii_uppercase()));
+                keys.push(format!("L:{sheet_path_uuids}\u{0}{up}"));
             }
         }
         // A port on this sheet joins the sheet entry of this sheet's placement
@@ -793,6 +823,16 @@ mod tests {
         }
     }
 
+    /// Fragments of one sheet, for a fixture with no channel.
+    fn frags_of(
+        sch: &SchDoc,
+        path: &str,
+        opts: &CompileOptions,
+        d: &mut SheetDiagnostics,
+    ) -> Vec<crate::netlist::Frag> {
+        fragments(sch, path, opts, None, d)
+    }
+
     fn comp(designator: &str, pins: Vec<Pin>) -> Component {
         Component {
             library_ref: "R".into(),
@@ -808,7 +848,7 @@ mod tests {
 
     fn nets(sch: &SchDoc, opts: &CompileOptions) -> Vec<crate::netlist::Net> {
         let mut d = SheetDiagnostics::default();
-        let mut n = crate::netlist::merge_frags(fragments(sch, "/", opts, None, &mut d));
+        let mut n = crate::netlist::merge_frags(frags_of(&sch, "/", &opts, &mut d));
         consolidate_case(&mut n);
         n
     }
@@ -920,8 +960,8 @@ mod tests {
         };
         let opts = CompileOptions::board_project();
         let mut d = SheetDiagnostics::default();
-        let mut frags = fragments(&parent, "/", &opts, None, &mut d);
-        frags.extend(fragments(&child, "/SYM/", &opts, None, &mut d));
+        let mut frags = frags_of(&parent, "/", &opts, &mut d);
+        frags.extend(frags_of(&child, "/SYM/", &opts, &mut d));
         let n = crate::netlist::merge_frags(frags);
         let sig = n.iter().find(|n| n.name == "SIG").expect("hierarchical net SIG");
         let who: Vec<_> = sig.terminals.iter().map(|t| t.designator.as_str()).collect();
@@ -941,7 +981,7 @@ mod tests {
             ..SchDoc::default()
         };
         let mut d = SheetDiagnostics::default();
-        let mut n = crate::netlist::merge_frags(fragments(&sch, "/", &CompileOptions::board_project(), None, &mut d));
+        let mut n = crate::netlist::merge_frags(frags_of(&sch, "/", &CompileOptions::board_project(), &mut d));
         consolidate_case(&mut n);
         let vdd = n.iter().find(|n| n.name == "VDD").expect("VDD net");
         let who: Vec<_> = vdd.terminals.iter().map(|t| t.designator.as_str()).collect();
@@ -965,7 +1005,7 @@ mod tests {
             ..SchDoc::default()
         };
         let mut d = SheetDiagnostics::default();
-        let n = crate::netlist::merge_frags(fragments(&sch, "/", &CompileOptions::board_project(), None, &mut d));
+        let n = crate::netlist::merge_frags(frags_of(&sch, "/", &CompileOptions::board_project(), &mut d));
         assert_eq!(n.len(), 1, "one net, not a wire net plus an orphan pin");
         assert_eq!(n[0].terminals.len(), 2);
         assert_eq!(d.pins_joined_by_hot_spot, 1);
@@ -991,7 +1031,7 @@ mod tests {
             ..SchDoc::default()
         };
         let mut d = SheetDiagnostics::default();
-        let n = crate::netlist::merge_frags(fragments(&sch, "/", &CompileOptions::board_project(), None, &mut d));
+        let n = crate::netlist::merge_frags(frags_of(&sch, "/", &CompileOptions::board_project(), &mut d));
         assert_eq!(d.pins_joined_by_hot_spot, 0, "R1 was already on its wire");
         assert_eq!(d.hot_spot_ambiguous, 1, "R2 had two nets equally near");
         let r2 = n.iter().find(|n| n.terminals.iter().any(|t| t.designator == "R2")).unwrap();
@@ -1011,7 +1051,7 @@ mod tests {
             ..SchDoc::default()
         };
         let mut d = SheetDiagnostics::default();
-        let n = crate::netlist::merge_frags(fragments(&sch, "/", &CompileOptions::board_project(), None, &mut d));
+        let n = crate::netlist::merge_frags(frags_of(&sch, "/", &CompileOptions::board_project(), &mut d));
         assert_eq!(d.hidden_pins_without_net, 1, "only the one sharing pad 1");
         let mut pins: Vec<&str> = n.iter().flat_map(|n| n.terminals.iter()).map(|t| t.pin.as_str()).collect();
         pins.sort_unstable();
