@@ -186,3 +186,68 @@ fn a_harness_definition_file_lists_its_members() {
     assert_eq!(d, vec![("I2C".to_string(), vec!["SDA".to_string(), "SCL".to_string()])]);
     assert!(eda_parse_altium::sch::parse_harness_definition("\n=nothing\n").is_empty());
 }
+
+/// A `.PcbLib` footprint, read with the SAME primitive readers the board path
+/// uses. The counts are the reference parser's own: 2 pads, 12 tracks, 1 body.
+#[test]
+fn a_pcblib_footprint_reads_with_the_board_readers() {
+    let doc = Doc::open(&fixture("footprints.PcbLib")).expect("pcblib fixture opens");
+    let lib = eda_parse_altium::library::read_pcblib(&doc);
+    assert_eq!(lib.footprints.len(), 1);
+    let fp = &lib.footprints[0];
+    assert_eq!(fp.name, "R0603_0.55MM_MD");
+    assert_eq!(fp.pads.len(), 2, "an 0603 has two pads");
+    assert_eq!(fp.tracks.len(), 12);
+    assert!(fp.arcs.is_empty() && fp.vias.is_empty() && fp.regions.is_empty());
+
+    // The walk consumed the stream exactly. Anything less and the block-count
+    // table is wrong, which is the failure this reader is shaped to make loud.
+    assert_eq!(fp.unread_bytes, 0, "the footprint stream was walked to its end");
+    assert!(fp.unknown.is_empty(), "unknown primitive types: {:?}", fp.unknown);
+
+    // The pads are real geometry, not zeroes that happened to parse.
+    for p in &fp.pads {
+        assert!(p.w > 0.0 && p.h > 0.0, "pad {:?} has no size", p.name);
+        assert!(p.w < 10.0 && p.h < 10.0, "pad {:?} is not an 0603 pad", p.name);
+    }
+    let names: Vec<&str> = fp.pads.iter().map(|p| p.name.as_str()).collect();
+    assert_eq!(names, ["1", "2"]);
+}
+
+/// A `.SchLib` symbol: its storage is the library reference, and its records are
+/// the same ones a sheet writes.
+#[test]
+fn a_schlib_symbol_reads_its_body_and_says_what_it_could_not() {
+    let doc = Doc::open(&fixture("symbols.SchLib")).expect("schlib fixture opens");
+    let lib = eda_parse_altium::library::read_schlib(&doc);
+    assert_eq!(lib.symbols.len(), 1);
+    let s = &lib.symbols[0];
+    assert_eq!(s.name, "HELLO_IC_6PIN");
+
+    let c = s.doc.components.first().expect("the symbol's own RECORD=1");
+    assert_eq!(c.library_ref, "HELLO_IC_6PIN");
+    assert_eq!(c.description, "Hello world 6-pin example");
+    assert_eq!(c.part_count, 2, "a two-part symbol");
+    assert!(!s.doc.graphics.is_empty() || !c.graphics.is_empty(), "the body draws");
+
+    // A library writes its pins as BINARY records, where a sheet writes them
+    // as text — so the text-record path that reads every pin of every corpus
+    // SHEET reads none of these, and they need a decoder of their own.
+    assert_eq!(lib.records_unread(), 0, "every binary record decoded");
+    let names: Vec<&str> = c.pins.iter().map(|p| p.name.as_str()).collect();
+    assert_eq!(names, ["IN_A", "IN_B", "OUT_A", "OUT_B", "VCC", "GND"]);
+    let numbers: Vec<&str> = c.pins.iter().map(|p| p.number.as_str()).collect();
+    assert_eq!(numbers, ["1", "2", "3", "4", "5", "6"]);
+
+    // The binary form carries the owning part like the text one does. This
+    // symbol declares two parts and draws all six pins on the first, which is
+    // legal and is why the assertion is on the VALUE rather than on a split.
+    assert!(c.pins.iter().all(|p| p.part_id == 1), "every pin belongs to part 1");
+
+    // Geometry, not zeroes that happened to parse: every pin has a stub with
+    // length, and the connection point is at the far end of it.
+    for p in &c.pins {
+        assert!(p.length > 0, "pin {:?} has no stub to connect to", p.name);
+        assert_ne!(p.connection(), p.at, "pin {:?} connects at its own body", p.name);
+    }
+}

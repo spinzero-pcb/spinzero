@@ -769,7 +769,7 @@ fn f64_at(b: &[u8], o: usize) -> Option<f64> {
     Some(f64::from_le_bytes(b.get(o..o + 8)?.try_into().ok()?))
 }
 
-fn read_track(r: &Raw) -> Option<Track> {
+pub(crate) fn read_track(r: &Raw) -> Option<Track> {
     let b = &r.payload;
     Some(Track {
         c: Common::parse(b)?,
@@ -781,7 +781,7 @@ fn read_track(r: &Raw) -> Option<Track> {
     })
 }
 
-fn read_arc(r: &Raw) -> Option<Arc> {
+pub(crate) fn read_arc(r: &Raw) -> Option<Arc> {
     let b = &r.payload;
     Some(Arc {
         c: Common::parse(b)?,
@@ -794,7 +794,7 @@ fn read_arc(r: &Raw) -> Option<Arc> {
     })
 }
 
-fn read_via(r: &Raw) -> Option<Via> {
+pub(crate) fn read_via(r: &Raw) -> Option<Via> {
     let b = &r.payload;
     Some(Via {
         c: Common::parse(b)?,
@@ -810,7 +810,7 @@ fn read_via(r: &Raw) -> Option<Via> {
 /// A pad is six length-prefixed blocks: the name, three small ones, the main
 /// record, and — when the pad is not a plain stack — the per-layer size and
 /// shape table that supersedes the main record's own (corner case 24).
-fn read_pad(r: &Raw) -> Option<Pad> {
+pub(crate) fn read_pad(r: &Raw) -> Option<Pad> {
     let name = pascal(&r.payload);
     // Blocks after the first arrive in `extra`, so the fifth sub-record — the
     // main one — is `extra[3]` and the size/shape override is `extra[4]`.
@@ -879,7 +879,7 @@ const EXT_CORNERS: usize = 564;
 /// Layers those two arrays describe.
 const EXT_STACK: usize = 32;
 
-fn read_text(r: &Raw, strings: &BTreeMap<u32, String>) -> Option<Text> {
+pub(crate) fn read_text(r: &Raw, strings: &BTreeMap<u32, String>) -> Option<Text> {
     let b = &r.payload;
     let c = Common::parse(b)?;
     // `WideStrings6` is indexed from the record and is the only spelling that
@@ -912,7 +912,7 @@ fn read_text(r: &Raw, strings: &BTreeMap<u32, String>) -> Option<Text> {
     })
 }
 
-fn read_fill(r: &Raw) -> Option<Fill> {
+pub(crate) fn read_fill(r: &Raw) -> Option<Fill> {
     let b = &r.payload;
     Some(Fill {
         c: Common::parse(b)?,
@@ -927,7 +927,7 @@ fn read_fill(r: &Raw) -> Option<Fill> {
 /// A region is the common header, five bytes, a length-prefixed parameter
 /// string, then a vertex count and that many `f64` pairs — the one primitive
 /// whose coordinates are floating point rather than integer units.
-fn read_region(r: &Raw) -> Option<Region> {
+pub(crate) fn read_region(r: &Raw) -> Option<Region> {
     let b = &r.payload;
     let c = Common::parse(b)?;
     let len = i32_at(b, 18)?.max(0) as usize;

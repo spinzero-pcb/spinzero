@@ -778,6 +778,86 @@ pub fn parse_blankets(recs: &[TextRecord]) -> Vec<Graphic> {
         .collect()
 }
 
+/// A pin written as a BINARY record, which is how a `.SchLib` writes every one
+/// of its pins where a `.SchDoc` writes `|RECORD=2|…` text.
+///
+/// The layout is fixed-position up to the description and Pascal-string packed
+/// after it, so nothing here may be skipped without losing the strings:
+///
+/// ```text
+/// 0      record type, 2
+/// 1..5   OwnerIndex               5..7  OwnerPartId (i16)
+/// 7      OwnerPartDisplayMode     8..12 inner-edge, outer-edge, inner, outer symbols
+/// 12     description              (Pascal)
+/// +1     FormalType               +1    Electrical (low nibble)
+/// +1     PinConglomerate          +2    length, in 10-mil units (i16)
+/// +4     X, Y, in the same units (i16 each)
+/// +4     colour
+/// then   name, designator, swap-id-pin, swap-id-part, default value (Pascal)
+/// ```
+///
+/// Every field is bounds-checked and a short record simply stops yielding, the
+/// same discipline the board primitives keep: one truncated pin must not cost
+/// the symbol.
+pub fn parse_binary_pin(b: &[u8]) -> Option<Pin> {
+    if b.first().copied()? != 2 {
+        return None;
+    }
+    let part_id = i16::from_le_bytes(b.get(5..7)?.try_into().ok()?) as i64;
+    let display_mode = *b.get(7)? as i64;
+    let outer_edge = *b.get(9)? as i64;
+    let inner = *b.get(10)? as i64;
+
+    let mut i = 12usize;
+    // A Pascal string: one length byte then that many bytes, decoded the way
+    // every other 8-bit Altium field is.
+    let mut pascal = |i: &mut usize| -> Option<String> {
+        let n = *b.get(*i)? as usize;
+        *i += 1;
+        let s = crate::record::decode(b.get(*i..*i + n)?);
+        *i += n;
+        Some(s)
+    };
+    let description = pascal(&mut i)?;
+    i += 1; // FormalType
+    let electrical = (*b.get(i)? & 0x0F) as i64;
+    i += 1;
+    let conglomerate = *b.get(i)? as i64;
+    i += 1;
+    let length = i16::from_le_bytes(b.get(i..i + 2)?.try_into().ok()?) as i64;
+    i += 2;
+    let x = i16::from_le_bytes(b.get(i..i + 2)?.try_into().ok()?) as i64;
+    let y = i16::from_le_bytes(b.get(i + 2..i + 4)?.try_into().ok()?) as i64;
+    i += 4;
+    let color = units::bgr_hex(i32::from_le_bytes(b.get(i..i + 4)?.try_into().ok()?) as i64);
+    i += 4;
+    let name = pascal(&mut i)?;
+    let number = pascal(&mut i)?;
+
+    Some(Pin {
+        number,
+        name,
+        description,
+        electrical,
+        conglomerate,
+        length,
+        // The binary form stores coordinates in whole 10-mil units with no
+        // `_Frac` companion, so they scale up exactly.
+        at: Pt { x: x * UNIT, y: y * UNIT },
+        part_id,
+        display_mode,
+        // A library pin carries no `UniqueID`; the caller's `oid` fallback
+        // names it by position, as it does for a junction.
+        uuid: String::new(),
+        hidden_net_name: String::new(),
+        outer_edge,
+        inner,
+        color,
+        name_font: 0,
+        number_font: 0,
+    })
+}
+
 /// A `.Harness` definition file: one `TYPE=ENTRY,ENTRY` line per harness.
 ///
 /// Altium generates the file from the connectors a sheet draws, and the

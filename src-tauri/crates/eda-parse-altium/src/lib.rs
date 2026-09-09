@@ -8,6 +8,7 @@
 pub mod cfb;
 pub mod doc;
 pub mod image;
+pub mod library;
 pub mod pcb;
 pub mod prj;
 pub mod record;
@@ -18,6 +19,7 @@ pub mod units;
 mod test_support;
 
 pub use doc::{Doc, Kind};
+pub use library::{Footprint, PcbLib, SchLib, Symbol};
 pub use pcb::PcbDoc;
 pub use prj::{CompileOptions, Fitting, HierarchyMode, Project, Variant, Variation};
 pub use record::TextRecord;
