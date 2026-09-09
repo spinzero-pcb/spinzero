@@ -182,14 +182,21 @@ pub struct Frag {
     pub keys: Vec<String>,
     pub name: String,
     pub driver_kind: String,
+    /// Naming precedence for this fragment, strongest wins, filled by the
+    /// front-end. The two tools do not agree on it: KiCad ranks a hierarchical
+    /// label above a local one, and Altium ranks a net LABEL above the sheet
+    /// entry or port that carries it, with `PowerPortNamesTakePriority` swapping
+    /// the top two. [`driver_rank`] is KiCad's answer and the default.
+    pub rank: u8,
     /// The sheet instance (`sheet_path_uuids`) this fragment was computed on, kept
     /// through the merge so the resulting net knows which of its graphical elements
     /// live on which instance (see `Net::by_sheet`).
     pub sheet: String,
 }
 
-/// Driver-kind precedence for naming a merged net (strongest wins).
-fn driver_rank(kind: &str) -> u8 {
+/// Driver-kind precedence for naming a merged net (strongest wins). KiCad's
+/// answer, and the default a fragment carries when its front-end states none.
+pub fn driver_rank(kind: &str) -> u8 {
     match kind {
         "global_power_pin" => 5,
         "global_label" => 4,
@@ -434,6 +441,7 @@ pub fn fragments(sch: &Schematic, sheet_path: &str, sheet_path_uuids: &str) -> V
             graphical: g.graphical,
             keys,
             name,
+            rank: driver_rank(&driver_kind),
             driver_kind,
             sheet: sheet_path_uuids.to_string(),
         });
@@ -494,7 +502,7 @@ pub fn merge_frags(frags: Vec<Frag>) -> Vec<Net> {
             by_sheet.entry(f.sheet).or_default().extend(f.graphical.clone());
             graphical.extend(f.graphical);
             if !f.name.is_empty() {
-                let rank = driver_rank(&f.driver_kind);
+                let rank = f.rank;
                 let better = match &best {
                     None => true,
                     Some((br, bn, _)) => rank > *br || (rank == *br && &f.name < bn),

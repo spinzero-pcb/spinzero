@@ -505,7 +505,7 @@ pub fn fragments(
         diag.hidden_supply_pins += g.implicit.len();
         g.terminals
             .sort_by(|a, b| (&a.designator, &a.pin).cmp(&(&b.designator, &b.pin)));
-        let (name, driver_kind) = name_group(
+        let (name, driver_kind, rank) = name_group(
             &g.labels, &g.power, &g.entries, &g.ports, &g.implicit, &g.terminals, opts, channel,
         );
 
@@ -538,6 +538,7 @@ pub fn fragments(
             graphical: g.graphical,
             keys,
             name,
+            rank,
             driver_kind,
             sheet: sheet_path_uuids.to_string(),
         });
@@ -545,12 +546,33 @@ pub fn fragments(
     frags
 }
 
+/// Naming precedence, strongest first. The rank travels with the fragment
+/// because the merge has to apply the SAME order across sheets that
+/// [`name_group`] applies within one.
+///
+/// The shared [`crate::netlist::driver_rank`] is KiCad's order, where a
+/// hierarchical label outranks a local one. Altium's is the other way round: a
+/// net LABEL names the net, and the sheet entry or port carrying it names it
+/// only when the project allows that and nothing else did. Ranking them KiCad's
+/// way renamed the eval design's `GATE__` net after the `GATE` sheet entry that
+/// crosses into it, which cost the channel suffix as well — one `GATE` twice
+/// where Altium writes `GATE___1` and `GATE___2`.
+const RANK_STRONGEST: u8 = 6;
+const RANK_SECOND: u8 = 5;
+const RANK_IMPLICIT: u8 = 4;
+const RANK_ALLOWED_HIER: u8 = 3;
+const RANK_HIER_FALLBACK: u8 = 2;
+const RANK_AUTO: u8 = 1;
+
 /// Name a group, in Altium's precedence.
 ///
 /// Net labels come FIRST by default and power ports second —
 /// `PowerPortNamesTakePriority` swaps them. Sheet entries and ports may name a
 /// net only when the project's compile options allow it, which is on for entries
 /// and off for ports by default.
+///
+/// Returns the name, the driver kind, and the rank that decides which fragment's
+/// name survives the cross-sheet merge.
 #[allow(clippy::too_many_arguments)]
 fn name_group(
     labels: &[String],
@@ -561,7 +583,7 @@ fn name_group(
     terminals: &[Terminal],
     opts: &eda_parse_altium::CompileOptions,
     channel: Option<&super::design::Channel>,
-) -> (String, String) {
+) -> (String, String, u8) {
     // Altium names a net after the label itself — the sheet path is NOT part of
     // the name, which is what the board's own net table shows. Scope is a merge
     // question, not a naming one. A repeated sheet is the exception: its local
@@ -581,29 +603,32 @@ fn name_group(
     } else {
         (label, pwr)
     };
-    if let Some(x) = first.or(second) {
-        return x;
+    if let Some((name, kind)) = first {
+        return (name, kind, RANK_STRONGEST);
+    }
+    if let Some((name, kind)) = second {
+        return (name, kind, RANK_SECOND);
     }
     if let Some(x) = implicit.iter().min() {
-        return (x.clone(), "global_power_pin".into());
+        return (x.clone(), "global_power_pin".into(), RANK_IMPLICIT);
     }
     if opts.allow_sheet_entry_net_names {
         if let Some(x) = entries.iter().min() {
-            return (x.clone(), "hier_label".into());
+            return (x.clone(), "hier_label".into(), RANK_ALLOWED_HIER);
         }
     }
     if opts.allow_port_net_names {
         if let Some(x) = ports.iter().min() {
-            return (x.clone(), "hier_label".into());
+            return (x.clone(), "hier_label".into(), RANK_ALLOWED_HIER);
         }
     }
     // Nets bridged only through the hierarchy still need a name; fall back to
     // the entry/port name before auto-naming from a pin.
     if let Some(x) = entries.iter().chain(ports).min() {
-        return (x.clone(), "hier_label".into());
+        return (x.clone(), "hier_label".into(), RANK_HIER_FALLBACK);
     }
     let Some(t) = terminals.first() else {
-        return (String::new(), "pin".into());
+        return (String::new(), "pin".into(), RANK_AUTO);
     };
     if terminals.len() == 1 {
         let part = if t.pin_name.is_empty() || t.pin_name == "~" {
@@ -611,14 +636,18 @@ fn name_group(
         } else {
             format!("{}-", t.pin_name.replace('/', "{slash}"))
         };
-        return (format!("unconnected-({}-{}Pad{})", t.designator, part, t.pin), "pin".into());
+        return (
+            format!("unconnected-({}-{}Pad{})", t.designator, part, t.pin),
+            "pin".into(),
+            RANK_AUTO,
+        );
     }
     // Altium auto-names an unnamed net `Net<designator>_<pin>` after its first
     // terminal, and that is the name the board carries — `NetC19_2`, not
     // `NETC19_2`, which is what the §8.3 differential and the board's own
     // `Nets6` table both say. Using KiCad's `Net-(REF-PadN)` form here would
     // disagree with every board net.
-    (format!("Net{}_{}", t.designator, t.pin), "pin".into())
+    (format!("Net{}_{}", t.designator, t.pin), "pin".into(), RANK_AUTO)
 }
 
 /// Consolidate net names that differ only in case.
