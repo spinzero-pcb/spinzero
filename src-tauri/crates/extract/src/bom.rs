@@ -30,6 +30,15 @@ pub enum Field {
     /// single-source risk finding is not filed against a part that has two.
     MpnAlt,
     Manufacturer,
+    /// The manufacturer of the documented second source.
+    ///
+    /// A real KiCad BOM writes the alternate as a PAIR of columns -- "Alternate part 1"
+    /// and "Alternate part 1 Manufacturer" -- and only the first half was read, so the
+    /// enriched BOM carried an alternate part number with nobody's name on it. A part
+    /// number without its manufacturer cannot be looked up with any confidence and
+    /// cannot be compared to the primary on the one axis a second-source review is
+    /// about, which is whether the two are the same part from two companies.
+    MfrAlt,
     Datasheet,
     Lifecycle,
     Msl,
@@ -39,9 +48,9 @@ pub enum Field {
 }
 
 impl Field {
-    fn all() -> [Field; 9] {
+    fn all() -> [Field; 10] {
         use Field::*;
-        [Mpn, MpnAlt, Manufacturer, Datasheet, Lifecycle, Msl, Rohs, Reach, Aecq]
+        [Mpn, MpnAlt, Manufacturer, MfrAlt, Datasheet, Lifecycle, Msl, Rohs, Reach, Aecq]
     }
 
     fn label(self) -> &'static str {
@@ -49,6 +58,7 @@ impl Field {
             Field::Mpn => "mpn",
             Field::MpnAlt => "mpn_alt",
             Field::Manufacturer => "manufacturer",
+            Field::MfrAlt => "mfr_alt",
             Field::Datasheet => "datasheet",
             Field::Lifecycle => "lifecycle",
             Field::Msl => "msl",
@@ -75,7 +85,29 @@ impl Field {
             ),
             Field::Manufacturer => (
                 &["manufacturer", "mfr", "mfg", "vendor", "maker", "brand"],
-                &["part", "order", "status", "number"],
+                // "alternate"/"secondsource" keep the companion column below out of the
+                // PRIMARY manufacturer: "Alternate Manufacturer" has no "part" in it,
+                // so the older negatives did not exclude it, and on a BOM where the
+                // alternate column was better filled it would have won the field.
+                &["part", "order", "status", "number", "alternate", "secondsource"],
+                false,
+            ),
+            // The companion of MpnAlt. Both halves are needed, so the positives demand
+            // both an alternate marker AND a manufacturer marker -- "Alternate part 1
+            // Manufacturer" normalises to "alternatepart1manufacturer", and no single
+            // substring picks that out without also claiming a column that is only one
+            // of the two.
+            Field::MfrAlt => (
+                &[
+                    "alternate+manufacturer",
+                    "alternate+mfr",
+                    "alternate+mfg",
+                    "alt+manufacturer",
+                    "alt+mfr",
+                    "secondsource+manufacturer",
+                    "secondsource+mfr",
+                ],
+                &["supplier", "distributor"],
                 false,
             ),
             Field::Datasheet => (&["datasheet"], &[], true),
@@ -171,7 +203,9 @@ pub fn resolve_mapping(components: &[Component]) -> Mapping {
             if neg.iter().any(|t| nkey.contains(t)) {
                 continue;
             }
-            let name_hit = pos.iter().any(|t| nkey.contains(t));
+            // A "+"-joined positive is a CONJUNCTION: every part must appear. Plain
+            // tokens contain no "+" and so behave exactly as they always have.
+            let name_hit = pos.iter().any(|t| t.split('+').all(|p| nkey.contains(p)));
             let f = fill(key);
             let score = if name_hit {
                 2.0 + f
@@ -309,6 +343,9 @@ pub struct EnrichedRow {
     pub mpn: String,
     /// Documented second source, when the design records one. Empty otherwise.
     pub mpn_alt: String,
+    /// Who makes the second source. Empty when the design names no alternate, or names
+    /// one without saying whose it is.
+    pub mfr_alt: String,
     pub datasheet: String,
     pub aecq: String,
     pub rohs: String,
@@ -346,6 +383,7 @@ pub fn build_enriched(components: &[Component], mapping: &Mapping) -> (Vec<Enric
             manufacturer: manufacturer.clone(),
             mpn: mpn.clone(),
             mpn_alt: mapping.value(Field::MpnAlt, c),
+            mfr_alt: mapping.value(Field::MfrAlt, c),
             datasheet: mapping.value(Field::Datasheet, c),
             aecq: mapping.value(Field::Aecq, c),
             rohs: mapping.value(Field::Rohs, c),
@@ -361,6 +399,7 @@ pub fn build_enriched(components: &[Component], mapping: &Mapping) -> (Vec<Enric
         fill_if_empty(&mut entry.description, &c.description);
         // Sparse within a group: one member of a grouped line may carry the alternate.
         fill_if_empty(&mut entry.mpn_alt, &mapping.value(Field::MpnAlt, c));
+        fill_if_empty(&mut entry.mfr_alt, &mapping.value(Field::MfrAlt, c));
         for name in &dist_cols {
             let v = mapping.distributor_value(name, c);
             if !v.is_empty() {
@@ -394,6 +433,9 @@ pub fn enriched_csv(rows: &[EnrichedRow], dist_cols: &[String]) -> String {
         "Manufacturer",
         "Manufacturer Part Number",
         "Alternate MPN",
+        // The name the review's own resolver already looks for (`alt_manufacturer`'s
+        // canonical header), so nothing on the TypeScript side has to learn a spelling.
+        "Alternate Manufacturer",
         "Datasheet",
         "AEC-Q",
         "RoHS",
@@ -419,6 +461,7 @@ pub fn enriched_csv(rows: &[EnrichedRow], dist_cols: &[String]) -> String {
             r.manufacturer.clone(),
             r.mpn.clone(),
             r.mpn_alt.clone(),
+            r.mfr_alt.clone(),
             r.datasheet.clone(),
             r.aecq.clone(),
             r.rohs.clone(),
@@ -961,6 +1004,9 @@ mod tests {
         assert_eq!(rows[0].mpn, "CL32Y226KAVVPJE");
         assert_eq!(rows[0].mpn_alt, "TMK325B7226MMHP");
         assert_eq!(rows[0].manufacturer, "Samsung");
+        // …and the companion column is READ, into its own field: an alternate part
+        // number with nobody's name on it cannot be looked up or compared.
+        assert_eq!(rows[0].mfr_alt, "Taiyo Yuden");
 
         // The header name is the contract with the rule pack: bom-rules maps
         // "Alternate MPN" to its `mpn_alt` field, which three sourcing rules read.
@@ -971,6 +1017,10 @@ mod tests {
         let idx = cols.iter().position(|c| *c == "Alternate MPN").unwrap();
         let row: Vec<&str> = csv.lines().nth(1).unwrap().split(',').collect();
         assert_eq!(row[idx], "TMK325B7226MMHP");
+        // Same contract for the manufacturer: "Alternate Manufacturer" is the header
+        // the review's own resolver already looks for.
+        let midx = cols.iter().position(|c| *c == "Alternate Manufacturer").unwrap();
+        assert_eq!(row[midx], "Taiyo Yuden");
     }
 
     /// B5. The reader has always had a "a well-filled column mapped to nothing" check

@@ -334,6 +334,10 @@
                   "borrowed",
                   null
                 ]
+              },
+              "fill_rate": {
+                "type": "number",
+                "description": "The fraction of rows with something in that column, counted over the BOM the review read. Carried here so a consumer prints this number rather than counting it again: a manufacturer column 8% filled is almost always the wrong column, and a report that recomputed the figure could disagree with the document it was rendered from."
               }
             }
           }
