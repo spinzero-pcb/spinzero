@@ -12,18 +12,21 @@ repos consume them rather than each defining their own shape.
 | `findings-1.0.json` | The retired five-level severity / four-level confidence version. No producer emits it; kept so a document already sitting in a project's review inbox still reads. |
 | `bundle-1.0.json` | The review bundle — every file a detailed review may upload, and by omission everything it may not. |
 | `mcp-tools-1.0.json` | The MCP harness's tool surface: what a customer's own agent may call, in what order, and how a refusal is phrased. |
-| `rule-fixtures/` | Golden BOM fixtures + expected rule hits, pinning the Rust `bom-rules` crate. |
 
 ## Consumers
 
-- Rust: `src-tauri/crates/bom-rules` emits `findings.json` v1.1 with
-  `pipeline: "bom-rules"` and `confidence: "Unvalidated"`.
+- The free tier's rule pack, `bom-rules`, emits `findings.json` v1.1 with
+  `pipeline: "bom-rules"` and `confidence: "Unvalidated"`. It is a separate program
+  the installer puts beside the app, not a crate in this repository; `bomrules.rs`
+  says where the app looks for it.
+- Rust: `src-tauri/src/findings.rs` is this schema as the app reads it — from the rule
+  pack, from the paid service, and from a project's review inbox.
 - TypeScript: `src/lib/findings.ts` mirrors the schema for the UI.
 - The app ingests **both** tiers through one path (`bomcheck.rs` →
   `reviews.rs`), matching on `fingerprint`.
 - The paid engine (`spinzero-private/engine`) mirrors the findings types in
   `src/contracts.ts` and pins them against this file in its own test suite. Its
-  `bom-detailed` stage 2 shells out to the `bom-rules` binary in this repo, so both
+  `bom-detailed` stage 2 shells out to the same `bom-rules` binary, so both
   tiers produce identical fingerprints and a paid finding refines the free-tier
   comment in place instead of filing a second one.
 - The bundle spec is enforced on **both** sides: the app builds exactly this file
@@ -58,14 +61,3 @@ the version; anything a consumer could choke on gets a new version and a new fil
 collapsing severity to two levels and confidence to three is a value a 1.0 reader
 would not recognise. The app reads both and normalises on ingest
 (`comment_severity` in `bomcheck.rs`).
-
-## Rule fixtures
-
-Each fixture is a pair:
-
-- `<name>.csv` — a BOM CSV, small and hand-written so every row exists to
-  trigger (or deliberately not trigger) a specific rule.
-- `<name>.expected.json` — `{ "profile": …, "expect_rules": [...],
-  "forbid_rules": [...] }`, asserting which rule ids must and must not fire.
-
-The Rust side runs them in `bom-rules`' test suite (`cargo test -p bom-rules`).

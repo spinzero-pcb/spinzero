@@ -129,8 +129,12 @@ fn find_enriched_csv(bom_dir: &Path) -> Option<PathBuf> {
 mod tests {
     use super::*;
 
-    fn fixture(csv: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("spinzero_bundle_{}", std::process::id()));
+    /// One directory per test, not one per process. Both tests wipe the directory
+    /// before writing their fixture, and cargo runs them on two threads — so a shared
+    /// name meant whichever ran second deleted the other's CSV mid-test, and the suite
+    /// failed on a different test each run.
+    fn fixture(tag: &str, csv: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("spinzero_bundle_{}_{tag}", std::process::id()));
         let bom = dir.join("bom");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&bom).expect("temp dir");
@@ -145,7 +149,7 @@ mod tests {
 
     #[test]
     fn bundle_holds_only_the_three_spec_files_and_no_project_name() {
-        let dir = fixture("Reference,Value\nR1,10k\nR2,4k7\n");
+        let dir = fixture("three_files", "Reference,Value\nR1,10k\nR2,4k7\n");
         let bundle = build(Some(dir.clone()), "automotive", "Secret Board", "kicad", None, 2)
             .expect("bundle");
         let names: Vec<&String> = bundle.files.keys().collect();
@@ -162,7 +166,7 @@ mod tests {
 
     #[test]
     fn an_empty_bom_is_refused_before_anything_is_uploaded() {
-        let dir = fixture("Reference,Value\n");
+        let dir = fixture("empty_bom", "Reference,Value\n");
         assert!(build(Some(dir.clone()), "default", "b", "kicad", None, 0).is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }

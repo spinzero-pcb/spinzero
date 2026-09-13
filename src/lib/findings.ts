@@ -6,7 +6,7 @@
 // comments in bomcheck.rs, matched by `fingerprint` — and this file is what the
 // BOM tab renders the run summary from.
 //
-// Keep in sync with schemas/findings-1.2.json and src-tauri/crates/bom-rules.
+// Keep in sync with schemas/findings-1.2.json and src-tauri/src/findings.rs.
 
 import type { Comment } from "./types";
 
@@ -139,7 +139,7 @@ export interface ReviewInboxEntry {
   error: string | null;
 }
 
-/** Where one logical field's data comes from. Mirrors `bom_rules::load::FieldMapping`. */
+/** Where one logical field's data comes from. Mirrors `findings::FieldMapping` in Rust. */
 export interface FieldMapping {
   /** Logical field the rules read, e.g. "mpn", "lifecycle". */
   logical: string;
@@ -172,7 +172,7 @@ export interface MappingView {
 }
 
 /** End-application profiles, in the order the picker offers them. Mirrors
- *  `bom_rules::config::PROFILES`; the label is what the user sees.
+ *  the rule pack's `config::PROFILES`; the label is what the user sees.
  *
  *  `default` is deliberately absent, and this is the visible half of a rule change:
  *  it is no longer a profile meaning "general", it is the profile meaning **nobody
@@ -187,7 +187,7 @@ export const BOM_PROFILES = [
   // Automotive is two answers, because AEC-Q200 is not one grade: a part can carry it
   // and still be excluded by its own manufacturer from braking and steering. Which of
   // those two facts is a Critical finding depends on which half of the car this board
-  // is in, and one option could not ask. Mirrors `bom_rules::config::PROFILES`.
+  // is in, and one option could not ask. Mirrors the rule pack's `config::PROFILES`.
   { id: "automotive-comfort", label: "Automotive Infotainment, body and chassis" },
   { id: "automotive-safety", label: "Automotive Powertrain/Safety" },
 ] as const;

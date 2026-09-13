@@ -13,6 +13,8 @@ mod project;
 mod rawstore;
 mod reviewbundle;
 mod reviews;
+mod findings;
+mod bomrules;
 mod sidecar;
 mod telemetry;
 mod util;
@@ -1078,7 +1080,7 @@ fn get_bom_presets(state: State<AppState>) -> Result<Vec<design::BomPreset>, Str
 }
 
 // ------------------------------------------------------ BOM check (free tier)
-// Deterministic rules over the crunched BOM (`crates/bom-rules`), whose findings.json
+// Deterministic rules over the crunched BOM (the `bom-rules` program), whose findings.json
 // is ingested as review comments. The paid detailed review emits the same document,
 // so it lands through the same path — see bomcheck.rs.
 
@@ -1091,7 +1093,7 @@ fn run_bom_check(
     let lines = design::bom_lines(opt_active_extraction(&state))?;
     let profile = profile.unwrap_or_else(|| "default".to_string());
     let overrides = saved_bom_mapping(&handle.project_dir).unwrap_or_default();
-    let (doc, mapping) = bomcheck::run_rules(&lines, &profile, &overrides);
+    let (doc, mapping) = bomcheck::run_rules(&lines, &profile, &overrides)?;
     telemetry::bump("bom_checks");
     bomcheck::ingest(
         &handle.project_dir,
@@ -1124,7 +1126,7 @@ fn get_bom_mapping(
     let lines = design::bom_lines(opt_active_extraction(&state))?;
     let profile = profile.unwrap_or_else(|| "default".to_string());
     let saved = saved_bom_mapping(&handle.project_dir);
-    Ok(bomcheck::mapping_view(&lines, &profile, saved.as_ref()))
+    bomcheck::mapping_view(&lines, &profile, saved.as_ref())
 }
 
 /// Record the mapping the user approved. Skipping the dialog saves an empty map —
@@ -1197,7 +1199,7 @@ fn ingest_findings(
 /// incomplete, and file the comments.
 fn ingest_validated(
     handle: &Arc<ProjectHandle>,
-    doc: bom_rules::FindingsDoc,
+    doc: crate::findings::FindingsDoc,
 ) -> Result<bomcheck::CheckOutcome, String> {
     telemetry::bump("detailed_reviews");
     log::info!(
@@ -1231,7 +1233,7 @@ fn ingest_validated(
         &project::author_slug(),
         handle.effective_extraction_id(),
         doc,
-        &bom_rules::load::MappingReport::default(),
+        &crate::findings::MappingReport::default(),
     )
 }
 

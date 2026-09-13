@@ -29,7 +29,7 @@ export function projectClassLabel(v: string | null | undefined): string {
   return PROJECT_CLASSES.find((c) => c.value === v)?.label ?? "General";
 }
 
-/** The six project classes onto the four rule profiles `bom_rules::config::PROFILES`
+/** The six project classes onto the four rule profiles the rule pack's `config::PROFILES`
  *  ships. `space` reads the hi-rel expectations the industrial profile encodes, and
  *  `general` maps to `commercial` — mapping them down is what lets the app ask the
  *  question once instead of twice.
