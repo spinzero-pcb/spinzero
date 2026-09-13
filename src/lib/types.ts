@@ -426,3 +426,46 @@ export interface SessionActionInput {
   title?: string;
   status?: string;
 }
+
+// ------------------------------------------------ connecting an AI assistant
+// Mirrors `assistant.rs`. SpinZero never edits another product's config file: where a
+// client has its own `mcp add` we run that, and where it does not we show a block and
+// the path to paste it into.
+
+/** How a client is told about an MCP server. */
+export type HowToAdd = "command" | "config_file";
+
+export interface AssistantClient {
+  id: string;
+  label: string;
+  how: HowToAdd;
+  /** Found on this machine. A client we cannot see is still listed — somebody about to
+   *  install Cursor should not have to wonder whether SpinZero works with it. */
+  installed: boolean;
+  /** `how: "command"` — the line we would run, ready to show. */
+  command: string;
+  /** `how: "config_file"` — where that client keeps its MCP servers. */
+  config_path: string;
+  /** `mcpServers` for almost everyone, `servers` for VS Code. Getting this wrong makes
+   *  the client ignore the block without an error. */
+  config_key: string;
+}
+
+export interface AssistantSetup {
+  /** The review server beside this app, resolved rather than typed. */
+  server_command: string;
+  /** Empty when it was found; otherwise why not, in a sentence. */
+  server_problem: string;
+  licence_file: string;
+  /** Is there a key in that file? Never the key itself. */
+  licence_present: boolean;
+  clients: AssistantClient[];
+}
+
+export interface RegisterOutcome {
+  ok: boolean;
+  /** What we ran, so the user can run it themselves if it failed. */
+  command: string;
+  /** The client's own words about its own config. */
+  detail: string;
+}

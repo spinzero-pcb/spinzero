@@ -4605,6 +4605,50 @@ textarea.wizard-input {
   gap: var(--sp-1);
 }
 
+/* One row per assistant: its name, whether we found it here, and the one action it
+   supports. A client we could not find is still listed, greyed rather than hidden —
+   somebody about to install Cursor needs to see that SpinZero works with it. */
+.connect-clients {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.connect-client {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  padding: var(--sp-2);
+  background: var(--bg-3);
+  border: 1px solid var(--border-1);
+  border-radius: var(--radius-1);
+}
+
+.connect-client-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+}
+
+.connect-client-name {
+  color: var(--fg-1);
+  font-size: var(--fs-0);
+}
+
+.connect-absent { color: var(--fg-3); }
+
+.connect-actions {
+  display: flex;
+  gap: var(--sp-1);
+}
+
+/* A sentence the user has to act on, not decoration. */
+.wizard-hint.err { color: var(--err); }
+
 .connect-tab {
   flex: 1;
   padding: var(--sp-1) var(--sp-2);

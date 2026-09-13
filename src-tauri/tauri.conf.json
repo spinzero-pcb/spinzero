@@ -27,7 +27,9 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis"],
+    "targets": [
+      "nsis"
+    ],
     "createUpdaterArtifacts": true,
     "icon": [
       "icons/32x32.png",
@@ -41,7 +43,13 @@
         "installMode": "currentUser",
         "installerHooks": "installer.nsh"
       }
-    }
+    },
+    "externalBin": [
+      "binaries/bom-rules",
+      "binaries/pcb-extract",
+      "binaries/spinzero-mcp",
+      "binaries/spinzero-extract"
+    ]
   },
   "plugins": {
     "updater": {

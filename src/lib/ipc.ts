@@ -25,7 +25,11 @@ import type {
   UiSettings,
 } from "./types";
 import type { CheckOutcome, FindingsDoc, MappingView, ReviewInboxEntry } from "./findings";
-import type { AgentReviewSettings } from "./types";
+import type {
+  AgentReviewSettings,
+  AssistantSetup,
+  RegisterOutcome,
+} from "./types";
 import type { ReviewBundle } from "./reviewService";
 import type { DesignIndexes } from "./design";
 import type { DiffHandle } from "./diff";
@@ -150,6 +154,15 @@ export const ipc = {
   startAgentReview: (profile: string, config: AgentReviewSettings) =>
     invoke<void>("start_agent_review", { profile, config }),
   agentReviewRunning: () => invoke<boolean>("agent_review_running"),
+
+  /** Everything the "Connect your AI assistant" screen needs: where the server is,
+   *  where the licence file is, and which assistants this machine has. */
+  assistantSetup: () => invoke<AssistantSetup>("assistant_setup"),
+  /** Run one client's own `mcp add`. We never edit its config file ourselves. */
+  registerAssistant: (clientId: string) =>
+    invoke<RegisterOutcome>("register_assistant", { clientId }),
+  /** Write the licence key into the one file every client reads it from. */
+  setLicenceKey: (key: string) => invoke<string>("set_licence_key", { key }),
 
   getReviewAuthor: () => invoke<string>("get_review_author"),
   listComments: () => invoke<Comment[]>("list_comments"),

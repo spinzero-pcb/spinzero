@@ -13,6 +13,7 @@ mod project;
 mod rawstore;
 mod reviewbundle;
 mod reviews;
+mod assistant;
 mod findings;
 mod bomrules;
 mod sidecar;
@@ -1305,6 +1306,25 @@ fn start_agent_review(
 
 /// Is an assistant review in flight? The launcher asks on mount so a reopened window
 /// does not offer to start a second one.
+// ------------------------------------------------ connecting an AI assistant
+// We never edit another product's config file. Where a client has its own `mcp add`
+// we run that; where it does not, the user pastes a block. See assistant.rs.
+
+#[tauri::command]
+fn assistant_setup() -> assistant::AssistantSetup {
+    assistant::setup()
+}
+
+#[tauri::command]
+fn register_assistant(client_id: String) -> Result<assistant::RegisterOutcome, String> {
+    assistant::register(&client_id)
+}
+
+#[tauri::command]
+fn set_licence_key(key: String) -> Result<String, String> {
+    assistant::write_licence_key(&key)
+}
+
 #[tauri::command]
 fn agent_review_running(state: State<AppState>) -> bool {
     state.agent.lock_safe().is_running()
@@ -1634,6 +1654,9 @@ pub fn run() {
             import_review_inbox,
             start_agent_review,
             agent_review_running,
+            assistant_setup,
+            register_assistant,
+            set_licence_key,
             get_review_author,
             list_comments,
             apply_review_action,
