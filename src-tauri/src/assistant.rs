@@ -464,7 +464,8 @@ mod tests {
                 .expect("splits");
         assert_eq!(program, "claude");
         assert_eq!(args.last().unwrap(), r"C:\Program Files\SpinZero\spinzero-mcp.exe");
-        assert_eq!(args.len(), 6);
+        // mcp add spinzero -s user -- <path>
+        assert_eq!(args.len(), 7);
     }
 
     #[test]
