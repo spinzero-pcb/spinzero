@@ -3,7 +3,7 @@ name = "spinzero"
 version = "0.0.5"
 description = "SpinZero — local-first PCB design review"
 edition = "2021"
-license = "GPL-3.0-or-later"
+license = "LicenseRef-SpinZero-Proprietary"
 repository = "https://github.com/spinzero-pcb/spinzero"
 
 # The extraction pipeline lives in sibling crates compiled into this app
