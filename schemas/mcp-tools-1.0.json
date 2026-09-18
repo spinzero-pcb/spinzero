@@ -54,6 +54,10 @@
             "type": "boolean",
             "description": "Review the board even when most of its datasheets could not be obtained. Only pass this after a run has been refused for low coverage AND the user has said to go ahead: the resulting review cannot verify specs against documents it does not have, and the report will say so. Requires a SpinZero licence."
           },
+          "non_interactive": {
+            "type": "boolean",
+            "description": "There is no user in this conversation. Pass it only when you were STARTED with the preflight answers already in hand — SpinZero does this when it runs a review for you. The preflight then tells you to confirm and continue instead of telling you to show a table and ask a question nobody is there to answer. Never pass it in a chat with a person."
+          },
           "pack_version": {
             "type": "string",
             "description": "Pin this review to a specific SpinZero content pack version, e.g. '2026.08.27-1'. Use the version printed in a previous review of the same project when you want the findings to line up with it: prompt content changes findings, changed findings get new fingerprints, and a new fingerprint files a fresh review comment instead of updating the thread that already carries the engineer's replies. Omit it to use whatever pack the service is currently serving."

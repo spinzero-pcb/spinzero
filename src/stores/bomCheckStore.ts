@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { ipc } from "../lib/ipc";
-import { severityCounts, type BomProfile, type CheckOutcome, type FindingsDoc } from "../lib/findings";
+import { isClaim, severityCounts, type BomProfile, type CheckOutcome, type FindingsDoc } from "../lib/findings";
 import { bomProfileForClass } from "../lib/projectClass";
 import { useBomMappingStore } from "./bomMappingStore";
 import { useProjectStore } from "./projectStore";
@@ -187,9 +187,13 @@ export const useBomCheckStore = create<BomCheckState>((set, get) => ({
     }),
 }));
 
-/** "No issues found" / "7 issues found" — the headline of the completion toast. */
+/** "No issues found" / "7 issues found" — the headline of the completion toast.
+ *
+ *  Coverage gaps are not issues. They ride in `findings` from findings-1.3 so they can
+ *  be anchored and tracked, but "9 issues found" that is really 7 defects and 2 parts
+ *  nobody could check overstates what the run found. The mix below still names them. */
 export function runTitle(out: CheckOutcome): string {
-  const n = out.findings.findings.length;
+  const n = out.findings.findings.filter(isClaim).length;
   if (n === 0) return "BOM check: no issues found";
   return `BOM check: ${n} issue${n === 1 ? "" : "s"} found`;
 }

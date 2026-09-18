@@ -1,7 +1,6 @@
 import { useEffect, useRef } from "react";
 import { isAgentRunning, useAgentReviewStore } from "../../stores/agentReviewStore";
 import { useBomCheckStore } from "../../stores/bomCheckStore";
-import { isRunning, useDetailedReviewStore } from "../../stores/detailedReviewStore";
 import { reviewRows, useReviewRunsStore } from "../../stores/reviewRunsStore";
 import { useReviewInboxStore } from "../../stores/reviewInboxStore";
 import { useSettingsStore } from "../../stores/settingsStore";
@@ -83,13 +82,10 @@ export function RunReviewMenu() {
   // so the footer counts jobs rather than showing a single boolean — concurrent runs
   // are allowed (decision 2026-08-24).
   const bomRunning = useBomCheckStore((s) => s.running);
-  const detailedPhase = useDetailedReviewStore((s) => s.phase);
-  const detailedBusy = isRunning(detailedPhase);
-  // A review running through the user's own assistant has no stages of ours to
-  // report, so it gets a line of its own rather than the detailed review's bar.
+  // The detailed review now has real progress of its own — the review server's own
+  // counts, read from its `status.json` — so it gets the bar rather than a line.
   const agentPhase = useAgentReviewStore((s) => s.phase);
-  const agentLine = useAgentReviewStore((s) => s.line);
-  const agentBusy = isAgentRunning(agentPhase);
+  const detailedBusy = isAgentRunning(agentPhase);
 
   // Whether the assistant has been set up at all. Shown on the row rather than
   // hidden behind a click: "set up" and "configured" answer different questions, and
@@ -136,14 +132,6 @@ export function RunReviewMenu() {
           failure belongs here: it renders nothing on a healthy run, and does not go
           away by itself on a bad one. */}
       <ReviewOutcome />
-      {agentBusy && (
-        <span className="run-review-active" title={agentLine || "Your assistant is reviewing this BOM"}>
-          <span className="status-dot running" />
-          {/* The assistant's own last line, when it has said something. It narrates at
-              its own pace, and a sign of life beats a bar we would have to invent. */}
-          {agentLine ? agentLine.slice(0, 60) : "Assistant reviewing"}
-        </span>
-      )}
       {bomRunning && (
         <span className="run-review-active">
           <span className="status-dot running" />

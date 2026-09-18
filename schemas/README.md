@@ -7,7 +7,8 @@ repos consume them rather than each defining their own shape.
 
 | File | What it pins |
 |---|---|
-| `findings-1.2.json` | `findings.json` — the one output contract every review producer emits. |
+| `findings-1.3.json` | `findings.json` — the one output contract every review producer emits. |
+| `findings-1.2.json` | The version before the `Not verified` severity. Kept for readers. |
 | `findings-1.1.json` | The version before `column_mapping` and `execution`. Kept for readers. |
 | `findings-1.0.json` | The retired five-level severity / four-level confidence version. No producer emits it; kept so a document already sitting in a project's review inbox still reads. |
 | `bundle-1.0.json` | The review bundle — every file a detailed review may upload, and by omission everything it may not. |
@@ -15,6 +16,12 @@ repos consume them rather than each defining their own shape.
 
 ## Consumers
 
+- Coverage gaps are findings. A part the review could not check emits a finding at
+  severity `Not verified`, anchored to its BOM row, alongside the `bom_audit` prose
+  that says the same thing in the pipeline's terms. Before 1.3 they were prose only,
+  so nothing downstream could count them, place them on a row, or record that somebody
+  had dealt with one. A `Not verified` finding is the ABSENCE of a claim: it must not
+  be presented as a defect found on the board.
 - The free tier's rule pack, `bom-rules`, emits `findings.json` v1.1 with
   `pipeline: "bom-rules"` and `confidence: "Unvalidated"`. It is a separate program
   the installer puts beside the app, not a crate in this repository; `bomrules.rs`
@@ -57,7 +64,9 @@ never when the review's quality does.
 
 `schema_version` is the compatibility gate. Additive, optional fields keep
 the version; anything a consumer could choke on gets a new version and a new file
-(`findings-1.2.json`), with the old one kept for readers. That is why 1.1 exists:
+(`findings-1.3.json`), with the old one kept for readers. That is why 1.1 exists:
 collapsing severity to two levels and confidence to three is a value a 1.0 reader
-would not recognise. The app reads both and normalises on ingest
-(`comment_severity` in `bomcheck.rs`).
+would not recognise. It is also why 1.3 exists: `Not verified` is a third severity,
+and a 1.2 reader handed one would either drop the finding or file it as a defect. The
+app reads every version and normalises on ingest (`comment_severity` in
+`bomcheck.rs`).

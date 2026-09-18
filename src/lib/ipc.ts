@@ -26,11 +26,11 @@ import type {
 } from "./types";
 import type { CheckOutcome, FindingsDoc, MappingView, ReviewInboxEntry } from "./findings";
 import type {
-  AgentReviewSettings,
+  AgentProfile,
+
   AssistantSetup,
   RegisterOutcome,
 } from "./types";
-import type { ReviewBundle } from "./reviewService";
 import type { DesignIndexes } from "./design";
 import type { DiffHandle } from "./diff";
 
@@ -131,12 +131,8 @@ export const ipc = {
    *  BOM). Writing it at all is what stops the dialog interrupting the next review. */
   setBomMapping: (overrides: Record<string, string>) =>
     invoke<void>("set_bom_mapping", { overrides }),
-  /** Paid tier, step 1: exactly what a detailed review would upload — shown in the
-   *  pre-flight dialog before anything leaves the machine (plan §4.2). */
-  buildReviewBundle: (profile: string) =>
-    invoke<ReviewBundle>("build_review_bundle", { profile }),
-  /** Paid tier, step 2: the service's findings.json, ingested through the SAME path
-   *  as the free check so fingerprints reconcile against the existing comments. */
+  /** A findings.json from outside, ingested through the SAME path as the free check
+   *  so fingerprints reconcile against the existing comments. */
   ingestFindings: (doc: FindingsDoc) => invoke<CheckOutcome>("ingest_findings", { doc }),
   /** What is waiting in `<project>/reviews/inbox/` — findings produced by a review
    *  that ran outside the app (the engine CLI, or the user's agent over MCP). Listing
@@ -148,12 +144,17 @@ export const ipc = {
   importReviewInbox: (name: string) =>
     invoke<CheckOutcome>("import_review_inbox", { name }),
 
-  /** Paid tier, local surface: run the review through the user's own AI assistant
-   *  over MCP. Returns as soon as the assistant is running; progress arrives on
-   *  `agent-event` and the findings come back through the review inbox. */
-  startAgentReview: (profile: string, config: AgentReviewSettings) =>
-    invoke<void>("start_agent_review", { profile, config }),
+  /** Run the detailed review through the user's own agent, over MCP. Returns as soon
+   *  as the agent is running; progress arrives on `agent-event` and the findings come
+   *  back through the review inbox. */
+  startAgentReview: (agent: AgentProfile, brief: ReviewBrief) =>
+    invoke<void>("start_agent_review", { agent, brief }),
   agentReviewRunning: () => invoke<boolean>("agent_review_running"),
+  /** The agent profiles SpinZero ships, for the setup screen's picker. */
+  agentProfiles: () => invoke<AgentProfile[]>("agent_profiles"),
+  /** This project's newest review, whoever started it — read off the review server's
+   *  own `status.json`. Asked on mount so a reopened window picks up a run in flight. */
+  agentReviewStatus: () => invoke<RunStatus | null>("agent_review_status"),
 
   /** Everything the "Connect your AI assistant" screen needs: where the server is,
    *  where the licence file is, and which assistants this machine has. */
@@ -212,11 +213,50 @@ export function onCrunchEvent(
   return listen<CrunchEvent>("crunch-event", (e) => handler(e.payload));
 }
 
-/** One line of life from a review running through the user's assistant. Mirrors
+/**
+ * One review's state, exactly as the review server wrote it into `status.json`.
+ * Mirrors `mcpstatus::RunStatus` and `local/status.ts`.
+ *
+ * Counts, phase names, stage ids and two paths. Nothing here is board content, which
+ * is what makes the file safe to write on a customer's machine.
+ */
+export interface RunStatus {
+  status_version: number;
+  review_id: string;
+  pipeline: string;
+  profile: string;
+  project_dir: string | null;
+  phase: "preflight" | "preparing" | "step_open" | "assembling" | "done" | "failed";
+  stage: string | null;
+  steps_done: number;
+  steps_total: number;
+  parts_done: number;
+  parts_total: number;
+  datasheets_read: number;
+  datasheets_total: number;
+  started_ts: string;
+  /** A gap here is a stalled run — see `isStalled` in `agentReviewStore`. */
+  updated_ts: string;
+  findings_path: string | null;
+  report_path: string | null;
+  error: string | null;
+}
+
+/** The preflight answers SpinZero already holds, handed to the agent in its prompt.
+ *  Mirrors `agent::ReviewBrief`. */
+export interface ReviewBrief {
+  /** The end application profile id, or "" when the user has not stated one. */
+  profile: string;
+  /** Only the corrections. An empty column means "this BOM has no such column". */
+  mapping: { field: string; column: string }[];
+}
+
+/** One line of life from a review running through the user's agent. Mirrors
  *  `agent::AgentEvent`. */
 export type AgentEvent =
-  | { kind: "started"; assistant: string }
+  | { kind: "started"; agent: string }
   | { kind: "progress"; line: string }
+  | { kind: "status"; status: RunStatus }
   | { kind: "finished"; seconds: number }
   | { kind: "failed"; detail: string };
 

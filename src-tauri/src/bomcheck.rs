@@ -77,12 +77,17 @@ pub struct CheckOutcome {
 /// review inbox lands on the colour it was written for instead of on "info".
 fn comment_severity(severity: &str) -> &'static str {
     match severity {
-        // findings v1.2.
+        // findings v1.3.
         "Critical" => "critical",
         "Non-critical" => "info",
+        // A coverage gap: the review could not check this part, so it claims nothing
+        // about the board. It lands on the quietest level the rail has, and the BOM
+        // bar's "not verified" tally is where it is actually counted.
+        "Not verified" => "info",
         // v1.1's two words for the same two levels. Named rather than left to the
         // fallback: `Non-critical` and an unrecognised value both landing on "info" by
-        // accident is how a future third level would silently render as a remark.
+        // accident is how a third level silently renders as a remark -- which is why
+        // `Not verified` above is named too, rather than left to fall through.
         "Important" => "critical",
         "Observation" => "info",
         // Legacy (findings v1.0), whose scale had five levels.

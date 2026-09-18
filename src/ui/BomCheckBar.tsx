@@ -1,14 +1,15 @@
 import { useEffect } from "react";
 import { useBomCheckStore } from "../stores/bomCheckStore";
-import { isRunning, useDetailedReviewStore } from "../stores/detailedReviewStore";
+import { isAgentRunning, useAgentReviewStore } from "../stores/agentReviewStore";
 import { useProjectStore } from "../stores/projectStore";
 import { useRunLauncherStore } from "../stores/runLauncherStore";
 import { useReviewStore } from "../stores/reviewStore";
-import { executionSummary, severityCounts } from "../lib/findings";
+import { executionSummary, isClaim, reviewTallies } from "../lib/findings";
 import { isProjectClass, PROJECT_CLASSES } from "../lib/projectClass";
-import type { FindingSeverity } from "../lib/findings";
+import { BOM_PROFILES, resolveBomProfile, UNSTATED_BOM_PROFILE } from "../lib/findings";
 import type { CommentSeverity } from "../lib/types";
 import { IconChecklist } from "./icons";
+import { ReviewMapping } from "./review/ReviewMapping";
 import { ReviewOutcome } from "./review/ReviewOutcome";
 import { ReviewProgress } from "./review/ReviewProgress";
 
@@ -29,17 +30,8 @@ import { ReviewProgress } from "./review/ReviewProgress";
  *  two levels and the rail's are persisted on disk, so they meet at the two ends of
  *  the rail's scale rather than in the middle. Mirrors `comment_severity` in
  *  `bomcheck.rs` — change both together. */
-const SEVERITY_ROLE: Record<FindingSeverity, CommentSeverity> = {
-  Critical: "critical",
-  "Non-critical": "info",
-};
-
-/** One chip per findings severity, labelled in the findings vocabulary. Clicking one
- *  filters the rail by the comment severity it maps to. */
-const SEVERITY_LABEL: Record<FindingSeverity, string> = {
-  Critical: "Critical",
-  "Non-critical": "Non-critical",
-};
+const CRITICAL_ROLE: CommentSeverity = "critical";
+const NONCRITICAL_ROLE: CommentSeverity = "info";
 
 export function BomCheckBar() {
   const running = useBomCheckStore((s) => s.running);
@@ -53,7 +45,7 @@ export function BomCheckBar() {
   const setClass = useProjectStore((s) => s.setClass);
   // The detailed run is the one that takes minutes, so the tab it belongs to says so
   // rather than leaving the footer as the only place it is visible.
-  const detailedPhase = useDetailedReviewStore((s) => s.phase);
+  const detailedPhase = useAgentReviewStore((s) => s.phase);
 
   // Mod+Shift+B runs the check while the BOM tab is mounted. Scoped to this component
   // so it can never fire from the schematic/PCB canvases, where it would mean nothing.
@@ -80,9 +72,14 @@ export function BomCheckBar() {
     review.setFilterSeverity(role);
   }
 
-  // `severityCounts` walks SEVERITY_ORDER and drops empty levels, so chip order stays
-  // worst-first and a clean run shows no chips at all.
-  const counts = doc ? severityCounts(doc) : [];
+  // THREE tallies, not one count. The strip used to show findings only, so a review
+  // with twenty blind spots and no findings read as a pass. "Not verified" is the
+  // third number, and it is the one that stops that — see `coverageGaps`.
+  const tallies = reviewTallies(doc);
+  // What the review ran as. The app picks it from the project class and never showed
+  // the result of that choice, so a reader could not tell an automotive review from
+  // one nobody stated an application for.
+  const ranAs = doc ? profileLabel(doc.profile) : null;
   // Which content produced this. Absent on the free tier, which is deterministic and
   // has nothing to disclose; on the paid tiers it is the first thing to compare when
   // two runs of one board disagree.
@@ -113,25 +110,52 @@ export function BomCheckBar() {
         ))}
       </select>
 
-      {isRunning(detailedPhase) && <ReviewProgress />}
+      {isAgentRunning(detailedPhase) && <ReviewProgress />}
 
       {doc && (
         <>
-          <span className="bom-check-count">
-            {doc.findings.length === 0
+          {/* A denominator, because "12 findings" does not answer the question a
+              reader is actually asking. */}
+          <span className="bom-check-count" title={`${doc.stats.item_count} BOM lines were read`}>
+            {doc.findings.filter(isClaim).length === 0
               ? "No issues found"
-              : `${doc.findings.length} finding${doc.findings.length === 1 ? "" : "s"}`}
+              : `${rowsWithFindings(doc)} of ${doc.stats.item_count} rows have findings`}
           </span>
-          {counts.map((c) => (
-            <button
-              key={c.severity}
-              className={`bom-check-sev sev-${SEVERITY_ROLE[c.severity]}`}
-              title={`Show the ${SEVERITY_LABEL[c.severity].toLowerCase()} findings in the review panel`}
-              onClick={() => showInReview(SEVERITY_ROLE[c.severity])}
+          <button
+            className={`bom-check-sev sev-${CRITICAL_ROLE} ${tallies.critical ? "" : "none"}`}
+            title="Show the critical findings in the review panel"
+            onClick={() => showInReview(CRITICAL_ROLE)}
+          >
+            {tallies.critical} Critical
+          </button>
+          <button
+            className={`bom-check-sev sev-${NONCRITICAL_ROLE} ${tallies.nonCritical ? "" : "none"}`}
+            title="Show the non-critical findings in the review panel"
+            onClick={() => showInReview(NONCRITICAL_ROLE)}
+          >
+            {tallies.nonCritical} Non-critical
+          </button>
+          {/* The third number, always shown. A zero here is news too: it is the only
+              place that says the review actually checked everything it set out to. */}
+          <span
+            className={`bom-check-gaps ${tallies.notVerified ? "some" : "none"}`}
+            title={
+              tallies.notVerified
+                ? "Checks this review could not make. Open “Not fully verified” for the list."
+                : "Every check this review set out to make was made."
+            }
+          >
+            {tallies.notVerified} not verified
+          </span>
+          {ranAs && (
+            <span
+              className={`bom-check-meta ${doc.column_mapping?.profile_stated === false ? "warn" : ""}`}
+              title="The end application this review ran under. It decides which rules apply."
             >
-              {c.n} {SEVERITY_LABEL[c.severity]}
-            </button>
-          ))}
+              {ranAs}
+            </span>
+          )}
+          <ReviewMapping doc={doc} />
           {execution && (
             <span className="bom-check-meta" title={execution.detail}>
               {execution.text}
@@ -173,4 +197,28 @@ export function BomCheckBar() {
       {error && <span className="bom-check-warn">Check failed: {error}</span>}
     </div>
   );
+}
+
+/** How many BOM rows carry at least one finding. Counted over the anchors, because a
+ *  finding can name several designators and several findings can land on one row.
+ *
+ *  Claims only. A row whose only entry is "we could not check this part" has no
+ *  finding on it, and counting it here would report a blind spot as a defect. */
+function rowsWithFindings(doc: { findings: { severity: string; anchors: { refdes?: string[] }[] }[] }): number {
+  const rows = new Set<string>();
+  for (const f of doc.findings.filter(isClaim)) {
+    for (const a of f.anchors) for (const r of a.refdes ?? []) rows.add(r);
+  }
+  return rows.size;
+}
+
+/** The end application in the user's words. An unstated profile is named as one
+ *  rather than shown as a plausible-looking setting nobody chose. */
+function profileLabel(profile: string): string {
+  if (!profile) return "No application stated";
+  // Through the resolver, so a document that stored the retired `automotive` id still
+  // reads as a label rather than as a raw word from a JSON file.
+  const id = resolveBomProfile(profile);
+  if (id === UNSTATED_BOM_PROFILE) return "No application stated";
+  return BOM_PROFILES.find((p) => p.id === id)?.label ?? id;
 }

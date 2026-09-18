@@ -1,12 +1,14 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { isAgentRunning, useAgentReviewStore } from "../../stores/agentReviewStore";
 import { useBomCheckStore } from "../../stores/bomCheckStore";
 import { useBomMappingStore } from "../../stores/bomMappingStore";
-import { DEFAULT_SERVICE_URL, isRunning, useDetailedReviewStore } from "../../stores/detailedReviewStore";
 import { useProjectStore } from "../../stores/projectStore";
 import { useRunLauncherStore } from "../../stores/runLauncherStore";
 import { useSettingsStore } from "../../stores/settingsStore";
 import type { MappingView } from "../../lib/findings";
+import type { AgentProfile } from "../../lib/types";
+import { DEFAULT_AGENT_PROFILE, missingFromAgent } from "../../lib/agentProfiles";
+import { formatArgs, parseArgs } from "../../lib/mcpConfig";
 import { bomProfileForClass, isProjectClass, PROJECT_CLASSES } from "../../lib/projectClass";
 import { ipc } from "../../lib/ipc";
 import { bomFieldLabel, bomFieldRank } from "../BomMappingDialog";
@@ -14,24 +16,15 @@ import { IconInfo, IconPremium } from "../icons";
 
 // The BOM review's setup sheet — the ONE place a BOM review is set up and started.
 //
-// It used to be two: this sheet chose the depth, and a second "detailed review"
-// dialog then itemised every file about to be uploaded and offered a separate button.
-// Two dialogs for one intent, and the second one's inventory was the wrong answer to
-// the question it was trying to answer. The privacy promise is one sentence behind an
-// info icon; the readiness checks it fronted now run when Run Review is pressed, and
-// anything that goes wrong is an error right here rather than in a dialog the user has
-// to correlate with the button they pressed.
+// It used to ask WHERE the review runs, because there were two answers: a hosted
+// service, or the user's own agent. The hosted tier is gone, so the question is gone
+// with it, and what is left is which agent — a different question, and one the sheet
+// only has to answer once.
 //
 // The end application is `project.class`, not a second setting — see lib/projectClass.
 
 /** Short, non-verbose, and the whole promise. Deliberately says nothing about file
- *  names or sizes: the user is being asked to trust a boundary, not to audit one.
- *
- *  There are two promises now, because there are two places the review can run, and
- *  the difference is the entire point of offering the choice. */
-const PRIVACY_SERVICE =
-  "Only your BOM is sent for review — never your schematic or layout. " +
-  "It is deleted as soon as the review finishes.";
+ *  names or sizes: the user is being asked to trust a boundary, not to audit one. */
 const PRIVACY_AGENT =
   "The review runs on this machine. Only part numbers are looked up online — " +
   "your BOM, schematic and layout never leave the computer.";
@@ -39,6 +32,7 @@ const PRIVACY_AGENT =
 export function BomReviewSetup() {
   const setupFor = useRunLauncherStore((s) => s.setupFor);
   const closeSetup = useRunLauncherStore((s) => s.closeSetup);
+  const openConnect = useRunLauncherStore((s) => s.openConnect);
 
   const project = useProjectStore((s) => s.project);
   const setClass = useProjectStore((s) => s.setClass);
@@ -51,20 +45,12 @@ export function BomReviewSetup() {
 
   const openMapping = useBomMappingStore((s) => s.openDialog);
 
-  // Which surface a detailed review runs on. Absent means the hosted service, so an
-  // existing install's button keeps doing exactly what it did yesterday.
-  const driver = useSettingsStore((s) => s.reviewDriver) ?? "service";
-  const setDriver = useSettingsStore((s) => s.setReviewDriver);
-  const agentConfig = useSettingsStore((s) => s.agentReview);
+  const agent = useSettingsStore((s) => s.agentProfile) ?? DEFAULT_AGENT_PROFILE;
+  const serverConfigured = useSettingsStore((s) => s.agentReview !== null);
   const agentPhase = useAgentReviewStore((s) => s.phase);
   const agentError = useAgentReviewStore((s) => s.error);
   const startAgent = useAgentReviewStore((s) => s.start);
-  const startDetailed = useDetailedReviewStore((s) => s.start);
-  const detailedPhase = useDetailedReviewStore((s) => s.phase);
-  const detailedError = useDetailedReviewStore((s) => s.error);
-  const clearError = useDetailedReviewStore((s) => s.clearError);
-  // Subscribed, not read once: saving the address below has to make these fields go away.
-  const service = useSettingsStore((s) => s.reviewService);
+  const clearError = useAgentReviewStore((s) => s.clearError);
 
   const open = setupFor === "bom";
 
@@ -100,30 +86,6 @@ export function BomReviewSetup() {
     return () => window.removeEventListener("keydown", onKey, true);
   }, [open, closeSetup]);
 
-  // A detailed run that got past its readiness checks belongs to the footer and the
-  // BOM tab, not to a dialog sitting on top of the board — so the sheet steps aside
-  // the moment the job THIS SHEET started becomes real. A failure keeps it open,
-  // with the error attached. `preparing` is excluded because that IS the readiness
-  // checks, and a finished run (`done`) because the sheet must still open afterwards
-  // to run a second one.
-  //
-  // `startedHere` is what makes this a transition rather than a state. Without it the
-  // effect fired on every render while any detailed run was in flight, so opening BOM
-  // Review from the launcher during a run slammed the sheet shut before it painted —
-  // the review became unreachable for the several minutes it takes to run, which is
-  // exactly when someone wants to look at what it is reviewing.
-  const startedHere = useRef(false);
-  useEffect(() => {
-    if (!open) {
-      startedHere.current = false;
-      return;
-    }
-    if (startedHere.current && isRunning(detailedPhase) && detailedPhase !== "preparing") {
-      startedHere.current = false;
-      closeSetup();
-    }
-  }, [open, detailedPhase, closeSetup]);
-
   // A verdict from a previous press is not a verdict on this one.
   useEffect(() => {
     if (open) clearError();
@@ -131,13 +93,14 @@ export function BomReviewSetup() {
 
   if (!open) return null;
 
-  const detailedBusy = isRunning(detailedPhase) || isAgentRunning(agentPhase);
+  const detailedBusy = isAgentRunning(agentPhase);
   const busy = running || detailedBusy;
   const fields = mapping
     ? [...mapping.fields].sort(
         (a, b) => bomFieldRank(a.logical) - bomFieldRank(b.logical) || a.logical.localeCompare(b.logical),
       )
     : [];
+  const missing = missingFromAgent(agent);
 
   function start() {
     clearError();
@@ -146,15 +109,10 @@ export function BomReviewSetup() {
       void run();
       return;
     }
-    if (driver === "agent") {
-      // The assistant runs in its own process and reports through `agent-event`, so
-      // there is no in-sheet phase to wait on: close and let the status bar carry it.
-      closeSetup();
-      void startAgent();
-      return;
-    }
-    startedHere.current = true;
-    void startDetailed();
+    // The agent runs in its own process and reports through `agent-event`, so there is
+    // no in-sheet phase to wait on: close and let the status bar carry it.
+    closeSetup();
+    void startAgent();
   }
 
   return (
@@ -249,8 +207,8 @@ export function BomReviewSetup() {
               <button
                 type="button"
                 className="setup-info"
-                title={driver === "agent" ? PRIVACY_AGENT : PRIVACY_SERVICE}
-                aria-label={driver === "agent" ? PRIVACY_AGENT : PRIVACY_SERVICE}
+                title={PRIVACY_AGENT}
+                aria-label={PRIVACY_AGENT}
                 onClick={(e) => e.preventDefault()}
               >
                 <IconInfo size={13} />
@@ -258,47 +216,30 @@ export function BomReviewSetup() {
             </span>
           </label>
 
-          {/* WHERE it runs, which is a different question from how deep it goes. Both
-              produce the same findings document through the same ingestion path; what
-              differs is whose tokens pay for it and whether the BOM leaves the
-              machine. */}
+          {depth === "detailed" && <AgentPicker busy={busy} />}
+
+          {/* Two things the user has to have done, and only one of them is ours to
+              check. Said plainly rather than left implied — see the setup screen. */}
+          {depth === "detailed" && !serverConfigured && (
+            <p className="wizard-hint">
+              Your agent has to know about SpinZero’s review server first.{" "}
+              <button className="btn-ghost setup-section-act" onClick={() => openConnect()}>
+                Connect your AI assistant
+              </button>
+            </p>
+          )}
           {depth === "detailed" && (
-            <>
-              <div className="setup-section">Run it</div>
-              <label className={`setup-depth ${driver === "service" ? "on" : ""}`}>
-                <input
-                  type="radio"
-                  name="bom-driver"
-                  checked={driver === "service"}
-                  disabled={busy}
-                  onChange={() => void setDriver("service")}
-                />
-                <span className="setup-depth-name">On SpinZero&rsquo;s service</span>
-                <span className="setup-depth-what">
-                  We run it. Your BOM is uploaded and deleted when the review finishes.
-                </span>
-              </label>
-              <label className={`setup-depth ${driver === "agent" ? "on" : ""}`}>
-                <input
-                  type="radio"
-                  name="bom-driver"
-                  checked={driver === "agent"}
-                  disabled={busy}
-                  onChange={() => void setDriver("agent")}
-                />
-                <span className="setup-depth-name">With my AI assistant</span>
-                <span className="setup-depth-what">
-                  Your assistant does the reading, on your own subscription. Nothing about the
-                  design leaves this computer.
-                </span>
-              </label>
-            </>
+            <p className="wizard-hint">
+              SpinZero starts your agent and adds nothing to it. It runs with your own
+              permissions and can reach your other tools during the review, exactly as it
+              does when you use it yourself.
+            </p>
           )}
 
           {/* Readiness is checked on the button press, so this is where its verdict
               belongs — beside the control the user just used, not in a toast. */}
-          {depth === "detailed" && detailedError && (
-            <p className="wizard-hint setup-error">Couldn’t start: {detailedError}</p>
+          {depth === "detailed" && agentError && (
+            <p className="wizard-hint setup-error">Couldn’t start: {agentError}</p>
           )}
           {/* The sheet is reachable while a review runs — you can read the mapping and
               the depth it is running at. It just cannot start a second one, and saying
@@ -309,11 +250,6 @@ export function BomReviewSetup() {
               another when it finishes.
             </p>
           )}
-          {depth === "detailed" && driver === "agent" && agentError && (
-            <p className="wizard-hint setup-error">Couldn’t start: {agentError}</p>
-          )}
-          {depth === "detailed" && driver === "service" && !service?.base_url && <ServiceFields />}
-          {depth === "detailed" && driver === "agent" && !agentConfig && <AgentFields />}
 
           <div className="wizard-actions">
             <button className="btn-ghost" onClick={closeSetup}>
@@ -321,7 +257,12 @@ export function BomReviewSetup() {
             </button>
             {/* Two different disabled states, and conflating them was a small lie: a
                 run someone else already started is not this button "starting". */}
-            <button className="btn-primary" disabled={busy} onClick={start}>
+            <button
+              className="btn-primary"
+              disabled={busy || (depth === "detailed" && missing.length > 0)}
+              title={missing.length ? `Fill in ${missing.join(", ")} first` : undefined}
+              onClick={start}
+            >
               {detailedBusy ? "Review running…" : running ? "Starting…" : "Run Review"}
             </button>
           </div>
@@ -331,127 +272,122 @@ export function BomReviewSetup() {
   );
 }
 
-/** Where the review service lives. Shown only when there is nothing configured — the
- *  one thing the retired pre-flight dialog owned that still has to be reachable. */
-function ServiceFields() {
-  const saved = useSettingsStore((s) => s.reviewService);
-  const [baseUrl, setBaseUrl] = useState(saved?.base_url ?? DEFAULT_SERVICE_URL);
-  const [token, setToken] = useState(saved?.token ?? "");
-
-  async function save() {
-    const url = baseUrl.trim().replace(/\/+$/, "");
-    if (!/^https?:\/\//i.test(url)) return;
-    await useSettingsStore.getState().setReviewService({ base_url: url, token: token.trim() });
-    void useDetailedReviewStore.getState().checkService();
-  }
-
-  return (
-    <div className="review-service-config">
-      <label className="review-field">
-        <span>Service URL</span>
-        <input
-          className="wizard-input"
-          value={baseUrl}
-          spellCheck={false}
-          onChange={(e) => setBaseUrl(e.target.value)}
-          placeholder={DEFAULT_SERVICE_URL}
-        />
-      </label>
-      <label className="review-field">
-        <span>Token</span>
-        <input
-          className="wizard-input"
-          type="password"
-          value={token}
-          spellCheck={false}
-          onChange={(e) => setToken(e.target.value)}
-          placeholder="SPINZERO_DEV_TOKEN"
-        />
-      </label>
-      <button className="btn-ghost" onClick={() => void save()}>
-        Save service
-      </button>
-    </div>
-  );
-}
-
 /**
- * How to start the assistant, shown only when nothing is configured.
+ * Which agent runs the review.
  *
- * Two fields and no more. The MCP server's location is the one thing the app cannot
- * guess before it ships as a bundled binary (M2), and the environment box exists
- * because that server needs distributor credentials and the path to the rule pack.
- * Everything else — the config file, `--strict-mcp-config`, the tool allowlist — is
- * written by the app, so a user who has never configured an MCP server still gets a
- * working review.
+ * An agent is a command line program that drives a model and speaks MCP. SpinZero
+ * starts it and adds no flags of its own, so the whole of the setting is: which
+ * program, which arguments, and how it takes its prompt.
+ *
+ * A profile SpinZero has not run end to end is still offered, and says so. Leaving it
+ * out would mean a user with Codex cannot start a review at all; presenting it as
+ * tested would be a claim we have not earned. The fields are editable either way, so
+ * a wrong guess is a line to correct rather than a dead end.
  */
-function AgentFields() {
-  const saved = useSettingsStore((s) => s.agentReview);
-  const [command, setCommand] = useState(saved?.server_command ?? "node");
-  const [args, setArgs] = useState((saved?.server_args ?? []).join(" "));
-  const [env, setEnv] = useState(
-    Object.entries(saved?.server_env ?? {})
-      .map(([k, v]) => `${k}=${v}`)
-      .join("\n"),
-  );
+function AgentPicker({ busy }: { busy: boolean }) {
+  const saved = useSettingsStore((s) => s.agentProfile);
+  const setAgentProfile = useSettingsStore((s) => s.setAgentProfile);
+  const current = saved ?? DEFAULT_AGENT_PROFILE;
 
-  async function save() {
-    const parsedArgs = args.trim().split(/\s+/).filter(Boolean);
-    if (!command.trim() || !parsedArgs.length) return;
-    // `KEY=value` per line, and a value may itself contain `=` (paths and tokens do).
-    const parsedEnv: Record<string, string> = {};
-    for (const line of env.split(/\r?\n/)) {
-      const eq = line.indexOf("=");
-      if (eq <= 0) continue;
-      parsedEnv[line.slice(0, eq).trim()] = line.slice(eq + 1).trim();
-    }
-    await useSettingsStore.getState().setAgentReview({
-      claude_bin: "",
-      server_command: command.trim(),
-      server_args: parsedArgs,
-      server_env: parsedEnv,
-    });
+  const [shipped, setShipped] = useState<AgentProfile[]>([]);
+  const [edit, setEdit] = useState(false);
+  const [bin, setBin] = useState(current.bin);
+  const [args, setArgs] = useState(formatArgs(current.args));
+
+  useEffect(() => {
+    let alive = true;
+    ipc
+      .agentProfiles()
+      .then((list) => alive && setShipped(list))
+      .catch(() => {
+        // The backend not answering leaves the saved profile in place, which is the
+        // one that matters. Nothing to tell the user.
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  // The saved profile may not be in the shipped list (a hand-written one), so it is
+  // offered alongside rather than silently replaced by the nearest match.
+  const options = shipped.length ? shipped : [DEFAULT_AGENT_PROFILE];
+  const known = options.some((p) => p.id === current.id);
+
+  function pick(id: string) {
+    const chosen = options.find((p) => p.id === id);
+    if (!chosen) return;
+    setBin(chosen.bin);
+    setArgs(formatArgs(chosen.args));
+    // A profile with nothing to run is not saved as the choice — it is the prompt to
+    // fill the fields in, so the editor opens instead.
+    setEdit(!chosen.bin.trim());
+    void setAgentProfile(chosen.bin.trim() ? chosen : { ...chosen, bin: "" });
+  }
+
+  function saveEdits() {
+    void setAgentProfile({ ...current, bin: bin.trim(), args: parseArgs(args) });
+    setEdit(false);
   }
 
   return (
-    <div className="review-service-config">
-      <p className="wizard-hint">
-        SpinZero starts its own review server and hands it to your assistant. Tell it how.
-      </p>
-      <label className="review-field">
-        <span>Server command</span>
-        <input
-          className="wizard-input"
-          value={command}
-          spellCheck={false}
-          onChange={(e) => setCommand(e.target.value)}
-          placeholder="node"
-        />
-      </label>
-      <label className="review-field">
-        <span>Arguments</span>
-        <input
-          className="wizard-input"
-          value={args}
-          spellCheck={false}
-          onChange={(e) => setArgs(e.target.value)}
-          placeholder="/path/to/spinzero-mcp/src/server.ts"
-        />
-      </label>
-      <label className="review-field">
-        <span>Environment</span>
-        <textarea
-          className="wizard-input"
-          rows={3}
-          value={env}
-          spellCheck={false}
-          onChange={(e) => setEnv(e.target.value)}
-          placeholder={"SPINZERO_MCP_DEV=1\nDIGIKEY_CLIENT_ID=…\nDIGIKEY_CLIENT_SECRET=…"}
-        />
-      </label>
-      <button className="btn-ghost" onClick={() => void save()}>
-        Save
-      </button>
-    </div>
+    <>
+      <div className="setup-section">
+        Your agent
+        <button className="btn-ghost setup-section-act" disabled={busy} onClick={() => setEdit((v) => !v)}>
+          {edit ? "Done" : "Edit…"}
+        </button>
+      </div>
+      <select
+        className="rv-select setup-app-select"
+        value={known ? current.id : "custom"}
+        disabled={busy}
+        title="Which program SpinZero starts to run the review"
+        onChange={(e) => pick(e.target.value)}
+      >
+        {options.map((p) => (
+          <option key={p.id} value={p.id}>
+            {p.label}
+          </option>
+        ))}
+      </select>
+      {!current.verified && current.bin.trim() && (
+        <p className="wizard-hint">
+          SpinZero has not tested this one. Check the command below before you run it; if
+          the review never starts, the agent’s own output says why.
+        </p>
+      )}
+      {edit && (
+        <div className="review-service-config">
+          <label className="review-field">
+            <span>Program</span>
+            <input
+              className="wizard-input"
+              value={bin}
+              spellCheck={false}
+              placeholder="claude"
+              onChange={(e) => setBin(e.target.value)}
+            />
+          </label>
+          <label className="review-field">
+            <span>Arguments</span>
+            <input
+              className="wizard-input"
+              value={args}
+              spellCheck={false}
+              placeholder="-p {prompt}"
+              onChange={(e) => setArgs(e.target.value)}
+            />
+          </label>
+          <p className="wizard-hint">
+            <code>{"{prompt}"}</code> is where the review instructions go and{" "}
+            <code>{"{project_dir}"}</code> is this board’s folder. Each argument is passed
+            whole, so a path with a space needs no quoting of yours.
+          </p>
+          <button className="btn-ghost" disabled={!bin.trim()} onClick={saveEdits}>
+            Save
+          </button>
+        </div>
+      )}
+    </>
   );
 }

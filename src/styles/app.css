@@ -4691,3 +4691,93 @@ textarea.wizard-input {
   max-height: 180px;
   overflow-y: auto;
 }
+
+/* ---- the detailed review's own surfaces ---------------------------------- */
+/* Added when the app became a frontend for an agent-run review: three tallies rather
+   than one count, a list of what nobody checked, and the columns the review read.
+   Every colour is a token, so both themes follow without a second rule. */
+
+/* A run that stopped reporting. The bar keeps its fill — it is still true — but the
+   number is replaced by the word, because a percentage on a dead run is a lie. */
+.review-progress.stalled .review-progress-fill { background: var(--warn); }
+.review-progress.stalled .review-progress-pct { color: var(--warn); }
+
+.review-activity-row.tone-agent .review-activity-text {
+  font-family: var(--font-mono);
+  color: var(--fg-2);
+}
+.review-activity-row.tone-step .review-activity-text { color: var(--fg-1); }
+
+/* "78 of 88 part numbers were accounted for" — the sentence, above the list of what
+   was not. It answers the question the list only implies. */
+.review-outcome-coverage {
+  margin: 0 0 var(--sp-2);
+  color: var(--fg-1);
+}
+
+.review-outcome-gaps {
+  max-height: 12rem;
+  overflow-y: auto;
+  margin: var(--sp-2) 0 0;
+  padding-left: 1.1rem;
+  font-size: var(--fs-0);
+  color: var(--fg-2);
+}
+.review-outcome-gaps li { margin-bottom: 3px; }
+.review-outcome-gaps b { color: var(--fg-1); font-weight: 600; }
+
+/* The third tally. Zero is news too — it is the only place that says the review made
+   every check it set out to — so it is always shown, and only shouts when non-zero. */
+.bom-check-gaps {
+  flex: none;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+  cursor: help;
+}
+.bom-check-gaps.none { color: var(--fg-3, var(--fg-2)); }
+.bom-check-gaps.some { color: var(--warn); }
+
+/* A severity tally with nothing in it recedes rather than disappearing: the reader
+   compares three numbers, and a chip that comes and goes moves the other two. */
+.bom-check-sev.none { color: var(--fg-3, var(--fg-2)); background: none; }
+
+.bom-check-meta.warn { color: var(--warn); }
+
+.review-mapping { position: relative; display: inline-flex; }
+.review-mapping-pop {
+  position: absolute;
+  left: 0;
+  top: calc(100% + 6px);
+  z-index: 80;
+  width: 420px;
+  max-height: 22rem;
+  overflow-y: auto;
+  padding: var(--sp-3);
+  background: var(--bg-2);
+  border: 1px solid var(--border-1);
+  border-radius: var(--radius-2);
+  box-shadow: var(--shadow-2);
+}
+.review-mapping-table { width: 100%; border-collapse: collapse; font-size: var(--fs-0); }
+.review-mapping-table td { padding: 2px var(--sp-1); vertical-align: baseline; }
+.review-mapping-col { color: var(--fg-1); }
+.review-mapping-arrow { color: var(--fg-3, var(--fg-2)); width: 1.4em; text-align: center; }
+.review-mapping-field { color: var(--fg-2); font-family: var(--font-mono); }
+.review-mapping-fill {
+  text-align: right;
+  color: var(--fg-3, var(--fg-2));
+  font-variant-numeric: tabular-nums;
+}
+/* A column barely filled is almost always the wrong column, and that is the single
+   thing this panel exists to let somebody spot. */
+.review-mapping-fill.low { color: var(--warn); }
+.review-mapping-head td {
+  padding-top: var(--sp-2);
+  color: var(--fg-3, var(--fg-2));
+  border-top: 1px solid var(--border-0);
+}
+.review-mapping-absent {
+  margin: var(--sp-2) 0 0;
+  font-size: var(--fs-0);
+  color: var(--fg-2);
+}

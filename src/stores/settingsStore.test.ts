@@ -185,4 +185,56 @@ describe("settingsStore", () => {
     expect(inspected).toEqual([]);
     expect(Object.keys(useSettingsStore.getState().projectUi)).toEqual(["/p/a", "/p/b"]);
   });
+
+  // ---- the agent that runs the review ------------------------------------
+
+  it("drops a saved hosted-tier setting without asking the user anything", async () => {
+    // The hosted review tier is gone. A settings file from before it went still has
+    // `review_driver` and `review_service` in it, and the whole object is rewritten on
+    // the next save — so they leave by themselves, silently, which is the point.
+    const written: unknown[] = [];
+    mockIPC((cmd, args) => {
+      if (cmd === "get_settings") {
+        return { keymap_preset: "kicad", review_driver: "service", review_service: { base_url: "http://x" } };
+      }
+      if (cmd === "set_settings") written.push((args as { settings: unknown }).settings);
+      return undefined;
+    });
+
+    await useSettingsStore.getState().load();
+    await useSettingsStore.getState().setKeymap("kicad");
+
+    const saved = written[0] as Record<string, unknown>;
+    expect(saved).not.toHaveProperty("review_driver");
+    expect(saved).not.toHaveProperty("review_service");
+    expect(saved.keymap_preset).toBe("kicad");
+  });
+
+  it("falls back to the shipped agent when none has been chosen", async () => {
+    mockIPC((cmd) => (cmd === "get_settings" ? {} : undefined));
+    await useSettingsStore.getState().load();
+    expect(useSettingsStore.getState().agentProfile).toBeNull();
+    // Every caller asks for the effective one rather than handling null itself.
+    expect(useSettingsStore.getState().effectiveAgent().bin).toBe("claude");
+  });
+
+  it("refuses a saved agent with no program to run", async () => {
+    // Settings are hand-editable and this one names a program the app will start. A
+    // half-filled profile is null, so the setup screen offers to fill it in rather
+    // than a subprocess failing a minute later.
+    mockIPC((cmd) => (cmd === "get_settings" ? { agent_profile: { id: "custom", bin: "  " } } : undefined));
+    await useSettingsStore.getState().load();
+    expect(useSettingsStore.getState().agentProfile).toBeNull();
+  });
+
+  it("keeps only string arguments, because each one is passed whole to the process", async () => {
+    mockIPC((cmd) =>
+      cmd === "get_settings"
+        ? { agent_profile: { id: "codex-cli", label: "Codex CLI", bin: "codex", args: ["exec", 7, "{prompt}"] } }
+        : undefined,
+    );
+    await useSettingsStore.getState().load();
+    expect(useSettingsStore.getState().agentProfile?.args).toEqual(["exec", "{prompt}"]);
+    expect(useSettingsStore.getState().agentProfile?.prompt_via).toBe("arg");
+  });
 });

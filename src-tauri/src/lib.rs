@@ -1,4 +1,5 @@
 mod agent;
+mod mcpstatus;
 mod bomcheck;
 mod cache;
 mod checkpoints;
@@ -11,7 +12,6 @@ mod logging;
 mod presence;
 mod project;
 mod rawstore;
-mod reviewbundle;
 mod reviews;
 mod assistant;
 mod findings;
@@ -114,6 +114,13 @@ fn open_handle(
         let (app, p) = (app.clone(), handle.clone());
         let generation = p.watcher_gen.load(Ordering::SeqCst);
         std::thread::spawn(move || watcher::run(app, p, generation));
+    }
+
+    // The review server's run directory. Watched for THIS project's newest review,
+    // whoever started it — the app, a terminal, or an editor we have never heard of.
+    {
+        let (app, p) = (app.clone(), handle.clone());
+        std::thread::spawn(move || mcpstatus::run(app, p));
     }
 
     // Background: a schema bump empties the DB — refill it from the system of record
@@ -1149,33 +1156,8 @@ fn set_bom_mapping(
 // bundle, and to land the result through the SAME ingestion path as the free check
 // so a paid finding refines the free comment instead of duplicating it.
 //
-// The HTTP conversation itself (submit, SSE progress, findings, ack) lives in the
-// frontend (`src/lib/reviewService.ts`): it is plain fetch against a configurable
-// base URL, and keeping it there means no provider token, no job state and no retry
-// policy in the Rust process.
-
-/// Exactly what a detailed review would upload, for the pre-flight dialog. Pure —
-/// nothing is sent, nothing is written.
-#[tauri::command]
-fn build_review_bundle(
-    state: State<AppState>,
-    profile: Option<String>,
-) -> Result<reviewbundle::ReviewBundle, String> {
-    let handle = current_project(&state)?;
-    let profile = profile.unwrap_or_else(|| "default".to_string());
-    let design_tool = handle.design_tool.lock_safe().clone();
-    let component_count = design::bom_lines(opt_active_extraction(&state))
-        .map(|lines| lines.iter().map(|l| l.designators.len()).sum())
-        .unwrap_or(0);
-    reviewbundle::build(
-        opt_active_extraction(&state),
-        &profile,
-        &handle.name,
-        &design_tool,
-        handle.effective_extraction_id(),
-        component_count,
-    )
-}
+// There is no hosted tier any more. A detailed review runs through the user's own
+// agent, over MCP, and lands here through the same drop-box every outside review uses.
 
 /// Ingest a findings document the review service produced.
 ///
@@ -1276,32 +1258,44 @@ fn import_review_inbox(
     Ok(outcome)
 }
 
-/// Start a detailed review through the user's own AI assistant, over MCP.
+/// Start a BOM review through the user's own AI agent, over MCP.
 ///
-/// The app writes an MCP config naming its own review server, spawns the assistant's
-/// CLI against it, and gets out of the way. The findings come back through the review
-/// drop-box like every other review that ran outside this window, so there is exactly
-/// one ingestion path (see `bomcheck::inbox_dir`).
+/// The app supplies the prompt and nothing else. The agent's own MCP registration,
+/// permissions and sub-agents are its owner's business — see `agent.rs`. The findings
+/// come back through the review drop-box like every other review that ran outside this
+/// window, so there is exactly one ingestion path (`bomcheck::inbox_dir`).
 ///
-/// Progress arrives on `agent-event`; this returns as soon as the process is up.
+/// Progress does not arrive from the agent: `mcpstatus.rs` reads it from the review
+/// server's own `status.json`. This returns as soon as the process is up.
 #[tauri::command]
 fn start_agent_review(
     app: AppHandle,
     state: State<AppState>,
-    profile: Option<String>,
-    config: agent::AgentConfig,
+    agent: agent::AgentProfile,
+    brief: agent::ReviewBrief,
 ) -> Result<(), String> {
     let handle = current_project(&state)?;
-    let profile = profile.unwrap_or_else(|| "default".to_string());
-    // Scratch, not project: the MCP config is regenerable and must not land in the
-    // folder that syncs (docs/storage-model.md).
-    let scratch = project::local_data_root(&handle.project_dir).join("agent");
     telemetry::bump("agent_reviews");
-    log::info!("starting an assistant review, profile {profile}");
+    log::info!("starting an agent review with the {} profile", agent.id);
     state
         .agent
         .lock_safe()
-        .start(app, handle.project_dir.clone(), scratch, profile, config)
+        .start(app, handle.project_dir.clone(), agent, brief)
+}
+
+/// The agent profiles SpinZero ships, for the setup screen's picker.
+#[tauri::command]
+fn agent_profiles() -> Vec<agent::AgentProfile> {
+    agent::builtin_profiles()
+}
+
+/// This project's newest review, whoever started it. Asked on mount so a reopened
+/// window picks up a run already in flight rather than waiting for its next write.
+#[tauri::command]
+fn agent_review_status(state: State<AppState>) -> Option<mcpstatus::RunStatus> {
+    let handle = current_project(&state).ok()?;
+    let root = mcpstatus::run_root()?;
+    mcpstatus::newest_for(&root, &handle.project_dir)
 }
 
 /// Is an assistant review in flight? The launcher asks on mount so a reopened window
@@ -1648,12 +1642,13 @@ pub fn run() {
             run_bom_check,
             get_bom_mapping,
             set_bom_mapping,
-            build_review_bundle,
             ingest_findings,
             list_review_inbox,
             import_review_inbox,
             start_agent_review,
             agent_review_running,
+            agent_profiles,
+            agent_review_status,
             assistant_setup,
             register_assistant,
             set_licence_key,

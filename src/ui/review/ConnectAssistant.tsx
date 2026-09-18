@@ -26,6 +26,13 @@ import { IconCopy, IconSparkle } from "../icons";
 // with no undo. So: run the client's own `mcp add` where there is one, and show the
 // block and the path where there is not.
 //
+// **This is the ONLY registration path now, including for a review the app starts.**
+// SpinZero used to write a private MCP config and force it on the one agent it knew
+// how to spawn. That worked for one command line program and nothing else, and it is
+// gone. What the user does on this screen is what the in-app review runs on, so the
+// screen has to say so — a reader who thinks the app registers itself will not come
+// here, and will then start a review against an agent that has no SpinZero tools.
+//
 // **The command carries no secret,** which is what makes it safe to show at all. The
 // key is in `~/.spinzero/licence.key` and the server reads it for itself.
 
@@ -124,6 +131,11 @@ export function ConnectAssistant({ onClose }: { onClose: () => void }) {
           <p className="wizard-hint">
             SpinZero hands your assistant a real review, one step at a time — it does the
             reasoning, on your subscription, and your design never leaves this machine.
+          </p>
+          <p className="wizard-hint">
+            This is the only place SpinZero is registered with an assistant. A review you
+            start from <em>Run a review</em> uses the same connection, so if the steps below
+            are not done, that button cannot work either.
           </p>
 
           {loadError && <p className="wizard-hint err">Could not read this machine's setup: {loadError}</p>}
@@ -248,6 +260,10 @@ export function ConnectAssistant({ onClose }: { onClose: () => void }) {
                 it at your KiCad project folder. It will ask you two questions — what the board
                 is for, and whether we read your BOM columns right — and then work through the
                 review on its own.
+              </p>
+              <p className="wizard-hint">
+                Or press <em>Run a review</em> in SpinZero. It starts the same assistant with
+                both of those answers already filled in, and shows the progress here.
               </p>
             </>
           )}

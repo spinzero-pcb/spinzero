@@ -1,4 +1,4 @@
-// findings.json — the one review contract, mirroring schemas/findings-1.2.json.
+// findings.json — the one review contract, mirroring schemas/findings-1.3.json.
 //
 // Every review producer emits this document: the free deterministic BOM check
 // (Rust `bom-rules`, confidence "Unvalidated") today, the paid detailed review
@@ -6,13 +6,26 @@
 // comments in bomcheck.rs, matched by `fingerprint` — and this file is what the
 // BOM tab renders the run summary from.
 //
-// Keep in sync with schemas/findings-1.2.json and src-tauri/src/findings.rs.
+// Keep in sync with schemas/findings-1.3.json and src-tauri/src/findings.rs.
 
 import type { Comment } from "./types";
 
-/** Two levels, deliberately. "Critical" = act before this ships; "Non-critical" =
- *  worth knowing, not a blocker. How SURE the reviewer is lives in `confidence`. */
-export type FindingSeverity = "Critical" | "Non-critical";
+/** Three levels. "Critical" = act before this ships; "Non-critical" = worth knowing,
+ *  not a blocker; "Not verified" = the review could not check this, so it makes no
+ *  claim either way. How SURE the reviewer is about a claim it DID make lives in
+ *  `confidence`.
+ *
+ *  "Not verified" is the absence of a finding, not a quiet one. Anything that ranks,
+ *  colours or counts severities has to keep it apart from the two that say something
+ *  about the board — a coverage gap listed among defects reads as a defect. */
+export type FindingSeverity = "Critical" | "Non-critical" | "Not verified";
+
+/** Whether a finding says something about the BOARD, as against saying the review
+ *  could not look. The predicate every count, colour and sort should ask, so a new
+ *  severity of either kind lands correctly without hunting for comparisons. */
+export function isClaim(f: { severity: string }): boolean {
+  return severityOf(f) !== "Not verified";
+}
 /** What findings-1.0 and 1.1 called the same two levels. Documents in a user's project
  *  folder outlive the rename, so every reader normalises through `severityOf` rather
  *  than comparing `f.severity` directly. */
@@ -22,7 +35,12 @@ export type LegacyFindingSeverity = "Important" | "Observation";
 export function severityOf(f: { severity: string }): FindingSeverity {
   if (f.severity === "Important") return "Critical";
   if (f.severity === "Observation") return "Non-critical";
-  return f.severity === "Critical" ? "Critical" : "Non-critical";
+  if (f.severity === "Critical") return "Critical";
+  // Named rather than left to the fallback: a coverage gap that fell through to
+  // "Non-critical" would be counted and coloured as something we found wrong with the
+  // board, which is the opposite of what it says.
+  if (f.severity === "Not verified") return "Not verified";
+  return "Non-critical";
 }
 /** "High" = verified against a datasheet/distributor/KB record; "Low" = plausible but
  *  unverified, so the engineer must confirm it; "Unvalidated" = a raw rule hit no
@@ -84,6 +102,28 @@ export interface FindingsDoc {
   run_health?: RunHealthEntry[];
   /** How this review was produced. Absent on the free tier. */
   execution?: Execution;
+  /** Which BOM column the review actually read each field from. Absent on the free
+   *  tier. NOT the same thing as `BomMappingDialog`'s mapping: that one is what the
+   *  app's own rules will read next time, this one is what this review did read. */
+  column_mapping?: ColumnMapping;
+}
+
+/** Mirrors `$defs/column_mapping` in `schemas/findings-1.2.json`. */
+export interface ColumnMapping {
+  fields: {
+    field: string;
+    column?: string | null;
+    /** Which tier supplied it: `confirmed` is the user's own answer to the review's
+     *  preflight, the rest are our resolver's. */
+    via?: "confirmed" | "canonical" | "alternate" | "borrowed" | null;
+    /** Share of rows with something in that column, counted over the BOM the review
+     *  read. Printed rather than recounted, so the app and the page agree. */
+    fill_rate?: number;
+  }[];
+  unmapped_columns?: { column: string; fill_rate?: number }[];
+  /** False when nobody said what the board is for, so every rule ran at its
+   *  strictest. A reader has to know before deciding whether a finding applies. */
+  profile_stated?: boolean;
 }
 
 /** Which surface produced a review, and with which content.
@@ -223,7 +263,7 @@ export function resolveBomProfile(v: string): BomProfile | typeof UNSTATED_BOM_P
   return RETIRED_BOM_PROFILES[v] ?? (isBomProfile(v) ? v : UNSTATED_BOM_PROFILE);
 }
 
-export const SEVERITY_ORDER: FindingSeverity[] = ["Critical", "Non-critical"];
+export const SEVERITY_ORDER: FindingSeverity[] = ["Critical", "Non-critical", "Not verified"];
 
 /** Findings per severity, highest first — the summary strip's data. */
 export function severityCounts(doc: FindingsDoc): { severity: FindingSeverity; n: number }[] {
@@ -271,4 +311,155 @@ export function executionSummary(
   // The chip itself stays short: the content version is what a reader compares
   // between two runs, so it is the part that shows without hovering.
   return { text: e.prompt_pack ?? SURFACE[e.surface] ?? e.surface, detail };
+}
+
+// ---- what the review could NOT do -----------------------------------------
+//
+// Everything below is a port of the same derivation in the review server's
+// `report.ts`, deliberately rather than a second opinion. Two derivations of one
+// coverage number disagree eventually, and then the page and the app contradict each
+// other about a review the customer has already read. Change one, change both.
+
+/** Audit items that are NOT coverage, by name.
+ *
+ *  There is no structural way to tell "the run could not do this" from "the BOM does
+ *  not say this" — both arrive as a GAP — so the difference is stated. RoHS and
+ *  lifecycle are facts about the BOM and are already filed as findings; rule
+ *  candidates and the judgment pass describe our own pipeline, which is telemetry;
+ *  the column mapping report gets a table of its own. */
+const NOT_COVERAGE =
+  /^(rohs compliance|lifecycle status verifiable|rule candidates|judgment pass|column mapping report)$/i;
+
+/** Audit lines about a rule the judgment pass threw out. Interesting to us, noise to
+ *  the engineer: a rule that did not fire is not a finding. */
+const DISMISSED_RULE = /^Rule /;
+
+/** One item the review could not verify: a short line, and the whole note behind it. */
+export interface CoverageGap {
+  item: string;
+  /** The first sentence, and never more than a line of it. */
+  note: string;
+  /** The whole note, for the tooltip. */
+  full: string;
+  /** The designators on the BOM row this miss happened on, as the reader wrote them.
+   *  Empty for a miss about the BOM as a whole, and for every pre-1.3 document, where
+   *  the gaps were prose and had no row. */
+  refdes?: string;
+  /** The part number the miss is about. Empty on the same two cases as `refdes`. */
+  mpn?: string;
+}
+
+/**
+ * What the review could not check.
+ *
+ * TWO sources, and the order matters. From findings-1.3 a coverage gap is a finding
+ * at severity `Not verified`, anchored to the BOM row it happened on — so it can be
+ * counted, placed on a row and marked dealt-with like anything else. Those are
+ * preferred whenever the document has any.
+ *
+ * The audit trail is the fallback, for the documents that predate 1.3 and are sitting
+ * in users' project folders right now. It gives one line per STAGE rather than per
+ * row, which is exactly the shortcoming 1.3 fixed, but it is what those documents
+ * have.
+ *
+ * `run_health` is deliberately not a third source: every stage in it has an audit
+ * entry saying the same thing in the engineer's terms rather than the pipeline's, so
+ * reading both prints each gap twice under two names. It decides only whether the
+ * heading says "incomplete".
+ */
+export function coverageGaps(doc: FindingsDoc | null): CoverageGap[] {
+  const filed = (doc?.findings ?? []).filter((f) => severityOf(f) === "Not verified");
+  if (filed.length) {
+    return filed.map((f) => ({
+      item: f.title,
+      note: briefNote(f.detail ?? ""),
+      full: f.detail ?? "",
+      refdes: (f.anchors ?? []).flatMap((a) => a.refdes ?? []).join(", "),
+      mpn: (f.anchors ?? []).map((a) => a.mpn).find((m) => !!m) ?? "",
+    }));
+  }
+  const out: CoverageGap[] = [];
+  for (const a of doc?.bom_audit ?? []) {
+    if (a.result === "OK") continue;
+    if (NOT_COVERAGE.test(a.item.trim()) || DISMISSED_RULE.test(a.item)) continue;
+    const full = a.note ?? "";
+    out.push({ item: a.item, note: briefNote(full), full });
+  }
+  return out;
+}
+
+const BRIEF_MAX = 110;
+
+/** One line per miss. The audit notes are paragraphs; this is a scan list. */
+function briefNote(note: string): string {
+  const first = (/^[\s\S]*?[.!?](?=\s|$)/.exec(note.trim())?.[0] ?? note.trim()).trim();
+  if (first.length <= BRIEF_MAX) return first;
+  // Cut before the enumeration rather than mid-list: these sentences end in a colon
+  // or a dash followed by every part number that missed, and half a part number is
+  // worse than none.
+  const cut = Math.max(first.lastIndexOf(":", BRIEF_MAX), first.lastIndexOf(" — ", BRIEF_MAX));
+  const head = cut > 20 ? first.slice(0, cut) : first.slice(0, first.lastIndexOf(" ", BRIEF_MAX));
+  return `${head.replace(/[,;:\s]+$/, "")}…`;
+}
+
+/** "N of M part numbers were accounted for" — the coverage sentence, from the audit
+ *  entry the assembler writes for it. Null when the review filed no such entry. */
+export function partCoverage(doc: FindingsDoc | null): string | null {
+  const entry = doc?.bom_audit?.find((a) => a.item.trim().toLowerCase() === "part verification");
+  return entry?.note ? briefNote(entry.note) : null;
+}
+
+/** The three numbers that head the review: how bad, how minor, and how much of it
+ *  nobody checked. The third is the one the app used to leave out, so a review with
+ *  twenty blind spots and no findings read as a pass. */
+export function reviewTallies(doc: FindingsDoc | null): {
+  critical: number;
+  nonCritical: number;
+  notVerified: number;
+  /** True when a whole stage degraded or failed. The gap list is then "incomplete"
+   *  rather than merely "not verified". */
+  stalled: boolean;
+} {
+  const findings = doc?.findings ?? [];
+  // Counted by predicate, not by subtraction. `length - critical` swept the new
+  // `Not verified` findings into the non-critical tally, which said we had found
+  // things wrong with the board that we had in fact failed to look at.
+  const critical = findings.filter((f) => severityOf(f) === "Critical").length;
+  return {
+    critical,
+    nonCritical: findings.filter((f) => severityOf(f) === "Non-critical").length,
+    notVerified: coverageGaps(doc).length,
+    stalled: (doc?.run_health ?? []).length > 0,
+  };
+}
+
+/** Human label for a review stage. The app never shows a raw stage id. */
+export const STAGE_LABELS: Record<string, string> = {
+  validate_bundle: "Checking the BOM",
+  fetch_datasheets: "Collecting datasheets",
+  deterministic_rules: "Running the rule pack",
+  verify_specs: "Cross-checking every row",
+  judgment_pass: "Reviewing against datasheets",
+  assemble: "Assembling the report",
+};
+
+export function stageLabel(stage: string | null | undefined): string {
+  return stage ? (STAGE_LABELS[stage] ?? stage) : "";
+}
+
+/**
+ * What to tell the user when a review came back incomplete — or null when it did not.
+ *
+ * A stage that was cut short is the difference between "the BOM is clean" and
+ * "nothing checked the BOM", and the app is the only place the user looks.
+ */
+export function runHealthSummary(doc: FindingsDoc | null): { text: string; detail: string } | null {
+  const entries = doc?.run_health ?? [];
+  if (!entries.length) return null;
+  const lines = entries.map((h) => `${stageLabel(h.stage)} ${h.status}${h.detail ? `: ${h.detail}` : ""}`);
+  const worst = entries.find((h) => h.status === "failed") ?? entries[0];
+  const text = `${stageLabel(worst?.stage)} ${worst?.status === "failed" ? "failed" : "was cut short"}${
+    entries.length > 1 ? ` (+${entries.length - 1} more)` : ""
+  }`;
+  return { text, detail: lines.join("\n") };
 }

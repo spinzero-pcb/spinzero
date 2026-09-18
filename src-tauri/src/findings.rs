@@ -103,6 +103,22 @@ pub struct FindingsDoc {
     pub stats: Stats,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub run_health: Vec<RunHealthEntry>,
+    /// How the review was produced, and which of the user's columns it read.
+    ///
+    /// Carried VERBATIM and never inspected here. Both blocks exist for the frontend,
+    /// which decodes them against `schemas/findings-1.2.json`; giving Rust a second
+    /// typed copy would be two definitions of one contract, and the day they drift is
+    /// the day a field silently stops arriving. Untyped, they cannot drift — they can
+    /// only be dropped, which is what this field exists to stop.
+    ///
+    /// Dropped is what they were: a document came in through the drop-box, was parsed
+    /// into this struct, and went to the frontend without either one. So the
+    /// provenance chip and the column-mapping panel had nothing to show, for every
+    /// review that ever ran.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub column_mapping: Option<serde_json::Value>,
 }
 
 // ------------------------------------------------------------------- the mapping
