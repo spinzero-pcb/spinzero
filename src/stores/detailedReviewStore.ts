@@ -117,10 +117,13 @@ interface DetailedReviewState {
    *  through it. This is the unfolded version, and it is only ever read by the panel
    *  behind the progress bar. */
   activity: ActivityEntry[];
+  /** When the current run was started (ms epoch), for the elapsed clock. */
+  startedAt: number | null;
 
   /** Run the whole thing: gate the mapping, build the bundle, check the service, submit,
    *  stream, ingest, ack. Every failure lands in `error` rather than in a dialog. */
   start: () => Promise<void>;
+  /** Stop the run in flight: close the stream, tell the service, file nothing. */
   cancel: () => Promise<void>;
   checkService: () => Promise<void>;
   clearError: () => void;
@@ -143,6 +146,12 @@ export function isRunning(phase: ReviewPhase): boolean {
   return phase === "preparing" || phase === "submitting" || phase === "running" || phase === "ingesting";
 }
 
+/** The run `start()` is driving. `cancel()` aborts it and clears it, which is how the
+ *  loop in `start()` knows to stop without filing anything — the stream ending after
+ *  a cancel otherwise looks exactly like a run that finished and falls through to
+ *  collecting findings. */
+let live: AbortController | null = null;
+
 export const useDetailedReviewStore = create<DetailedReviewState>((set, get) => ({
   phase: "idle",
   bundle: null,
@@ -155,6 +164,7 @@ export const useDetailedReviewStore = create<DetailedReviewState>((set, get) => 
   error: null,
   serviceOk: null,
   activity: [],
+  startedAt: null,
 
   checkService: async () => {
     const config = serviceConfig();
@@ -177,9 +187,15 @@ export const useDetailedReviewStore = create<DetailedReviewState>((set, get) => 
       progress: "Preparing your BOM",
       step: 1,
       liveFindings: 0,
-      // Last run's feed is not this run's feed, and a stale one is worse than none.
+      // Last run's fraction and feed are not this run's: a stale fraction made the
+      // bar jump straight to where the previous run finished its judgment pass.
+      reviewProgress: null,
       activity: [],
+      startedAt: Date.now(),
     });
+    const run = new AbortController();
+    live = run;
+    const cancelled = () => run.signal.aborted;
 
     const config = serviceConfig();
     if (!config) {
@@ -188,18 +204,22 @@ export const useDetailedReviewStore = create<DetailedReviewState>((set, get) => 
     }
 
     // Same gate as the free check: never spend a paid review on a mapping nobody has
-    // looked at. The dialog takes over and re-enters here once one is approved.
-    const approved = await useBomMappingStore.getState().ensureApproved(profile, () => void get().start());
+    // looked at.
+    const approved = await useBomMappingStore.getState().ensureApproved(profile);
+    if (cancelled()) return;
     if (!approved) {
-      set({ phase: "idle", progress: "", step: null });
+      live = null;
+      set({ phase: "idle", progress: "", step: null, startedAt: null });
       return;
     }
 
     let bundle: ReviewBundle;
     try {
       bundle = await ipc.buildReviewBundle(profile);
+      if (cancelled()) return;
       set({ bundle });
     } catch (e) {
+      if (cancelled()) return;
       // No enriched BOM yet is the common case (project never extracted).
       fail(set, `there is nothing to review yet: ${e instanceof Error ? e.message : String(e)}`);
       return;
@@ -208,6 +228,7 @@ export const useDetailedReviewStore = create<DetailedReviewState>((set, get) => 
     // Reachability is checked HERE, not while a sheet sits open: a service that was up
     // a minute ago proves nothing, and this is the moment the user asked to send.
     const { ok } = await health(config);
+    if (cancelled()) return;
     set({ serviceOk: ok });
     if (!ok) {
       fail(set, "the review service is not reachable. Check your connection and try again.");
@@ -219,19 +240,32 @@ export const useDetailedReviewStore = create<DetailedReviewState>((set, get) => 
     try {
       ({ job_id: jobId } = await submitReview(config, { profile, files: bundle.files }));
     } catch (e) {
+      if (cancelled()) return;
       fail(set, `${e instanceof Error ? e.message : String(e)}`);
+      return;
+    }
+    if (cancelled()) {
+      // Cancelled while the upload was in flight: the job exists now, so delete it.
+      void cancelReview(config, jobId);
       return;
     }
     set({ phase: "running", jobId, progress: "Waiting for a reviewer", step: 1 });
 
     try {
-      const terminal = await streamProgress(config, jobId, (event) => onProgress(set, get, event));
+      const terminal = await streamProgress(
+        config,
+        jobId,
+        (event) => onProgress(set, get, event),
+        run.signal,
+      );
+      if (cancelled()) return;
       if (terminal.type === "failed") {
         const detail = (terminal.data as { error?: string } | undefined)?.error ?? terminal.message ?? "";
         fail(set, `the review failed${detail ? `: ${detail}` : ""}`);
         return;
       }
     } catch (e) {
+      if (cancelled()) return;
       // Losing the progress stream does not mean losing the review: the job may well
       // have finished, so fall through and try to collect the findings anyway — and
       // say nothing alarming about it while doing so.
@@ -241,8 +275,10 @@ export const useDetailedReviewStore = create<DetailedReviewState>((set, get) => 
     set({ phase: "ingesting", progress: "Finishing up", step: 3 });
     try {
       const doc = await fetchFindings(config, jobId);
+      if (cancelled()) return;
       const outcome = await ipc.ingestFindings(doc);
-      set({ phase: "done", doc, progress: "", step: null });
+      live = null;
+      set({ phase: "done", doc, progress: "", step: null, startedAt: null });
       // Everything a landed review owes the user — BOM strip, rail, launcher stamp,
       // one honest toast — is shared with the drop-box import (`landFindings`), so a
       // review that came back incomplete cannot report clean on one surface only.
@@ -251,15 +287,30 @@ export const useDetailedReviewStore = create<DetailedReviewState>((set, get) => 
       // copy (plan §6.1). Fire-and-forget: a failed ack costs a TTL, not the result.
       void ackReview(config, jobId);
     } catch (e) {
+      if (cancelled()) return;
       fail(set, `the findings could not be filed: ${e instanceof Error ? e.message : String(e)}`);
     }
   },
 
   cancel: async () => {
+    if (!isRunning(get().phase)) return;
+    // Abort first, so `start()` stops at its next await instead of treating the
+    // closed stream as a finished run.
+    live?.abort();
+    live = null;
     const config = serviceConfig();
     const jobId = get().jobId;
+    set({
+      phase: "idle",
+      jobId: null,
+      progress: "",
+      step: null,
+      liveFindings: 0,
+      reviewProgress: null,
+      startedAt: null,
+    });
     if (config && jobId) await cancelReview(config, jobId);
-    set({ phase: "idle", jobId: null, progress: "", step: null, liveFindings: 0 });
+    useToastStore.getState().push({ kind: "info", title: "Detailed review cancelled" });
   },
 
   clearError: () => set({ error: null }),
@@ -276,6 +327,7 @@ export const useDetailedReviewStore = create<DetailedReviewState>((set, get) => 
       doc: null,
       error: null,
       activity: [],
+      startedAt: null,
     }),
 }));
 
@@ -337,7 +389,8 @@ function onProgress(set: Setter, get: () => DetailedReviewState, event: ReviewPr
 }
 
 function fail(set: Setter, message: string): void {
-  set({ phase: "idle", error: message, progress: "", step: null });
+  live = null;
+  set({ phase: "idle", error: message, progress: "", step: null, startedAt: null });
   useToastStore.getState().push({
     kind: "error",
     title: "Detailed review failed",

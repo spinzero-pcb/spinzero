@@ -1,24 +1,22 @@
 import { create } from "zustand";
 import { ipc } from "../lib/ipc";
 import type { MappingView } from "../lib/findings";
+import { useRunLauncherStore } from "./runLauncherStore";
 
-// BOM column mapping approval.
+// BOM column mapping — edited inline in the BOM Review window.
 //
 // Every rule reads *logical* fields ("mpn", "lifecycle", "aecq"); a real BOM has
 // whatever columns its author typed. The backend bridges the two with an alias table,
 // and that bridge is a guess about someone else's naming. A wrong guess is silent:
-// a field read from the wrong column, or from no column, reads downstream as "this
-// data is missing" — so the review comes back clean, or full of missing-data findings,
-// for a reason that has nothing to do with the board.
+// a field read from the wrong column reads downstream as "this data is missing".
 //
-// This store owns the one moment that guess is stated out loud. A review asks
-// `ensureApproved()` first; if the project has never recorded a mapping, the dialog
-// opens with the review parked in `pending` and runs it once the user has decided.
-// Approving with no edits is a decision too — what gets written is the record that
-// the user was asked, which is why the dialog then stops interrupting.
+// There is no separate mapping dialog. The mapping is a section of the BOM Review
+// window, and pressing Run there IS the approval: `save()` persists what the user saw.
+// A review started from anywhere else asks `ensureApproved()` first; a project that
+// has never had a mapping approved gets the BOM Review window, mapping expanded,
+// instead of a run.
 
 interface BomMappingState {
-  open: boolean;
   loading: boolean;
   view: MappingView | null;
   error: string | null;
@@ -26,20 +24,25 @@ interface BomMappingState {
   /** Edits on top of what the backend resolved: logical field → source column,
    *  "" meaning "this field is not in this BOM". Only edited fields appear. */
   draft: Record<string, string>;
-  /** The review that is waiting on this decision, if the dialog opened to gate one. */
-  pending: (() => void) | null;
+  /** Whether the mapping section of the BOM Review window is expanded. */
+  expanded: boolean;
 
-  /** Open the dialog. `pending` runs after the user approves (not after a cancel). */
-  openDialog: (profile: string, pending?: () => void) => Promise<void>;
-  close: () => void;
+  /** Read the mapping for a profile. Keeps the draft: edits are keyed by field, and
+   *  switching the end application must not throw them away. */
+  load: (profile: string) => Promise<void>;
   setField: (logical: string, column: string) => void;
   /** Put a field back on the alias guess — whether the divergence came from this
    *  session's edit or from a mapping approved long ago. */
   resetField: (logical: string) => void;
-  approve: () => Promise<void>;
-  /** Gate for a review: true = go ahead. False means the dialog took over and will
-   *  run `pending` itself once the user has decided. */
-  ensureApproved: (profile: string, pending: () => void) => Promise<boolean>;
+  setExpanded: (expanded: boolean) => void;
+  /** Persist the mapping if it has never been approved or has been edited. True when
+   *  a review may go ahead; false leaves the reason in `error`. */
+  save: () => Promise<boolean>;
+  /** Drop the loaded view and edits (the window closed). */
+  reset: () => void;
+  /** Gate for a review started outside the BOM Review window: true = go ahead. False
+   *  means the window was opened, mapping expanded, for the user to confirm. */
+  ensureApproved: (profile: string) => Promise<boolean>;
 }
 
 /** The column a field resolves to with the current draft applied. */
@@ -49,27 +52,30 @@ export function effectiveColumn(view: MappingView, draft: Record<string, string>
   return view.fields.find((f) => f.logical === logical)?.column ?? "";
 }
 
+/** Does the draft change anything the backend would read? */
+function isDirty(view: MappingView, draft: Record<string, string>): boolean {
+  return view.fields.some((f) => effectiveColumn(view, draft, f.logical) !== f.column);
+}
+
 export const useBomMappingStore = create<BomMappingState>((set, get) => ({
-  open: false,
   loading: false,
   view: null,
   error: null,
   saving: false,
   draft: {},
-  pending: null,
+  expanded: false,
 
-  openDialog: async (profile, pending) => {
-    set({ open: true, loading: true, view: null, error: null, draft: {}, pending: pending ?? null });
+  load: async (profile) => {
+    set({ loading: true, error: null });
     try {
-      set({ view: await ipc.getBomMapping(profile), loading: false });
+      const view = await ipc.getBomMapping(profile);
+      // First time through, the user has to see the guess; after that it folds away.
+      set({ view, loading: false, expanded: get().expanded || !view.approved });
     } catch (e) {
-      // No extraction yet is the common case; the dialog says so rather than
-      // blocking the review behind an error the user cannot act on.
-      set({ error: String(e), loading: false });
+      // No extraction yet is the common case; the window says so.
+      set({ view: null, error: String(e), loading: false });
     }
   },
-
-  close: () => set({ open: false, pending: null, draft: {}, view: null, error: null }),
 
   setField: (logical, column) => set({ draft: { ...get().draft, [logical]: column } }),
 
@@ -80,41 +86,53 @@ export const useBomMappingStore = create<BomMappingState>((set, get) => ({
     set({ draft: { ...get().draft, [logical]: auto } });
   },
 
-  approve: async () => {
-    const { view, draft, pending, saving } = get();
-    if (saving) return;
-    set({ saving: true });
+  setExpanded: (expanded) => set({ expanded }),
+
+  save: async () => {
+    const { view, draft, saving } = get();
+    if (saving) return false;
+    // Nothing loaded (no extraction yet): the gate is never what blocks a review.
+    if (!view) return true;
+    if (view.approved && !isDirty(view, draft)) return true;
+    set({ saving: true, error: null });
     // Send the whole resolved mapping, not just the edits: what the user approved is
     // what they saw. Re-deriving it from aliases on the next run would let an alias
     // table change silently rewrite a mapping someone signed off on.
     const overrides: Record<string, string> = {};
-    for (const f of view?.fields ?? []) {
-      overrides[f.logical] = draft[f.logical] ?? f.column;
-    }
+    for (const f of view.fields) overrides[f.logical] = effectiveColumn(view, draft, f.logical);
     try {
       await ipc.setBomMapping(overrides);
-      set({ open: false, pending: null, draft: {}, view: null, saving: false });
-      pending?.();
+      set({
+        saving: false,
+        draft: {},
+        view: {
+          ...view,
+          approved: true,
+          fields: view.fields.map((f) => ({ ...f, column: overrides[f.logical] })),
+        },
+      });
+      return true;
     } catch (e) {
-      // The mapping could not be persisted (read-only project folder, sync lock).
-      // Leave the dialog up with the reason rather than running a review on a
-      // mapping the project will not remember.
-      set({ error: String(e), saving: false });
+      // Read-only project folder, sync lock: don't run a review on a mapping the
+      // project will not remember.
+      set({ saving: false, error: `Couldn’t save the column mapping: ${String(e)}` });
+      return false;
     }
   },
 
-  ensureApproved: async (profile, pending) => {
+  reset: () => set({ view: null, draft: {}, error: null, loading: false, expanded: false }),
+
+  ensureApproved: async (profile) => {
     let view: MappingView | null = null;
     try {
       view = await ipc.getBomMapping(profile);
     } catch {
       /* fall through — see below */
     }
-    // Can't tell (no project, no extraction, a backend that answered with nothing):
-    // never let the gate be the thing that blocks a review.
+    // Can't tell (no project, no extraction): never let the gate block a review.
     if (!view || view.approved) return true;
-    // Seed the dialog from the answer we already have rather than asking twice.
-    set({ open: true, loading: false, view, error: null, draft: {}, pending });
+    set({ expanded: true });
+    useRunLauncherStore.getState().openSetup("bom");
     return false;
   },
 }));

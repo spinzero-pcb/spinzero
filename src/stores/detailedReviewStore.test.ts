@@ -273,4 +273,50 @@ describe("detailedReviewStore", () => {
     // Two runs' events in one list would read as one very long run.
     expect(useDetailedReviewStore.getState().activity.length).toBe(2);
   });
+
+  it("does not carry the last run's progress fraction into the next", async () => {
+    // A stale fraction made the bar jump straight to where the previous run's
+    // judgment pass had got to, the moment the new run reached step 2.
+    useDetailedReviewStore.setState({ reviewProgress: { reviewed: 9, candidates: 10, datasheetsRead: 4 } });
+    await useDetailedReviewStore.getState().start();
+    expect(useDetailedReviewStore.getState().reviewProgress).toBeNull();
+  });
+
+  it("cancel stops the run where it is and files nothing", async () => {
+    // A stream that stays open until the request is aborted — a review mid-flight.
+    let opened!: () => void;
+    const streamOpen = new Promise<void>((r) => (opened = r));
+    fetchMock.mockImplementation((url: string, init?: RequestInit) => {
+      const u = String(url);
+      if (!u.endsWith("/events")) return Promise.resolve(route(u));
+      const stream = new ReadableStream<Uint8Array>({
+        start(c) {
+          c.enqueue(
+            new TextEncoder().encode(
+              'data: {"type":"stage_started","ts":"t","stage":"judgment_pass"}\n\n',
+            ),
+          );
+          init?.signal?.addEventListener("abort", () => c.error(new DOMException("aborted", "AbortError")));
+          opened();
+        },
+      });
+      return Promise.resolve(new Response(stream, { status: 200 }));
+    });
+
+    const run = useDetailedReviewStore.getState().start();
+    await streamOpen;
+    expect(useDetailedReviewStore.getState().phase).toBe("running");
+    await useDetailedReviewStore.getState().cancel();
+    await run;
+
+    const s = useDetailedReviewStore.getState();
+    expect(s.phase).toBe("idle");
+    expect(s.error).toBeNull();
+    expect(s.startedAt).toBeNull();
+    // The closed stream must not be mistaken for a finished run.
+    expect(fetchMock.mock.calls.some(([u]) => String(u).endsWith("/findings"))).toBe(false);
+    expect(ipcCalls.some((c) => c.cmd === "ingest_findings")).toBe(false);
+    // …and the service is told to drop the job.
+    expect(fetchMock.mock.calls.some(([u, init]) => String(u).endsWith("/v1/reviews/j1") && init?.method === "DELETE")).toBe(true);
+  });
 });

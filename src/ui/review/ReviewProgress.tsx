@@ -2,17 +2,14 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useDetailedReviewStore } from "../../stores/detailedReviewStore";
 import type { ActivityEntry } from "../../lib/reviewService";
 
-// The detailed review's progress, in the two places it has to be visible: the BOM tab
-// it was launched from, and the footer, which is on screen in every view.
+// The detailed review's progress. It lives in the footer only — on screen in every
+// view — so there is exactly one progress indicator for one run.
 //
-// **A bar and a number, nothing else.** It used to print the step it was on beside the
-// bar ("Detailed review · Reviewing against datasheets · 3 of 16 checks · 2 findings"),
-// which is a sentence that changes width every time it changes, in a footer where
-// everything else holds still. The words also said less than they looked like they
-// said: a step name is the same for eight minutes, so the line read as frozen even
-// while the bar moved. A percentage is the one thing a reader wants from a progress
-// bar — is this halfway or nearly done — and it is three characters wide. The words
-// are still there for anyone who wants them, in the tooltip.
+// **Fixed-width, so the footer holds still:** a fixed label, the bar, a percentage and
+// an elapsed clock (tabular figures). The step name changes rarely and says little at
+// a glance, so it is in the tooltip and at the top of the panel the bar opens. The
+// elapsed clock is what tells a slow run from a hung one when the percentage cannot
+// move — the datasheet stretch can hold one number for minutes.
 //
 // The bar used to be `step / 3`, which meant it jumped to 66% and then sat perfectly
 // still for the eight to ten minutes the review itself takes. A frozen bar does not
@@ -51,6 +48,8 @@ export function ReviewProgress() {
   const step = useDetailedReviewStore((s) => s.step);
   const found = useDetailedReviewStore((s) => s.liveFindings);
   const review = useDetailedReviewStore((s) => s.reviewProgress);
+  const startedAt = useDetailedReviewStore((s) => s.startedAt);
+  const elapsed = useElapsed(startedAt);
 
   const label = progress || "Starting the review";
   const [from, to] = SPAN[step ?? 1];
@@ -65,47 +64,71 @@ export function ReviewProgress() {
   // reading "47%" is the kind of mismatch someone eventually files a bug about.
   const shown = Math.round(pct);
 
-  // Everything the line used to print, now in the tooltip: which step, how far into
-  // it, and that datasheets are being fetched (which is why it is slow, and is not a
-  // hang). Nobody needs it at a glance; the people who want it know to hover.
+  // The step and its detail live in the tooltip; the line itself holds still.
   const detail = step === 2 && review ? stageDetail(review) : null;
 
   const [open, setOpen] = useState(false);
 
   return (
     <span className="review-progress-wrap">
-      {open && <ActivityFeed onClose={() => setOpen(false)} />}
+      {open && <ActivityFeed label={label} detail={detail} onClose={() => setOpen(false)} />}
       <button
-      type="button"
-      className="review-progress"
-      onClick={() => setOpen((v) => !v)}
-      aria-expanded={open}
-      title={
-        `Detailed BOM review — ${label}${detail ? ` · ${detail}` : ""}` +
-        `${found > 0 ? ` · ${found} finding${found === 1 ? "" : "s"} so far` : ""}` +
-        `
-Click for activity`
-      }
-      aria-label="Detailed BOM review progress — click for activity"
-    >
-      <span
-        className="review-progress-bar"
-        role="progressbar"
-        aria-valuenow={shown}
-        aria-valuemin={0}
-        aria-valuemax={100}
+        type="button"
+        className="review-progress"
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        title={
+          `${label}${detail ? ` · ${detail}` : ""}` +
+          `${found > 0 ? ` · ${found} finding${found === 1 ? "" : "s"} so far` : ""}` +
+          "\nClick for details"
+        }
+        aria-label="Detailed BOM review progress — click for details"
       >
-        <span className="review-progress-fill" style={{ width: `${shown}%` }} />
-      </span>
-      <span className="review-progress-pct">{shown}%</span>
+        <span className="review-progress-label">BOM review</span>
+        <span
+          className="review-progress-bar"
+          role="progressbar"
+          aria-valuenow={shown}
+          aria-valuemin={0}
+          aria-valuemax={100}
+        >
+          {/* The shimmer says "alive" without claiming progress the run has not
+              reported — the datasheet stretch can hold one number for minutes. */}
+          <span className="review-progress-fill" style={{ width: `${shown}%` }} />
+        </span>
+        <span className="review-progress-pct">{shown}%</span>
+        {elapsed && <span className="review-progress-time">{elapsed}</span>}
       </button>
     </span>
   );
 }
 
-/** The event stream, newest at the bottom — the direction a log reads. */
-function ActivityFeed({ onClose }: { onClose: () => void }) {
+/** "3:07" since `since`, ticking once a second; null when there is no run. */
+function useElapsed(since: number | null): string | null {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (since === null) return;
+    const id = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(id);
+  }, [since]);
+  if (since === null) return null;
+  const s = Math.max(0, Math.floor((now - since) / 1000));
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+}
+
+/** The step it is on, the event stream behind it, and the way out. Newest event at
+ *  the bottom — the direction a log reads. */
+function ActivityFeed({
+  label,
+  detail,
+  onClose,
+}: {
+  label: string;
+  detail: string | null;
+  onClose: () => void;
+}) {
   const activity = useDetailedReviewStore((s) => s.activity);
+  const cancel = useDetailedReviewStore((s) => s.cancel);
   const scroller = useRef<HTMLDivElement>(null);
   // Follow the tail, but only while the reader is AT the tail: yanking someone back
   // down every fifteen seconds makes the panel unusable for the one thing it is for,
@@ -131,7 +154,10 @@ function ActivityFeed({ onClose }: { onClose: () => void }) {
   return (
     <div className="review-activity" role="log" aria-label="Detailed review activity">
       <div className="review-activity-head">
-        <span>Activity</span>
+        <span className="review-activity-step">
+          {label}
+          {detail && <span className="review-activity-sub"> · {detail}</span>}
+        </span>
         <button className="btn-ghost review-activity-close" onClick={onClose} aria-label="Close activity">
           ✕
         </button>
@@ -149,6 +175,17 @@ function ActivityFeed({ onClose }: { onClose: () => void }) {
         ) : (
           activity.map((entry, i) => <ActivityRow key={entry.seq} entry={entry} previous={activity[i - 1]} />)
         )}
+      </div>
+      <div className="review-activity-foot">
+        <button
+          className="btn-ghost review-activity-cancel"
+          onClick={() => {
+            onClose();
+            void cancel();
+          }}
+        >
+          Cancel review
+        </button>
       </div>
     </div>
   );

@@ -63,8 +63,8 @@ export const useAgentReviewStore = create<AgentReviewState>((set, get) => ({
     }
     const profile = currentBomProfile();
     // The same gate the other two tiers use: never spend a review on a column mapping
-    // nobody has looked at. The dialog takes over and re-enters here once approved.
-    const approved = await useBomMappingStore.getState().ensureApproved(profile, () => void get().start());
+    // nobody has looked at.
+    const approved = await useBomMappingStore.getState().ensureApproved(profile);
     if (!approved) return;
 
     set({ phase: "starting", error: null, line: "", seconds: null });
