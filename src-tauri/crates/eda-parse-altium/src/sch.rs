@@ -532,6 +532,8 @@ pub struct SchImage {
     pub max: Pt,
     pub file_name: String,
     pub embedded: bool,
+    /// Quarter turns, 0-3. A rotated image is stored under its own key.
+    pub orientation: i64,
     /// PNG/JPEG bytes resolved from the `Storage` stream, when they were found.
     pub data: Vec<u8>,
     /// Part of the drawing sheet's template rather than of the design.
@@ -749,12 +751,31 @@ pub fn parse(doc: &Doc) -> SchDoc {
     if out.images.iter().any(|i| i.embedded) {
         let store = doc.storage();
         for img in &mut out.images {
-            if let Some(bytes) = store.get(&img.file_name) {
+            if let Some(bytes) = image_bytes(&store, &img.file_name, img.orientation) {
                 img.data = bytes.clone();
             }
         }
     }
     out
+}
+
+/// An image record's bytes in `Storage`. A rotated image is stored under
+/// `FileName=<name>|Orientation=<deg> Degrees`, and a sheet that only ever
+/// placed it rotated may have no bare entry at all, so the rotated key is tried
+/// first and the bare name second. Names compare case-insensitively, as
+/// Altium's own lookup does (altium-monkey 2026.9.13.post1).
+fn image_bytes<'a>(
+    store: &'a BTreeMap<String, Vec<u8>>,
+    file_name: &str,
+    orientation: i64,
+) -> Option<&'a Vec<u8>> {
+    if (1..=3).contains(&orientation) {
+        let rotated = format!("FileName={file_name}|Orientation={} Degrees", orientation * 90);
+        if let Some(b) = store.get(&rotated.to_lowercase()) {
+            return Some(b);
+        }
+    }
+    store.get(&file_name.to_lowercase())
 }
 
 /// Blankets from the `Additional` stream. Each is a closed polyline, which is
@@ -1114,7 +1135,19 @@ pub fn parse_records(recs: Vec<TextRecord>) -> SchDoc {
                     Some(o) if set_at.contains_key(&o) => {
                         out.param_sets[set_at[&o]].parameters.push(p)
                     }
-                    _ => out.parameters.push(p),
+                    // Only an unowned parameter, or one the sheet record owns,
+                    // is a SHEET parameter. Pins, ports, power ports, sheet
+                    // entries and implementations own parameters too — the
+                    // corpus has 13480 `PinUniqueId`s on pins and ~1000 model
+                    // parameters on `RECORD=48` — and a cross-sheet connector
+                    // or sheet entry owns a `CrossRef` (altium-monkey
+                    // 2026.9.21). Filing those as sheet parameters put them
+                    // into title-block and `=Name` resolution.
+                    None => out.parameters.push(p),
+                    Some(o) if recs.get(o).and_then(TextRecord::record_type) == Some(31) => {
+                        out.parameters.push(p)
+                    }
+                    Some(_) => *out.skipped.entry(t).or_default() += 1,
                 }
             }
             45 => {
@@ -1236,6 +1269,7 @@ pub fn parse_records(recs: Vec<TextRecord>) -> SchDoc {
                 max: pt(r, "Corner.X", "Corner.Y"),
                 file_name: r.s("FileName").to_string(),
                 embedded: r.b("EmbedImage"),
+                orientation: r.i("Orientation").unwrap_or(0),
                 data: Vec::new(),
                 template: owner.is_some() && owner == template_at,
                 uuid: r.s("UniqueID").to_string(),
@@ -1444,6 +1478,44 @@ mod tests {
         ]);
         assert_eq!(doc.components.len(), 1);
         assert_eq!(doc.components[0].footprint, "SOIC127P1030X265-16N-V");
+    }
+
+    /// An image finds its bytes whatever case the record spells the name in,
+    /// and a rotated image finds the rotated payload before the bare one.
+    #[test]
+    fn image_bytes_fold_case_and_prefer_the_rotated_key() {
+        let store: BTreeMap<String, Vec<u8>> = [
+            ("c:\\logos\\logo.png".to_string(), vec![0]),
+            ("filename=c:\\logos\\logo.png|orientation=90 degrees".to_string(), vec![90]),
+        ]
+        .into();
+        assert_eq!(image_bytes(&store, "C:\\Logos\\LOGO.png", 0), Some(&vec![0]));
+        assert_eq!(image_bytes(&store, "C:\\Logos\\logo.png", 1), Some(&vec![90]));
+        assert_eq!(image_bytes(&store, "C:\\Logos\\logo.png", 2), Some(&vec![0]), "bare fallback");
+        assert_eq!(image_bytes(&store, "other.png", 0), None);
+    }
+
+    /// A parameter is a SHEET parameter only when nothing owns it, or the sheet
+    /// does. One owned by a pin, a power port (the `CrossRef` of a cross-sheet
+    /// connector) or a sheet entry must not reach title-block resolution, where
+    /// a `CrossRef` named like a sheet field would override it.
+    #[test]
+    fn only_an_unowned_parameter_is_a_sheet_parameter() {
+        let rec = |s: &str| TextRecord::parse(format!("{s} ").as_bytes());
+        let doc = parse_records(vec![
+            rec("|HEADER=Protel for Windows - Schematic Capture|"),
+            rec("|RECORD=1|LibReference=R|"),
+            rec("|RECORD=2|OwnerIndex=0|Designator=1|"),
+            rec("|RECORD=41|OwnerIndex=1|Name=PinUniqueId|Text=ABCD|"),
+            rec("|RECORD=17|Text=SDA|IsCrossSheetConnector=T|"),
+            rec("|RECORD=41|OwnerIndex=3|Name=CrossRef|Text=Sheet2[B3]|"),
+            rec("|RECORD=31|"),
+            rec("|RECORD=41|OwnerIndex=5|Name=Revision|Text=B|"),
+            rec("|RECORD=41|Name=Title|Text=Power|"),
+        ]);
+        let names: Vec<_> = doc.parameters.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["Revision", "Title"]);
+        assert_eq!(doc.skipped.get(&41), Some(&2), "owned parameters are counted, not lost");
     }
 
     /// With nothing flagged, the first PCBLIB model still wins — the rule adds a

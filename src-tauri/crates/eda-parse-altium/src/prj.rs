@@ -86,8 +86,12 @@ impl CompileOptions {
 #[derive(Debug, Clone)]
 pub struct Project {
     pub name: String,
-    /// `DocumentPath=` of every `[DocumentN]` section, in file order.
+    /// `DocumentPath=` of every `[DocumentN]` section, in file order, each
+    /// document once.
     pub documents: Vec<String>,
+    /// `DocumentPath=` entries dropped because an earlier section already named
+    /// the same document, for the caller to report.
+    pub duplicate_documents: Vec<String>,
     pub options: CompileOptions,
     /// Every section, for anything read later (variants, configurations).
     pub sections: Vec<(String, BTreeMap<String, String>)>,
@@ -107,11 +111,22 @@ impl Project {
     pub fn parse(name: &str, bytes: &[u8]) -> Project {
         let text = strip_bom(bytes);
         let sections = parse_ini(&text);
+        // Altium writes a document once, but an edited or merged project can
+        // name one twice. Kept twice, the sheet is compiled twice — every part
+        // on it doubled in the BOM and every net given a second copy. The FIRST
+        // entry wins, compared the way Windows compares paths (altium-monkey
+        // 2026.9.19 settles on the same rule).
         let mut documents = Vec::new();
+        let mut duplicate_documents = Vec::new();
+        let mut seen = std::collections::HashSet::new();
         for (sec, kv) in &sections {
             if sec.to_ascii_uppercase().starts_with("DOCUMENT") {
                 if let Some(p) = kv.get("DOCUMENTPATH").filter(|s| !s.is_empty()) {
-                    documents.push(p.clone());
+                    if seen.insert(normalize_document_path(p)) {
+                        documents.push(p.clone());
+                    } else {
+                        duplicate_documents.push(p.clone());
+                    }
                 }
             }
         }
@@ -152,6 +167,7 @@ impl Project {
         Project {
             name: name.to_string(),
             documents,
+            duplicate_documents,
             options,
             sections,
         }
@@ -328,6 +344,18 @@ fn sub_fields(raw: &str) -> BTreeMap<String, String> {
     out
 }
 
+/// A project document path as Windows resolves it: separators unified, `.\`
+/// segments dropped, case folded.
+fn normalize_document_path(p: &str) -> String {
+    p.trim()
+        .replace('/', "\\")
+        .split('\\')
+        .filter(|seg| !seg.is_empty() && *seg != ".")
+        .collect::<Vec<_>>()
+        .join("\\")
+        .to_lowercase()
+}
+
 fn parse_ini(text: &str) -> Vec<(String, BTreeMap<String, String>)> {
     let mut out: Vec<(String, BTreeMap<String, String>)> = Vec::new();
     let mut cur = String::new();
@@ -374,6 +402,18 @@ AllowSheetEntryNetNames=0\r\nPowerPortNamesTakePriority=1\r\n\
             p.documents_with_ext(dir, "PcbDoc"),
             vec![Path::new("/tmp/proj/board/Main.PcbDoc").to_path_buf()]
         );
+    }
+
+    /// A document named twice is read once, the first spelling kept; the
+    /// repeat is reported rather than compiled as a second copy of the sheet.
+    #[test]
+    fn a_document_named_twice_is_read_once() {
+        let prj = "[Document1]\r\nDocumentPath=Sheets\\Power.SchDoc\r\n\
+[Document2]\r\nDocumentPath=Top.SchDoc\r\n\
+[Document3]\r\nDocumentPath=.\\sheets/POWER.SchDoc\r\n";
+        let p = Project::parse("demo", prj.as_bytes());
+        assert_eq!(p.documents, vec!["Sheets\\Power.SchDoc", "Top.SchDoc"]);
+        assert_eq!(p.duplicate_documents, vec![".\\sheets/POWER.SchDoc"]);
     }
 
     /// Altium has no per-symbol DNP flag: a build that leaves parts off is a

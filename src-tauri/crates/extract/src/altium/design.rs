@@ -49,8 +49,11 @@ impl Channel {
 /// A value beginning `=` is a parameter reference (`Comment==Value`,
 /// `Text==SheetNumber`) resolved against component, then sheet, then PROJECT
 /// parameters — the `PRJ_*` values a `.PrjPcb` defines, which is where a title
-/// block's fields and some component fields point. When it resolves empty we
-/// fall back to the literal text, which is what Altium itself displays.
+/// block's fields and some component fields point. A parameter that EXISTS
+/// but is empty resolves to empty — L1 on the eval board has `Comment==Value`
+/// over an empty `Value`, and the board's own `Components6` writes
+/// `COMMENT=""` (as do E1 and E2 on the gate-driver board; altium-monkey
+/// 2026.9.11 agrees). Only a reference to NO parameter keeps the literal text.
 pub fn evaluate(
     text: &str,
     component: &[Param],
@@ -68,14 +71,9 @@ pub fn evaluate(
     let find = |m: &BTreeMap<String, String>| {
         m.iter().find(|(k, _)| k.eq_ignore_ascii_case(name)).map(|(_, v)| v.clone())
     };
-    let resolved = from_component
-        .or_else(|| find(sheet))
-        .or_else(|| find(project))
-        .unwrap_or_default();
-    if resolved.is_empty() || resolved.starts_with('=') {
-        text.to_string()
-    } else {
-        resolved
+    match from_component.or_else(|| find(sheet)).or_else(|| find(project)) {
+        Some(v) if !v.starts_with('=') => v,
+        _ => text.to_string(),
     }
 }
 
@@ -391,7 +389,9 @@ mod tests {
             "Eval board",
             "project parameters resolve after the sheet's"
         );
-        assert_eq!(evaluate("=Missing", &params, &sheet, &project), "=Missing", "empty falls back");
+        assert_eq!(evaluate("=Missing", &params, &sheet, &project), "=Missing", "no parameter: literal");
+        let empty = vec![param("Value", ""), param("Comment", "=Value")];
+        assert_eq!(evaluate("=Value", &empty, &sheet, &project), "", "an empty parameter is empty");
         assert_eq!(evaluate("plain", &params, &sheet, &project), "plain");
     }
 

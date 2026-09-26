@@ -120,7 +120,9 @@ impl Doc {
     /// A `Storage` record is a type byte, a Pascal-string source path, the
     /// inflated byte count, and a zlib stream. The path is the only key an
     /// image record has — `RECORD=30`'s `FileName` is the same string — so the
-    /// map is keyed by it verbatim, absolute drive letter and all.
+    /// map is keyed by it, absolute drive letter and all, LOWER-CASED: Altium
+    /// matches the name case-insensitively and takes the FIRST entry when two
+    /// fold to the same key.
     ///
     /// A record that does not inflate is skipped rather than failing the
     /// document: a missing logo is not a reason to lose a schematic.
@@ -136,7 +138,7 @@ impl Doc {
             let Some(z) = b.get(start + 4..) else { continue };
             let mut data = Vec::new();
             if flate2::read::ZlibDecoder::new(z).read_to_end(&mut data).is_ok() {
-                out.insert(name, data);
+                out.entry(name.to_lowercase()).or_insert(data);
             }
         }
         out

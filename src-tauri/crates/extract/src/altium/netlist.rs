@@ -19,7 +19,7 @@
 //! end just short of the wire drawn to them — and every pin it joins is counted,
 //! along with the pins that stay unconnected, so both show as numbers.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use eda_parse_altium::sch::{self, Pt, SchDoc};
 
@@ -589,6 +589,13 @@ pub fn fragments(
         bucket.push(e.uuid);
     }
 
+    // Names this sheet labels, when the sheet is one channel of several — see
+    // the power-port keys below.
+    let channel_labels: HashSet<String> = if channel.is_some() {
+        sch.net_labels.iter().map(|l| l.text.trim().to_ascii_uppercase()).collect()
+    } else {
+        HashSet::new()
+    };
     let mut frags = Vec::new();
     for (_root, mut g) in groups {
         let named = !(g.labels.is_empty()
@@ -610,29 +617,76 @@ pub fn fragments(
         diag.hidden_supply_pins += g.implicit.len();
         g.terminals
             .sort_by(|a, b| (&a.designator, &a.pin).cmp(&(&b.designator, &b.pin)));
+        // A power name made channel-local (below) is named like a local one,
+        // with the channel's suffix: `GND2_1`, as the eval board writes it.
+        let power_names: Vec<String> = match channel {
+            Some(ch) => g
+                .power
+                .iter()
+                .map(|p| {
+                    if channel_labels.contains(&p.to_ascii_uppercase()) {
+                        format!("{p}{}", ch.net_suffix())
+                    } else {
+                        p.clone()
+                    }
+                })
+                .collect(),
+            None => g.power.clone(),
+        };
         let (name, driver_kind, rank) = name_group(
-            &g.labels, &g.power, &g.entries, &g.ports, &g.implicit, &g.terminals, opts, channel,
+            &g.labels, &power_names, &g.entries, &g.ports, &g.implicit, &g.terminals, opts, channel,
         );
 
         // Merge keys. Power and implicit-supply names are global; net labels are
         // sheet-local unless the design compiles with global scope; hierarchy
         // links are scoped to the sheet instance they cross.
+        let label_global = opts.hierarchy_mode == eda_parse_altium::HierarchyMode::Global;
+        let label_key = |up: &str| {
+            if label_global {
+                format!("G:{up}")
+            } else {
+                format!("L:{sheet_path_uuids}\u{0}{up}")
+            }
+        };
         let mut keys = Vec::new();
-        for x in g.power.iter().chain(&g.implicit) {
+        for x in g.implicit.iter() {
             keys.push(format!("P:{}", x.to_ascii_uppercase()));
         }
-        let label_global = opts.hierarchy_mode == eda_parse_altium::HierarchyMode::Global;
-        for x in &g.labels {
+        for x in g.power.iter() {
             let up = x.to_ascii_uppercase();
-            // A net label carrying a POWER PORT's name is NOT thereby global.
-            // The eval design labels `P5V` on one sheet and ports it on others,
-            // and bridging the two gave one net where Altium has two — the
-            // reference emits `P5V` and `SGND` twice as well, which is the whole
-            // evidence there is, and it says the label's scope stands.
-            if label_global {
-                keys.push(format!("G:{up}"));
-            } else {
-                keys.push(format!("L:{sheet_path_uuids}\u{0}{up}"));
+            if !channel_labels.contains(&up) {
+                keys.push(format!("P:{up}"));
+            }
+            // A power port also answers to a net label of its name wherever that
+            // label reaches — on its own sheet, or everywhere under global
+            // scope. On ONE sheet a name is a name, and the port's global scope
+            // then carries the label's pins with it. Keyed apart, the eval
+            // design came out with two `P5V` and two `SGND`, the gate-driver
+            // board two `DGND` — where each board's own `Nets6` has one net
+            // holding every one of those pads, and altium-monkey 2026.9.18 (its
+            // hierarchy-scope fix, public issue #53) now agrees.
+            //
+            // The exception is a CHANNEL sheet that labels the name: there the
+            // port goes channel-local and gets no global key (above). The eval
+            // design's `Gate_Drv` is placed twice and carries a `GND2` power
+            // port beside a `GND2` label; its board has `GND2_1` and `GND2_2`,
+            // one per channel, each joined to that channel's own `GND_HS` or
+            // `GND_LS`. Global there, the port shorted the two gate drivers'
+            // grounds into one net. A channel's unlabelled `GND` stays global.
+            keys.push(label_key(&up));
+        }
+        for x in &g.labels {
+            keys.push(label_key(&x.to_ascii_uppercase()));
+        }
+        // Under Global scope ports are global as well as labels, and under Flat
+        // scope ports are global while labels stay local. Keyed only to a parent
+        // sheet entry, the 10 kW motherboard (Global) came out with two `INV-A`,
+        // `INV-B` and `INV-C` — ports on `Main Power` and `LCL and EMI Filter`
+        // whose board nets are one each, as altium-monkey 2026.9.18 now says.
+        use eda_parse_altium::HierarchyMode;
+        if matches!(opts.hierarchy_mode, HierarchyMode::Global | HierarchyMode::Flat) {
+            for x in &g.ports {
+                keys.push(format!("G:{}", x.to_ascii_uppercase()));
             }
         }
         // A port on this sheet joins the sheet entry of this sheet's placement
@@ -910,6 +964,97 @@ mod tests {
         let mut swapped = opts.clone();
         swapped.power_port_names_take_priority = true;
         assert_eq!(nets(&sch, &swapped)[0].name, "P5V");
+    }
+
+    /// Two isolated pins on one sheet: R1 under a label, R2 under a power port.
+    /// Nothing is drawn between them — only the shared name joins them.
+    fn label_and_power(name: &str) -> SchDoc {
+        SchDoc {
+            components: vec![
+                comp("R1", vec![pin("1", "~", p(100, 100), 32)]),
+                comp("R2", vec![pin("1", "~", p(300, 100), 32)]),
+            ],
+            net_labels: vec![NetLabel { at: p(100, 100), text: name.into(), uuid: "l".into(), ..Default::default() }],
+            power_ports: vec![PowerPort { at: p(300, 100), text: name.into(), style: 4, uuid: "pp".into(), ..Default::default() }],
+            ..SchDoc::default()
+        }
+    }
+
+    fn names_and_members(n: &[crate::netlist::Net]) -> Vec<(String, Vec<String>)> {
+        let mut out: Vec<_> = n
+            .iter()
+            .map(|n| (n.name.clone(), n.terminals.iter().map(|t| t.designator.clone()).collect()))
+            .collect();
+        out.sort();
+        out
+    }
+
+    /// On one sheet a label and a power port of the same name are one net, and
+    /// the port carries it to the same name on other sheets. The eval, gate-driver
+    /// and motherboard boards each have one net where keying them apart gave two.
+    #[test]
+    fn a_label_joins_the_power_port_of_its_name_on_its_sheet() {
+        let opts = CompileOptions::board_project();
+        let mut d = SheetDiagnostics::default();
+        let mut frags = frags_of(&label_and_power("P5V"), "/A/", &opts, &mut d);
+        let other = SchDoc {
+            components: vec![comp("R3", vec![pin("1", "~", p(100, 100), 32)])],
+            power_ports: vec![PowerPort { at: p(100, 100), text: "P5V".into(), style: 4, uuid: "pp2".into(), ..Default::default() }],
+            ..SchDoc::default()
+        };
+        frags.extend(frags_of(&other, "/B/", &opts, &mut d));
+        let n = crate::netlist::merge_frags(frags);
+        assert_eq!(names_and_members(&n), [("P5V".to_string(), vec!["R1".into(), "R2".into(), "R3".into()])]);
+    }
+
+    /// On a CHANNEL sheet that also labels the name, the power port is
+    /// channel-local and takes the channel suffix: the eval board's `GND2_1` and
+    /// `GND2_2`, not one `GND2` shorting both gate drivers. A channel's
+    /// unlabelled power port stays global.
+    #[test]
+    fn a_labelled_power_port_on_a_channel_is_channel_local() {
+        let mut opts = CompileOptions::board_project();
+        opts.power_port_names_take_priority = true;
+        let ch = |index| super::super::design::Channel { index, name: format!("CH{index}"), format: "$Component_$ChannelIndex".into() };
+        let mut d = SheetDiagnostics::default();
+        let mut frags = Vec::new();
+        for i in 1..=2 {
+            frags.extend(fragments(&label_and_power("GND2"), &format!("/C{i}/"), &opts, Some(&ch(i)), &mut d));
+        }
+        let n = crate::netlist::merge_frags(frags);
+        let names: Vec<_> = names_and_members(&n).into_iter().map(|(name, _)| name).collect();
+        assert_eq!(names, ["GND2_1", "GND2_2"]);
+
+        let unlabelled = SchDoc { net_labels: Vec::new(), ..label_and_power("GND") };
+        let mut frags = Vec::new();
+        for i in 1..=2 {
+            frags.extend(fragments(&unlabelled, &format!("/C{i}/"), &opts, Some(&ch(i)), &mut d));
+        }
+        let n = crate::netlist::merge_frags(frags);
+        assert_eq!(n.iter().filter(|n| n.name == "GND").count(), 1, "one global GND across channels");
+    }
+
+    /// Global and Flat scope make a PORT global: the motherboard's `INV-A` port
+    /// on two sheets is one net. Hierarchical scope keeps it to its sheet entry.
+    #[test]
+    fn ports_are_global_under_global_and_flat_scope() {
+        let sheet = |d: &str| SchDoc {
+            components: vec![comp(d, vec![pin("1", "~", p(60, 620), 32)])],
+            ports: vec![Port { at: p(60, 620), width: 70, name: "INV-A".into(), io_type: 2, uuid: format!("prt{d}"), ..Default::default() }],
+            ..SchDoc::default()
+        };
+        for (mode, expect) in [
+            (eda_parse_altium::HierarchyMode::Global, 1),
+            (eda_parse_altium::HierarchyMode::Flat, 1),
+            (eda_parse_altium::HierarchyMode::Hierarchical, 2),
+        ] {
+            let mut opts = CompileOptions::board_project();
+            opts.hierarchy_mode = mode;
+            let mut d = SheetDiagnostics::default();
+            let mut frags = frags_of(&sheet("R1"), "/A/", &opts, &mut d);
+            frags.extend(frags_of(&sheet("R2"), "/B/", &opts, &mut d));
+            assert_eq!(crate::netlist::merge_frags(frags).len(), expect, "{mode:?}");
+        }
     }
 
     /// Corner case 17: a port's far edge is a connection point too.

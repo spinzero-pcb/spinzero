@@ -383,6 +383,9 @@ pub fn load_hierarchy(
         let prj = Project::open(project)?;
         variants = prj.variants();
         project_params = prj.parameters();
+        for d in &prj.duplicate_documents {
+            emit(Msg::Progress(format!("project names a document twice, later entry ignored: {d}")));
+        }
         let docs = prj.documents_with_ext(&dir, "SchDoc");
         (prj.name.clone(), prj.options.clone(), docs)
     } else {
