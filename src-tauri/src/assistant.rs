@@ -53,6 +53,9 @@ pub struct AssistantClient {
     /// `mcpServers` for almost everyone, `servers` for VS Code. The block the frontend
     /// renders has to use the right one or the client ignores it silently.
     pub config_key: String,
+    /// Does the client's own config already list SpinZero? Read, never written. A hint
+    /// for the screen, not a guarantee: the client can still fail to start the server.
+    pub connected: bool,
 }
 
 #[derive(Serialize)]
@@ -239,28 +242,34 @@ fn clients(server: &str) -> Vec<AssistantClient> {
             id: "claude-code".into(),
             label: "Claude Code".into(),
             how: HowToAdd::Command,
-            installed: runnable("claude"),
+            // Spawns the CLI, so `setup` fills it in; `connected_clients` skips it.
+            installed: false,
             command: claude,
             config_path: String::new(),
             config_key: "mcpServers".into(),
+            connected: false,
         },
         AssistantClient {
             id: "codex".into(),
             label: "Codex CLI".into(),
             how: HowToAdd::Command,
-            installed: runnable("codex"),
+            // Spawns the CLI, so `setup` fills it in; `connected_clients` skips it.
+            installed: false,
             command: codex,
             config_path: String::new(),
             config_key: "mcpServers".into(),
+            connected: false,
         },
         AssistantClient {
             id: "gemini".into(),
             label: "Gemini CLI".into(),
             how: HowToAdd::Command,
-            installed: runnable("gemini"),
+            // Spawns the CLI, so `setup` fills it in; `connected_clients` skips it.
+            installed: false,
             command: gemini,
             config_path: String::new(),
             config_key: "mcpServers".into(),
+            connected: false,
         },
         AssistantClient {
             id: "claude-desktop".into(),
@@ -272,6 +281,7 @@ fn clients(server: &str) -> Vec<AssistantClient> {
                 .map(|d| d.join("claude_desktop_config.json").display().to_string())
                 .unwrap_or_default(),
             config_key: "mcpServers".into(),
+            connected: false,
         },
         AssistantClient {
             id: "cursor".into(),
@@ -281,6 +291,7 @@ fn clients(server: &str) -> Vec<AssistantClient> {
             command: String::new(),
             config_path: home.join(".cursor").join("mcp.json").display().to_string(),
             config_key: "mcpServers".into(),
+            connected: false,
         },
         AssistantClient {
             id: "vscode".into(),
@@ -294,6 +305,7 @@ fn clients(server: &str) -> Vec<AssistantClient> {
             // VS Code is the odd one out and calls the object `servers`. A block using
             // `mcpServers` is ignored without an error, which is the worst kind.
             config_key: "servers".into(),
+            connected: false,
         },
         AssistantClient {
             id: "windsurf".into(),
@@ -308,8 +320,62 @@ fn clients(server: &str) -> Vec<AssistantClient> {
                 .display()
                 .to_string(),
             config_key: "mcpServers".into(),
+            connected: false,
         },
     ]
+}
+
+/// Where each client keeps the list its `mcp add` writes to, and how to find SpinZero
+/// in it. We only read these files.
+fn registered_config(id: &str, home: &PathBuf) -> Option<(PathBuf, Config)> {
+    match id {
+        // `-s user` writes the top-level `mcpServers` of `~/.claude.json`.
+        "claude-code" => Some((home.join(".claude.json"), Config::Json("mcpServers"))),
+        "codex" => Some((home.join(".codex").join("config.toml"), Config::Toml)),
+        "gemini" => Some((home.join(".gemini").join("settings.json"), Config::Json("mcpServers"))),
+        _ => None,
+    }
+}
+
+enum Config {
+    /// A JSON object whose field (named here) maps server names to their settings.
+    Json(&'static str),
+    /// Codex's `[mcp_servers.<name>]` tables.
+    Toml,
+}
+
+/// Does this config file list SpinZero? Any read or parse problem is a "no".
+fn lists_spinzero(path: &std::path::Path, config: &Config) -> bool {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    match config {
+        Config::Toml => text.contains(&format!("[mcp_servers.{SERVER_NAME}]")),
+        Config::Json(key) => match serde_json::from_str::<serde_json::Value>(&text) {
+            Ok(v) => v.get(*key).and_then(|m| m.get(SERVER_NAME)).is_some(),
+            // VS Code and others allow comments, which strict JSON rejects. Fall back
+            // to the quoted name: good enough for a hint.
+            Err(_) => text.contains(&format!("\"{SERVER_NAME}\"")),
+        },
+    }
+}
+
+/// Fill in `connected` for every client, from the files each one owns.
+fn mark_connected(clients: &mut [AssistantClient]) {
+    let home = dirs_home().unwrap_or_else(std::env::temp_dir);
+    for client in clients {
+        client.connected = match client.how {
+            HowToAdd::Command => registered_config(&client.id, &home)
+                .is_some_and(|(path, config)| lists_spinzero(&path, &config)),
+            HowToAdd::ConfigFile => {
+                !client.config_path.is_empty()
+                    && lists_spinzero(
+                        std::path::Path::new(&client.config_path),
+                        &Config::Json(if client.config_key == "servers" { "servers" } else { "mcpServers" }),
+                    )
+            }
+        };
+    }
 }
 
 fn claude_desktop_dir(home: &PathBuf, appdata: &PathBuf) -> Option<PathBuf> {
@@ -343,13 +409,26 @@ pub fn setup() -> AssistantSetup {
         Err(e) => (String::new(), e),
     };
     let licence = ensure_licence_file();
+    let mut clients = clients(&server_command);
+    for client in clients.iter_mut().filter(|c| c.how == HowToAdd::Command) {
+        client.installed = client.command.split(' ').next().is_some_and(runnable);
+    }
+    mark_connected(&mut clients);
     AssistantSetup {
-        clients: clients(&server_command),
+        clients,
         server_command,
         server_problem,
         licence_present: licence_present(&licence),
         licence_file: licence.display().to_string(),
     }
+}
+
+/// The labels of the clients whose config lists SpinZero. Reads files only and spawns
+/// nothing, so the review launcher can ask every time it opens.
+pub fn connected_clients() -> Vec<String> {
+    let mut clients = clients("");
+    mark_connected(&mut clients);
+    clients.into_iter().filter(|c| c.connected).map(|c| c.label).collect()
 }
 
 #[derive(Serialize)]
@@ -488,6 +567,27 @@ mod tests {
             .find(|c| c.id == "claude-code")
             .expect("claude code is listed");
         assert!(claude.command.contains("-s user"), "{}", claude.command);
+    }
+
+    #[test]
+    fn a_config_file_that_lists_spinzero_reads_as_connected() {
+        let dir = std::env::temp_dir().join(format!("sz-assist-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let json = dir.join("a.json");
+        std::fs::write(&json, r#"{"mcpServers":{"spinzero":{"command":"x"}}}"#).unwrap();
+        assert!(lists_spinzero(&json, &Config::Json("mcpServers")));
+        assert!(!lists_spinzero(&json, &Config::Json("servers")));
+        // A comment makes it invalid JSON; the quoted name still counts.
+        std::fs::write(&json, "// mine
+{\"servers\":{\"spinzero\":{}}}").unwrap();
+        assert!(lists_spinzero(&json, &Config::Json("servers")));
+        let toml = dir.join("c.toml");
+        std::fs::write(&toml, "[mcp_servers.spinzero]
+command = \"x\"
+").unwrap();
+        assert!(lists_spinzero(&toml, &Config::Toml));
+        assert!(!lists_spinzero(&dir.join("missing.json"), &Config::Json("mcpServers")));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

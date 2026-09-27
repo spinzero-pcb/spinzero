@@ -1,9 +1,9 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
+import { ipc } from "../../lib/ipc";
 import { isAgentRunning, useAgentReviewStore } from "../../stores/agentReviewStore";
 import { useBomCheckStore } from "../../stores/bomCheckStore";
 import { reviewRows, useReviewRunsStore } from "../../stores/reviewRunsStore";
 import { useReviewInboxStore } from "../../stores/reviewInboxStore";
-import { useSettingsStore } from "../../stores/settingsStore";
 import { useReviewStore } from "../../stores/reviewStore";
 import { useRunLauncherStore } from "../../stores/runLauncherStore";
 import { formatRelative } from "../../lib/time";
@@ -87,10 +87,10 @@ export function RunReviewMenu() {
   const agentPhase = useAgentReviewStore((s) => s.phase);
   const detailedBusy = isAgentRunning(agentPhase);
 
-  // Whether the assistant has been set up at all. Shown on the row rather than
-  // hidden behind a click: "set up" and "configured" answer different questions, and
-  // a row that reads the same either way is a row nobody revisits when it breaks.
-  const agentConfigured = useSettingsStore((s) => s.agentReview !== null);
+  // Which assistants already list SpinZero in their own config. Shown on the row, in
+  // green, rather than hidden behind a click: a row that reads the same either way is
+  // a row nobody revisits when it breaks. Read on open; it only reads files.
+  const [connected, setConnected] = useState<string[]>([]);
 
   const wrapRef = useRef<HTMLDivElement | null>(null);
 
@@ -120,6 +120,14 @@ export function RunReviewMenu() {
   useEffect(() => {
     if (menuOpen) void loadInbox();
   }, [menuOpen, loadInbox]);
+
+  useEffect(() => {
+    if (!menuOpen) return;
+    ipc
+      .assistantConnected()
+      .then(setConnected)
+      .catch(() => setConnected([]));
+  }, [menuOpen]);
 
   const rows = reviewRows(runs, current);
 
@@ -197,7 +205,16 @@ export function RunReviewMenu() {
             onClick={() => openConnect()}
           >
             <span className="run-review-name">Connect your AI assistant</span>
-            <span className="run-review-meta">{agentConfigured ? "configured" : "set up"}</span>
+            <span className="run-review-meta">
+              {connected.length > 0 ? (
+                <span className="run-review-connected" title={connected.join(", ")}>
+                  <span className="status-dot succeeded" />
+                  {connected.length === 1 ? connected[0] : `${connected.length} connected`}
+                </span>
+              ) : (
+                "set up"
+              )}
+            </span>
           </button>
           {inbox.length > 0 && (
             <>

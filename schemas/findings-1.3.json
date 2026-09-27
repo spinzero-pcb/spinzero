@@ -102,6 +102,11 @@
             "bom-rules/0.4.2"
           ]
         },
+        "build": {
+          "type": "string",
+          "description": "Which build of the SpinZero server ran the review: 'dev/<commit>' from a source checkout, 'release/<version>+<commit>' from the installer. A developer can run both on one machine, and only a release build tests what users get.",
+          "examples": ["dev/aafed0f+dirty", "release/0.0.5+aafed0f"]
+        },
         "allow_low_coverage": {
           "type": "boolean",
           "description": "Set when the datasheet coverage gate was deliberately overridden for this run. The report's silence about the un-evidenced parts is then absence of evidence, not evidence of absence."

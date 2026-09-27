@@ -4389,6 +4389,90 @@ textarea.wizard-input {
   color: var(--fg-2);
 }
 
+/* The review setup window (`SpinZero --setup`): one wizard card filling its own
+   small window, with no overlay behind it. */
+/* The app shell sets the body to overflow: hidden, so this window scrolls itself. */
+.setup-window {
+  height: 100vh;
+  overflow-y: auto;
+  display: flex;
+  justify-content: center;
+  padding: var(--sp-3) var(--sp-3) 0;
+  background: var(--bg-1);
+  box-sizing: border-box;
+}
+.setup-window-card { width: 100%; max-width: 720px; box-shadow: none; align-self: flex-start; }
+.setup-window-card .bom-map-table { max-height: none; overflow: visible; }
+.setup-window-card .bom-map-row { grid-template-columns: 170px minmax(0, 1fr) minmax(0, 1fr) 48px; }
+.setup-window-card .bom-map-pick { max-width: none; }
+/* End application: one line of small chips, every option visible. */
+.sw-app { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.sw-app-label { color: var(--fg-1); font-size: var(--fs-1); margin-right: var(--sp-1); }
+.sw-chip {
+  padding: 3px 10px;
+  border: 1px solid var(--border-1);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--fg-1);
+  font-size: var(--fs-0);
+  cursor: pointer;
+}
+.sw-chip:hover { border-color: var(--fg-2); color: var(--fg-0); }
+.sw-chip.on { border-color: var(--accent); background: var(--accent-dim); color: var(--fg-0); }
+
+/* The mapping. Headed like the report's mapping section, grouped so what needs a look
+   comes first, and each row's dot says what it reads now. */
+.sw-map { width: 100%; border-collapse: collapse; font-size: var(--fs-0); margin-top: var(--sp-2); }
+.sw-map th {
+  text-align: left;
+  padding: 4px 8px;
+  color: var(--fg-2);
+  font-weight: 600;
+  border-bottom: 1px solid var(--border-1);
+}
+.sw-map td { padding: 3px 8px; vertical-align: middle; }
+.sw-map .sw-num { text-align: right; white-space: nowrap; }
+.sw-map td.sw-num { font-family: var(--font-mono); color: var(--fg-2); }
+.sw-dotcol { width: 14px; padding-right: 0 !important; }
+.sw-grouphead td {
+  padding: 12px 8px 4px;
+  color: var(--fg-2);
+  font-size: var(--fs-0);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.sw-group-check .sw-grouphead td { color: var(--warn); }
+.sw-count { color: var(--fg-3); letter-spacing: 0; margin-left: 4px; }
+.sw-row:hover { background: var(--bg-3); }
+.sw-row.edited { background: var(--accent-dim); }
+.sw-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--fg-3); }
+.sw-ok .sw-dot { background: var(--ok); }
+.sw-low .sw-dot { background: var(--warn); }
+.sw-missing .sw-dot { background: var(--err); }
+.sw-absent .sw-field { color: var(--fg-3); }
+.sw-field { display: block; color: var(--fg-0); }
+.sw-pick { width: 100%; max-width: 230px; }
+.sw-sample {
+  max-width: 180px;
+  font-family: var(--font-mono);
+  color: var(--fg-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* Confirm stays on screen however long the field list is. The card must not clip, or
+   the sticky footer would stick to the card instead of the window. */
+.setup-window-card { overflow: visible; }
+.setup-window-card .wizard-actions {
+  position: sticky;
+  bottom: 0;
+  margin: 0 calc(-1 * var(--sp-3)) calc(-1 * var(--sp-3));
+  padding: var(--sp-2) var(--sp-3);
+  background: var(--bg-2);
+  border-top: 1px solid var(--border-1);
+}
+.setup-window-done { color: var(--fg-1); font-size: var(--fs-1); }
+
 /* BOM column mapping approval — a wider wizard card, because every row has to show
    a field name, a column picker and a real sample cell side by side; stacking them
    would hide the sample, which is the only part that settles an ambiguous header. */
@@ -4592,9 +4676,9 @@ textarea.wizard-input {
    the card, which is where the acre of empty space between the inputs came from. */
 .connect-card .review-field { flex: none; }
 
-/* The screen is long by nature — two setup sections, a config block and the privacy
-   disclosure — and it must not push its own header off the top of a laptop screen.
-   Scroll the body, keep the title and the buttons where they can be found. */
+/* With a config block open the screen can get long, and it must not push its own
+   header off the top of a laptop screen. Scroll the body, keep the title and the
+   buttons where they can be found. */
 .connect-card .wizard-body {
   max-height: min(62vh, 560px);
   overflow-y: auto;
@@ -4621,7 +4705,7 @@ textarea.wizard-input {
   display: flex;
   flex-direction: column;
   gap: var(--sp-1);
-  padding: var(--sp-2);
+  padding: 4px var(--sp-2);
   background: var(--bg-3);
   border: 1px solid var(--border-1);
   border-radius: var(--radius-1);
@@ -4677,7 +4761,9 @@ textarea.wizard-input {
   color: var(--fg-1);
   font-family: var(--font-mono);
   font-size: var(--fs-0);
-  line-height: 1.5;
+  /* Whole pixels. At 1.5 the box came out 0.1px taller than its content and WebView2
+     drew a scrollbar on a one-line block. */
+  line-height: 18px;
   /* Wrap rather than scroll: a horizontally scrolled block hides the half of the
      command a reader most needs to sanity-check before pasting it into a shell. */
   white-space: pre-wrap;
@@ -4687,10 +4773,120 @@ textarea.wizard-input {
      shrunk to nothing when the card is tight — which it always is here. The whole
      point of the screen is that this text is readable before it is pasted. */
   flex: none;
-  min-height: 5.5em;
   max-height: 180px;
   overflow-y: auto;
+  /* Room for the copy button in the top-right corner. */
+  padding-right: calc(var(--sp-2) + 24px);
 }
+
+/* A numbered step heading: number, name, status tick, info icon — one line. */
+.connect-step {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+}
+
+.connect-num {
+  display: inline-grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--bg-3);
+  border: 1px solid var(--border-1);
+  color: var(--fg-2);
+  font-size: var(--fs-0);
+  font-weight: 600;
+}
+
+.connect-ok {
+  display: inline-grid;
+  place-items: center;
+  color: var(--ok);
+}
+
+/* Connect shows a spinner while the client's own `mcp add` runs, which can take a
+   few seconds. Without it the screen looks hung. */
+.connect-go {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+}
+.connect-spin {
+  width: 11px;
+  height: 11px;
+  border: 2px solid var(--border-1);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: connect-spin 0.8s linear infinite;
+}
+@keyframes connect-spin { to { transform: rotate(360deg); } }
+
+.connect-client-name {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+}
+
+/* The key field and its Save button share a row. */
+.connect-row {
+  display: flex;
+  gap: var(--sp-1);
+}
+.connect-row .wizard-input { flex: 1; min-width: 0; }
+
+/* A client we could not find is greyed, not hidden. Hover says why. */
+.connect-client-name.absent { color: var(--fg-3); }
+
+.connect-toggle,
+.connect-go { padding-top: 2px; padding-bottom: 2px; }
+.connect-toggle {
+  font-family: var(--font-mono);
+  font-size: var(--fs-0);
+}
+.connect-toggle.on {
+  color: var(--fg-0);
+  border-color: var(--accent);
+}
+
+.connect-block-wrap {
+  position: relative;
+  flex: none;
+}
+
+.connect-copy {
+  position: absolute;
+  top: var(--sp-1);
+  right: var(--sp-1);
+  display: inline-grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  color: var(--fg-2);
+  background: var(--bg-2);
+  border: 1px solid var(--border-1);
+  border-radius: var(--radius-1);
+  cursor: pointer;
+}
+.connect-copy:hover { color: var(--fg-0); }
+
+.connect-path {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+  color: var(--fg-2);
+  font-size: var(--fs-0);
+  word-break: break-all;
+}
+
+/* The launcher's "Connect your AI assistant" row, once an assistant lists SpinZero. */
+.run-review-connected {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  color: var(--ok);
+}
+.run-review-connected .status-dot { margin-right: 0; }
 
 /* ---- the detailed review's own surfaces ---------------------------------- */
 /* Added when the app became a frontend for an agent-run review: three tallies rather

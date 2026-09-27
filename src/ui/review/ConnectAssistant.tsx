@@ -1,10 +1,10 @@
 import { useEffect, useState } from "react";
 
 import { ipc } from "../../lib/ipc";
-import { jsonBlockFor, SERVER_NAME } from "../../lib/mcpConfig";
+import { jsonBlockFor } from "../../lib/mcpConfig";
 import type { AssistantClient, AssistantSetup } from "../../lib/types";
 import { useToastStore } from "../../stores/toastStore";
-import { IconCopy, IconSparkle } from "../icons";
+import { IconCheck, IconCopy, IconInfo, IconSparkle } from "../icons";
 
 // "Connect your AI assistant" — the setup screen for running SpinZero reviews through
 // Claude Code, Cursor, Codex, or anything else that speaks MCP.
@@ -29,9 +29,12 @@ import { IconCopy, IconSparkle } from "../icons";
 // **This is the ONLY registration path now, including for a review the app starts.**
 // SpinZero used to write a private MCP config and force it on the one agent it knew
 // how to spawn. That worked for one command line program and nothing else, and it is
-// gone. What the user does on this screen is what the in-app review runs on, so the
-// screen has to say so — a reader who thinks the app registers itself will not come
-// here, and will then start a review against an agent that has no SpinZero tools.
+// gone. What the user does on this screen is what the in-app review runs on.
+//
+// **The screen is two numbered steps and nothing else.** There is no "now ask for a
+// review" step: Run a review starts the assistant itself. Every explanation is behind
+// an info icon (hover to read). If a sentence has to be visible for the step to make
+// sense, the step is badly designed; fix the step, not the text.
 //
 // **The command carries no secret,** which is what makes it safe to show at all. The
 // key is in `~/.spinzero/licence.key` and the server reads it for itself.
@@ -45,6 +48,9 @@ export function ConnectAssistant({ onClose }: { onClose: () => void }) {
   const [savingKey, setSavingKey] = useState(false);
   const [busy, setBusy] = useState("");
   const [shown, setShown] = useState<string | null>(null);
+  // Clients connected in this session. Their config says so too, but we only read
+  // three of those files; this covers the rest.
+  const [joined, setJoined] = useState<Set<string>>(new Set());
 
   async function load() {
     try {
@@ -78,6 +84,9 @@ export function ConnectAssistant({ onClose }: { onClose: () => void }) {
     try {
       const out = await ipc.registerAssistant(client.id);
       if (out.ok) {
+        setJoined((s) => new Set(s).add(client.id));
+        setShown(null);
+        void load();
         push({
           kind: "success",
           title: `${client.label} is connected`,
@@ -121,166 +130,118 @@ export function ConnectAssistant({ onClose }: { onClose: () => void }) {
           <span className="wizard-icon">
             <IconSparkle size={18} />
           </span>
-          <div>
-            <div className="wizard-title">Connect your AI assistant</div>
-            <div className="wizard-step">Run SpinZero reviews on your own subscription</div>
-          </div>
+          <div className="wizard-title">Connect your AI assistant</div>
+          <Info text={PRIVACY} />
         </div>
 
         <div className="wizard-body">
-          <p className="wizard-hint">
-            SpinZero hands your assistant a real review, one step at a time — it does the
-            reasoning, on your subscription, and your design never leaves this machine.
-          </p>
-          <p className="wizard-hint">
-            This is the only place SpinZero is registered with an assistant. A review you
-            start from <em>Run a review</em> uses the same connection, so if the steps below
-            are not done, that button cannot work either.
-          </p>
-
           {loadError && <p className="wizard-hint err">Could not read this machine's setup: {loadError}</p>}
-
-          {setup?.server_problem && (
-            <>
-              <div className="wizard-label">The review server is missing</div>
-              <p className="wizard-hint err">{setup.server_problem}</p>
-            </>
-          )}
+          {setup?.server_problem && <p className="wizard-hint err">{setup.server_problem}</p>}
 
           {setup && (
             <>
-              <div className="wizard-label">Step 1 — your licence key</div>
-              {setup.licence_present ? (
-                <p className="wizard-hint">
-                  A key is saved in <code>{setup.licence_file}</code>. Every assistant reads it
-                  from there, so nothing below carries it. Paste a new one to replace it — the
-                  old one is kept, commented out, in case you need it back.
-                </p>
-              ) : (
-                <p className="wizard-hint">
-                  Without a key a review has almost no evidence to work from: no distributor
-                  data, no datasheets. It is saved to <code>{setup.licence_file}</code> and read
-                  from there by every assistant you connect.
-                </p>
-              )}
-              <label className="review-field">
-                <span>Licence key</span>
+              <div className="wizard-label connect-step">
+                <span className="connect-num">1</span>
+                Licence key
+                {setup.licence_present && (
+                  <span className="connect-ok" title="A key is saved" aria-label="A key is saved">
+                    <IconCheck size={13} />
+                  </span>
+                )}
+                <Info text={`Saved in ${setup.licence_file}. Every assistant reads it from there.`} />
+              </div>
+              <div className="connect-row">
                 <input
                   className="wizard-input"
                   // A secret, on screen, during every screen share of somebody's first
                   // setup.
                   type="password"
+                  aria-label="Licence key"
                   value={key}
                   spellCheck={false}
-                  placeholder={setup.licence_present ? "(a key is saved)" : "sz_…"}
+                  placeholder={setup.licence_present ? "Saved. Paste a new key to replace it." : "sz_…"}
                   onChange={(e) => setKey(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && key.trim() && !savingKey) void saveKey();
+                  }}
                 />
-              </label>
-              <button className="btn-ghost" disabled={savingKey || !key.trim()} onClick={() => void saveKey()}>
-                {savingKey ? "Saving…" : setup.licence_present ? "Replace the key" : "Save the key"}
-              </button>
+                <button className="btn-ghost" disabled={savingKey || !key.trim()} onClick={() => void saveKey()}>
+                  {savingKey ? "Saving…" : "Save"}
+                </button>
+              </div>
 
-              <div className="wizard-label">Step 2 — your assistant</div>
-              <p className="wizard-hint">
-                SpinZero never edits another program's settings file. Where your assistant has
-                its own command, we run that and it edits its own config. Where it does not,
-                copy the block into the file named beside it.
-              </p>
-
+              <div className="wizard-label connect-step">
+                <span className="connect-num">2</span>
+                Assistant
+                <Info text={CLIENTS} />
+              </div>
               <ul className="connect-clients">
-                {setup.clients.map((client) => (
-                  <li key={client.id} className="connect-client">
-                    <div className="connect-client-head">
-                      <span className="connect-client-name">
-                        {client.label}
-                        {!client.installed && <span className="connect-absent"> · not found here</span>}
-                      </span>
-                      {client.how === "command" ? (
+                {setup.clients.map((client) => {
+                  const text =
+                    client.how === "command"
+                      ? client.command
+                      : jsonBlockFor(client.config_key, setup.server_command);
+                  const open = shown === client.id && ready;
+                  const toggle = client.how === "command" ? "Show the command" : "Show the config";
+                  const connected = client.connected || joined.has(client.id);
+                  const connecting = busy === client.id;
+                  return (
+                    <li key={client.id} className="connect-client">
+                      <div className="connect-client-head">
+                        <span
+                          className={`connect-client-name${client.installed ? "" : " absent"}`}
+                          title={client.installed ? undefined : "Not found on this machine"}
+                        >
+                          {client.label}
+                          {connected && (
+                            <span className="connect-ok" title="Connected" aria-label="Connected">
+                              <IconCheck size={13} />
+                            </span>
+                          )}
+                        </span>
                         <span className="connect-actions">
+                          {client.how === "command" && !connected && (
+                            <button
+                              className="btn-ghost connect-go"
+                              disabled={!ready || busy !== ""}
+                              aria-busy={connecting}
+                              onClick={() => void register(client)}
+                            >
+                              {connecting && <span className="connect-spin" aria-hidden />}
+                              {connecting ? "Connecting…" : "Connect"}
+                            </button>
+                          )}
                           <button
-                            className="btn-ghost"
-                            disabled={!ready || busy === client.id}
-                            onClick={() => void register(client)}
-                          >
-                            {busy === client.id ? "Connecting…" : "Connect"}
-                          </button>
-                          <button
-                            className="btn-ghost"
+                            className={`btn-ghost connect-toggle${open ? " on" : ""}`}
+                            disabled={!ready}
+                            title={toggle}
+                            aria-label={toggle}
+                            aria-expanded={open}
                             onClick={() => setShown(shown === client.id ? null : client.id)}
                           >
-                            {shown === client.id ? "Hide command" : "Show command"}
+                            {"</>"}
                           </button>
                         </span>
-                      ) : (
-                        <button
-                          className="btn-ghost"
-                          disabled={!ready}
-                          onClick={() => setShown(shown === client.id ? null : client.id)}
-                        >
-                          {shown === client.id ? "Hide block" : "Show block"}
-                        </button>
-                      )}
-                    </div>
+                      </div>
 
-                    {shown === client.id && ready && setup && (
-                      <>
-                        <pre className="connect-block">
-                          {client.how === "command"
-                            ? client.command
-                            : jsonBlockFor(client.config_key, setup.server_command)}
-                        </pre>
-                        {client.how === "config_file" && (
-                          <p className="wizard-hint">
-                            Goes in <code>{client.config_path}</code>. Restart {client.label}
-                            {" "}afterwards — it reads that file only at startup.
-                          </p>
-                        )}
-                        <button
-                          className="btn-ghost"
-                          onClick={() =>
-                            void copy(
-                              client.how === "command"
-                                ? client.command
-                                : jsonBlockFor(client.config_key, setup.server_command),
-                              client.how === "command" ? "Command" : "Config",
-                            )
-                          }
-                        >
-                          <IconCopy size={13} /> Copy
-                        </button>
-                      </>
-                    )}
-                  </li>
-                ))}
+                      {open && (
+                        <>
+                          <CopyBlock text={text} onCopy={() => void copy(text, client.how === "command" ? "Command" : "Config")} />
+                          {client.how === "config_file" && (
+                            <div className="connect-path">
+                              <code>{client.config_path}</code>
+                              <Info text={`Paste the block into this file, then restart ${client.label}.`} />
+                            </div>
+                          )}
+                        </>
+                      )}
+                    </li>
+                  );
+                })}
               </ul>
 
-              <div className="wizard-label">Step 3 — ask for a review</div>
-              <p className="wizard-hint">
-                In your assistant, say <em>run a {SERVER_NAME} review of this board</em> and point
-                it at your KiCad project folder. It will ask you two questions — what the board
-                is for, and whether we read your BOM columns right — and then work through the
-                review on its own.
-              </p>
-              <p className="wizard-hint">
-                Or press <em>Run a review</em> in SpinZero. It starts the same assistant with
-                both of those answers already filled in, and shows the progress here.
-              </p>
             </>
           )}
-
-          <div className="wizard-label">What leaves this machine</div>
-          <p className="wizard-hint">
-            Manufacturer part numbers, for distributor and datasheet lookups. Not your schematic,
-            BOM or layout. Note what that does not say: the rows your assistant reasons over go to{" "}
-            <em>your</em> model provider, because your assistant is the one doing the reasoning —
-            that is your subscription and their terms, not ours.
-          </p>
-          <p className="wizard-hint">
-            Improvement telemetry is on. It sends rule ids, severities and part numbers for
-            findings and dismissed rule candidates, plus which datasheets we failed to fetch —
-            never designators, titles, evidence, file paths, project names or your licence key.
-            Set <code>SPINZERO_TELEMETRY=0</code> in the server's environment to switch it off.
-          </p>
         </div>
 
         <div className="wizard-actions">
@@ -289,6 +250,35 @@ export function ConnectAssistant({ onClose }: { onClose: () => void }) {
           </button>
         </div>
       </div>
+    </div>
+  );
+}
+
+const PRIVACY =
+  "Only part numbers leave this machine, for distributor and datasheet lookups. " +
+  "Your assistant's model provider sees what your assistant reads.";
+
+const CLIENTS =
+  "SpinZero never edits another program's settings. Connect runs your assistant's own " +
+  "command. Where there is no command, copy the config into the file it names.";
+
+/** An info icon. Its text shows on hover. */
+function Info({ text }: { text: string }) {
+  return (
+    <span className="setup-info" title={text} aria-label={text} role="img">
+      <IconInfo size={13} />
+    </span>
+  );
+}
+
+/** Text the user pastes somewhere else, with a copy button in its corner. */
+function CopyBlock({ text, onCopy }: { text: string; onCopy: () => void }) {
+  return (
+    <div className="connect-block-wrap">
+      <pre className="connect-block">{text}</pre>
+      <button className="connect-copy" title="Copy" aria-label="Copy" onClick={onCopy}>
+        <IconCopy size={13} />
+      </button>
     </div>
   );
 }

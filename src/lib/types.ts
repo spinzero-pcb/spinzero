@@ -463,6 +463,9 @@ export interface AssistantClient {
   /** `mcpServers` for almost everyone, `servers` for VS Code. Getting this wrong makes
    *  the client ignore the block without an error. */
   config_key: string;
+  /** Its own config already lists SpinZero. Read, never written; a hint, not a check
+   *  that the server starts. */
+  connected: boolean;
 }
 
 export interface AssistantSetup {

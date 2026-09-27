@@ -131,6 +131,12 @@ export const ipc = {
    *  BOM). Writing it at all is what stops the dialog interrupting the next review. */
   setBomMapping: (overrides: Record<string, string>) =>
     invoke<void>("set_bom_mapping", { overrides }),
+  /** The review setup window (`SpinZero --setup <dir>`): the question an MCP review
+   *  server wrote, untyped — parse it with `parseSetupRequest`. */
+  setupRequest: () => invoke<unknown>("setup_request"),
+  /** Save the user's answer for the review server. `mapping` holds only changed fields. */
+  setupSubmit: (profile: string | null, mapping: Record<string, string>) =>
+    invoke<void>("setup_submit", { profile, mapping }),
   /** A findings.json from outside, ingested through the SAME path as the free check
    *  so fingerprints reconcile against the existing comments. */
   ingestFindings: (doc: FindingsDoc) => invoke<CheckOutcome>("ingest_findings", { doc }),
@@ -159,6 +165,8 @@ export const ipc = {
   /** Everything the "Connect your AI assistant" screen needs: where the server is,
    *  where the licence file is, and which assistants this machine has. */
   assistantSetup: () => invoke<AssistantSetup>("assistant_setup"),
+  /** The assistants whose own config lists SpinZero. Reads files, spawns nothing. */
+  assistantConnected: () => invoke<string[]>("assistant_connected"),
   /** Run one client's own `mcp add`. We never edit its config file ourselves. */
   registerAssistant: (clientId: string) =>
     invoke<RegisterOutcome>("register_assistant", { clientId }),

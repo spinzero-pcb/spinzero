@@ -141,6 +141,9 @@ export interface Execution {
   /** "builtin/<hash>" or "pack/<version>". */
   prompt_pack?: string;
   rule_pack?: string;
+  /** Which server build ran: "dev/<commit>" from source, "release/<version>+<commit>"
+   *  from the installer. */
+  build?: string;
   /** True when the datasheet coverage gate was deliberately overridden. */
   allow_low_coverage?: boolean;
 }
@@ -302,6 +305,7 @@ export function executionSummary(
     e.model_reported ? `Model: ${e.model_reported} (as reported by the client)` : "",
     e.prompt_pack ? `Prompts: ${e.prompt_pack}` : "",
     e.rule_pack ? `Rules: ${e.rule_pack}` : "",
+    e.build ? `Build: ${e.build}` : "",
     e.allow_low_coverage
       ? "Datasheet coverage gate was overridden for this run, so parts were judged without their datasheets."
       : "",

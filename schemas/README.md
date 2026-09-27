@@ -13,6 +13,7 @@ repos consume them rather than each defining their own shape.
 | `findings-1.0.json` | The retired five-level severity / four-level confidence version. No producer emits it; kept so a document already sitting in a project's review inbox still reads. |
 | `bundle-1.0.json` | The review bundle — every file a detailed review may upload, and by omission everything it may not. |
 | `mcp-tools-1.0.json` | The MCP harness's tool surface: what a customer's own agent may call, in what order, and how a refusal is phrased. |
+| `mcp-setup-1.0.json` | The two files behind `SpinZero --setup <dir>`: the review setup an MCP review server asks the user to confirm, and the answer the app writes back. |
 
 ## Consumers
 

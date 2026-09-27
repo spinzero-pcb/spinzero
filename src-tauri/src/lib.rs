@@ -16,6 +16,7 @@ mod reviews;
 mod assistant;
 mod findings;
 mod bomrules;
+mod setupwin;
 mod sidecar;
 mod telemetry;
 mod util;
@@ -1304,14 +1305,28 @@ fn agent_review_status(state: State<AppState>) -> Option<mcpstatus::RunStatus> {
 // We never edit another product's config file. Where a client has its own `mcp add`
 // we run that; where it does not, the user pastes a block. See assistant.rs.
 
+// Both spawn other programs (`claude --version`, `claude mcp add`) and wait for them.
+// A sync command runs on the main thread, which froze the whole window while they ran.
+// So both are async and do the work on a blocking thread.
 #[tauri::command]
-fn assistant_setup() -> assistant::AssistantSetup {
-    assistant::setup()
+async fn assistant_setup() -> Result<assistant::AssistantSetup, String> {
+    tauri::async_runtime::spawn_blocking(assistant::setup)
+        .await
+        .map_err(|e| format!("setup check failed: {e}"))
 }
 
 #[tauri::command]
-fn register_assistant(client_id: String) -> Result<assistant::RegisterOutcome, String> {
-    assistant::register(&client_id)
+async fn assistant_connected() -> Vec<String> {
+    tauri::async_runtime::spawn_blocking(assistant::connected_clients)
+        .await
+        .unwrap_or_default()
+}
+
+#[tauri::command]
+async fn register_assistant(client_id: String) -> Result<assistant::RegisterOutcome, String> {
+    tauri::async_runtime::spawn_blocking(move || assistant::register(&client_id))
+        .await
+        .map_err(|e| format!("registration failed: {e}"))?
 }
 
 #[tauri::command]
@@ -1444,6 +1459,27 @@ fn set_settings(app: AppHandle, settings: serde_json::Value) -> Result<(), Strin
 
 // ------------------------------------------------------------ external links
 
+/// The setup window's question. Errors when this process is not a setup window.
+#[tauri::command]
+fn setup_request(mode: State<setupwin::SetupMode>) -> Result<serde_json::Value, String> {
+    let dir = mode.0.as_ref().ok_or("this window was not opened for a review setup")?;
+    setupwin::read_request(dir)
+}
+
+/// Save what the user confirmed in the setup window. `mapping` holds only the fields
+/// they changed. The window closes itself once this returns.
+#[tauri::command]
+fn setup_submit(
+    mode: State<setupwin::SetupMode>,
+    profile: Option<String>,
+    mapping: BTreeMap<String, String>,
+) -> Result<(), String> {
+    let dir = mode.0.as_ref().ok_or("this window was not opened for a review setup")?;
+    setupwin::write_answer(dir, profile.as_deref(), &mapping).inspect_err(|e| log::error!("review setup: {e}"))?;
+    log::info!("review setup confirmed: {} field(s) changed", mapping.len());
+    Ok(())
+}
+
 /// Open an http(s) URL in the user's default browser — the About dialog's link to
 /// the public releases repo (README / downloads / changelog). Tauri's webview
 /// won't open a bare `target="_blank"`, and a few lines beat pulling in a plugin
@@ -1538,6 +1574,11 @@ pub fn run() {
     // inert unless PCBREVIEW_SENTRY_DSN is set. See telemetry.rs.
     let _sentry_guard = telemetry::init();
 
+    // `--setup <dir>`: an MCP review server asking the user to confirm a review's
+    // setup. This process then shows only that window. See setupwin.rs.
+    let setup_dir = setupwin::dir_from_args(std::env::args());
+    let setup_mode = setup_dir.is_some();
+
     // `mut` is only exercised by the debug-only plugin block below.
     #[allow(unused_mut)]
     let mut builder = tauri::Builder::default();
@@ -1570,6 +1611,7 @@ pub fn run() {
     let app = builder
         .plugin(tauri_plugin_dialog::init())
         .manage(AppState::default())
+        .manage(setupwin::SetupMode(setup_dir))
         .setup(move |app| {
             // Logging: official Tauri plugin → rotating file `<app_log_dir>/spinzero.log`
             // plus a stdout mirror for `cargo tauri dev`. All code logs via `log::*`.
@@ -1599,6 +1641,22 @@ pub fn run() {
             // CWD-relative path resolution fail with "os error 3" (the updater check and
             // extraction included). Pin it to a valid directory now, before either runs.
             ensure_valid_cwd();
+            // The main window is `create: false` in tauri.conf.json, so exactly one of
+            // the two windows is built here.
+            if setup_mode {
+                log::info!("starting as the review setup window");
+                tauri::WebviewWindowBuilder::new(app, "setup", tauri::WebviewUrl::App("index.html?setup=1".into()))
+                    .title("SpinZero · Review setup")
+                    .inner_size(760.0, 860.0)
+                    .min_inner_size(560.0, 480.0)
+                    .theme(Some(tauri::Theme::Dark))
+                    .focused(true)
+                    .always_on_top(true)
+                    .center()
+                    .build()?;
+            } else if let Some(cfg) = app.config().app.windows.iter().find(|w| w.label == "main") {
+                tauri::WebviewWindowBuilder::from_config(app, cfg)?.build()?;
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -1651,6 +1709,7 @@ pub fn run() {
             agent_review_status,
             assistant_setup,
             register_assistant,
+            assistant_connected,
             set_licence_key,
             get_review_author,
             list_comments,
@@ -1666,6 +1725,8 @@ pub fn run() {
             log_frontend_warn,
             get_telemetry_info,
             set_telemetry_enabled,
+            setup_request,
+            setup_submit,
         ])
         .build(tauri::generate_context!())
         .unwrap_or_else(|e| {
@@ -1676,12 +1737,17 @@ pub fn run() {
             std::process::exit(1);
         });
 
-    app.run(|_handle, event| {
+    app.run(move |_handle, event| {
         // The event loop may terminate the process without unwinding, so ship
         // the usage summary + flush pending telemetry on the Exit event rather
         // than trusting the Sentry guard's drop.
+        // Not from the setup window: it runs beside the main app, and its exit would
+        // write back the counters it loaded at start over the ones the main app has
+        // saved since.
         if let tauri::RunEvent::Exit = event {
-            telemetry::on_exit();
+            if !setup_mode {
+                telemetry::on_exit();
+            }
         }
     });
 }

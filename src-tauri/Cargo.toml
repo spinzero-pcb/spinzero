@@ -1,6 +1,6 @@
 [package]
 name = "spinzero"
-version = "0.0.5"
+version = "0.0.6"
 description = "SpinZero — local-first PCB design review"
 edition = "2021"
 license = "LicenseRef-SpinZero-Proprietary"

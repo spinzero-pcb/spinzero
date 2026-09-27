@@ -11,6 +11,8 @@
   "app": {
     "windows": [
       {
+        "label": "main",
+        "create": false,
         "title": "SpinZero",
         "width": 1440,
         "height": 920,
