@@ -167,7 +167,17 @@ async function main() {
     const items = await evj(
       "[...document.querySelectorAll('[role=menuitem],button')].map(b=>b.textContent.trim())",
     );
-    for (const want of ["New Project", "Open Project", "Privacy"])
+    for (const want of ["New Project", "Open Project"])
+      assert(items.some((t) => t.includes(want)), `menu missing "${want}"`);
+    await key("Escape");
+  });
+  await test("J6 Help menu lists Data Privacy", async () => {
+    await ev("[...document.querySelectorAll('button')].find(b=>b.textContent.trim()==='Help')?.click()");
+    await sleep(300);
+    const items = await evj(
+      "[...document.querySelectorAll('[role=menuitem],button')].map(b=>b.textContent.trim())",
+    );
+    for (const want of ["Keyboard Shortcuts", "About SpinZero", "Data Privacy"])
       assert(items.some((t) => t.includes(want)), `menu missing "${want}"`);
     await key("Escape");
   });
