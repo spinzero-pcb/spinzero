@@ -1,38 +1,54 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { isAgentRunning, useAgentReviewStore } from "../../stores/agentReviewStore";
-import { useBomCheckStore } from "../../stores/bomCheckStore";
-import { useBomMappingStore } from "../../stores/bomMappingStore";
+import { useBomCheckStore, type BomDepth } from "../../stores/bomCheckStore";
+import { effectiveColumn, useBomMappingStore } from "../../stores/bomMappingStore";
 import { useProjectStore } from "../../stores/projectStore";
 import { useRunLauncherStore } from "../../stores/runLauncherStore";
 import { useSettingsStore } from "../../stores/settingsStore";
-import type { MappingView } from "../../lib/findings";
 import type { AgentProfile } from "../../lib/types";
 import { DEFAULT_AGENT_PROFILE, missingFromAgent } from "../../lib/agentProfiles";
+import { bomFieldLabel, bomFieldRank } from "../../lib/bomFields";
 import { formatArgs, parseArgs } from "../../lib/mcpConfig";
 import { bomProfileForClass, isProjectClass, PROJECT_CLASSES } from "../../lib/projectClass";
 import { ipc } from "../../lib/ipc";
-import { bomFieldLabel, bomFieldRank } from "../BomMappingDialog";
-import { IconInfo, IconPremium } from "../icons";
+import { IconCheck, IconChevron, IconInfo, IconPremium, IconRefresh } from "../icons";
 
-// The BOM review's setup sheet — the ONE place a BOM review is set up and started.
+// The BOM review window — the ONE place a BOM review is set up and started.
 //
-// It used to ask WHERE the review runs, because there were two answers: a hosted
-// service, or the user's own agent. The hosted tier is gone, so the question is gone
-// with it, and what is left is which agent — a different question, and one the sheet
-// only has to answer once.
+// Everything is on this one sheet, in the order it is decided: end application, the
+// column mapping (edited in place — there is no second dialog), depth, and for a
+// detailed review which assistant runs it. Pressing Run saves the mapping (that IS
+// the approval) and starts the review. Explanations are tooltips, not paragraphs.
+//
+// **Which assistant.** One button per assistant that is connected (its own config
+// lists SpinZero), so the choice is visible and one click. The program and arguments
+// SpinZero starts are behind the `</>` button: a default that works needs no editing,
+// and the rare user who does need it finds it where the other screens put commands.
 //
 // The end application is `project.class`, not a second setting — see lib/projectClass.
 
-/** Short, non-verbose, and the whole promise. Deliberately says nothing about file
- *  names or sizes: the user is being asked to trust a boundary, not to audit one. */
 const PRIVACY_AGENT =
-  "The review runs on this machine. Only part numbers are looked up online — " +
-  "your BOM, schematic and layout never leave the computer.";
+  "Runs on this machine with your own AI assistant, on your subscription. Only part " +
+  "numbers are looked up online. The assistant runs with its own permissions.";
+
+const DEPTH_HINT: Record<BomDepth, string> = {
+  quick: "Rule checks · a few seconds · runs locally",
+  detailed: "Every part checked against its datasheet · about 10 minutes",
+};
+
+/** Which assistant (a Connect screen client) drives which agent profile. Only these
+ *  can be started by the app: the others (Claude Desktop, VS Code, Windsurf) have no
+ *  command line to start. */
+const CLIENT_FOR_PROFILE: Record<string, string> = {
+  "claude-code": "claude-code",
+  "codex-cli": "codex",
+  "gemini-cli": "gemini",
+  "cursor-cli": "cursor",
+};
 
 export function BomReviewSetup() {
   const setupFor = useRunLauncherStore((s) => s.setupFor);
   const closeSetup = useRunLauncherStore((s) => s.closeSetup);
-  const openConnect = useRunLauncherStore((s) => s.openConnect);
 
   const project = useProjectStore((s) => s.project);
   const setClass = useProjectStore((s) => s.setClass);
@@ -43,102 +59,91 @@ export function BomReviewSetup() {
   const running = useBomCheckStore((s) => s.running);
   const run = useBomCheckStore((s) => s.run);
 
-  const openMapping = useBomMappingStore((s) => s.openDialog);
+  const loadMapping = useBomMappingStore((s) => s.load);
+  const saveMapping = useBomMappingStore((s) => s.save);
+  const resetMapping = useBomMappingStore((s) => s.reset);
+  const mapping = useBomMappingStore((s) => s.view);
+  const mapError = useBomMappingStore((s) => s.error);
+  const saving = useBomMappingStore((s) => s.saving);
 
   const agent = useSettingsStore((s) => s.agentProfile) ?? DEFAULT_AGENT_PROFILE;
-  const serverConfigured = useSettingsStore((s) => s.agentReview !== null);
   const agentPhase = useAgentReviewStore((s) => s.phase);
   const agentError = useAgentReviewStore((s) => s.error);
   const startAgent = useAgentReviewStore((s) => s.start);
-  const clearError = useAgentReviewStore((s) => s.clearError);
+  const clearAgentError = useAgentReviewStore((s) => s.clearError);
 
   const open = setupFor === "bom";
-
-  // The mapping itself, read-only — the sheet SHOWS what the review will read instead
-  // of hiding it behind a button that opens somewhere else.
-  const [mapping, setMapping] = useState<MappingView | null>(null);
-  const [mapErr, setMapErr] = useState(false);
   const profile = bomProfileForClass(cls);
 
+  // Read on open and whenever the end application changes. Edits survive the latter
+  // (they are keyed by field) and are dropped on close.
   useEffect(() => {
-    if (!open) return;
-    let alive = true;
-    setMapping(null);
-    setMapErr(false);
-    ipc
-      .getBomMapping(profile)
-      .then((v) => alive && setMapping(v))
-      .catch(() => alive && setMapErr(true));
-    return () => {
-      alive = false;
-    };
-  }, [open, profile]);
+    if (open) void loadMapping(profile);
+  }, [open, profile, loadMapping]);
+  useEffect(() => {
+    if (!open) resetMapping();
+  }, [open, resetMapping]);
 
+  // A verdict from a previous press is not a verdict on this one.
+  useEffect(() => {
+    if (open) clearAgentError();
+  }, [open, clearAgentError]);
+
+  const detailedBusy = isAgentRunning(agentPhase);
+  const busy = running || detailedBusy || saving;
+  const missing = missingFromAgent(agent);
+  const blocked = depth === "detailed" && missing.length > 0;
+
+  async function start() {
+    if (busy || blocked) return;
+    clearAgentError();
+    // Run is the approval: persist the mapping the user is looking at, edits and all.
+    if (!(await saveMapping())) return;
+    closeSetup();
+    // Either way the status bar carries the run from here.
+    void (depth === "detailed" ? startAgent() : run());
+  }
+
+  // Re-bound every render so Ctrl+Enter always runs with the current choices.
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => {
+      // The Connect screen sits on top of this window and handles its own keys.
+      if (useRunLauncherStore.getState().connectOpen) return;
       if (e.key === "Escape") {
         e.stopPropagation();
         closeSetup();
+      } else if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+        e.preventDefault();
+        void start();
       }
     };
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
-  }, [open, closeSetup]);
-
-  // A verdict from a previous press is not a verdict on this one.
-  useEffect(() => {
-    if (open) clearError();
-  }, [open, clearError]);
+  });
 
   if (!open) return null;
 
-  const detailedBusy = isAgentRunning(agentPhase);
-  const busy = running || detailedBusy;
-  const fields = mapping
-    ? [...mapping.fields].sort(
-        (a, b) => bomFieldRank(a.logical) - bomFieldRank(b.logical) || a.logical.localeCompare(b.logical),
-      )
-    : [];
-  const missing = missingFromAgent(agent);
-
-  function start() {
-    clearError();
-    if (depth !== "detailed") {
-      closeSetup();
-      void run();
-      return;
-    }
-    // The agent runs in its own process and reports through `agent-event`, so there is
-    // no in-sheet phase to wait on: close and let the status bar carry it.
-    closeSetup();
-    void startAgent();
-  }
+  // One error line, for whichever step the last press failed at.
+  const error = mapError && mapping ? mapError : depth === "detailed" ? agentError : null;
 
   return (
-    <div
-      className="wizard-overlay"
-      onPointerDown={(e) => e.target === e.currentTarget && closeSetup()}
-    >
+    <div className="wizard-overlay" onPointerDown={(e) => e.target === e.currentTarget && closeSetup()}>
       <div className="wizard-card review-setup" role="dialog" aria-label="BOM review">
         <div className="wizard-head">
-          <div>
-            <div className="wizard-title">BOM Review</div>
-            <div className="wizard-step">
-              {mapping
-                ? `${mapping.row_count} lines · ${mapping.columns.length} columns`
-                : mapErr
-                  ? "No BOM extracted yet"
-                  : "Reading the BOM…"}
+          <div className="wizard-title">BOM Review</div>
+          {mapping && (
+            <div className="wizard-step rs-meta">
+              {mapping.row_count} lines · {mapping.columns.length} columns
             </div>
-          </div>
+          )}
         </div>
 
         <div className="wizard-body">
-          <div className="setup-app">
-            <span className="setup-app-label">End application</span>
+          <div className="rs-row">
+            <span className="rs-label">Application</span>
             <select
-              className="rv-select setup-app-select"
+              className="rv-select"
               value={cls}
               disabled={busy}
               title="Decides which rules apply and how severe a gap is"
@@ -152,118 +157,48 @@ export function BomReviewSetup() {
             </select>
           </div>
 
-          <div className="setup-section">
-            Column mapping
-            <button
-              className="btn-ghost setup-section-act"
-              disabled={!mapping || busy}
-              onClick={() => void openMapping(profile)}
-            >
-              Edit…
-            </button>
+          <MappingSection disabled={busy} />
+
+          <div className="rs-row">
+            <span className="rs-label">Depth</span>
+            <div className="rs-seg" role="radiogroup" aria-label="Depth">
+              <SegButton on={depth === "quick"} disabled={busy} onClick={() => setDepth("quick")}>
+                Instant
+              </SegButton>
+              <SegButton on={depth === "detailed"} disabled={busy} onClick={() => setDepth("detailed")}>
+                Detailed
+                <span className="badge-premium" title="Premium review" aria-label="Premium review">
+                  <IconPremium size={12} />
+                </span>
+              </SegButton>
+            </div>
           </div>
-          {mapErr ? (
-            <p className="wizard-hint">Can’t read the BOM yet — extract the design first.</p>
-          ) : !mapping ? (
-            <p className="wizard-hint">…</p>
-          ) : (
-            <ul className="setup-map">
-              {fields.map((f) => (
-                <li key={f.logical} className={`setup-map-row ${f.column ? "" : "unmapped"}`}>
-                  <span className="setup-map-field">{bomFieldLabel(f.logical)}</span>
-                  <span className="setup-map-col">{f.column || "not in this BOM"}</span>
-                </li>
-              ))}
-            </ul>
-          )}
+          <div className="rs-row rs-row-sub">
+            <span />
+            <span className="rs-hint">{DEPTH_HINT[depth]}</span>
+          </div>
 
-          <div className="setup-section">Depth</div>
-          <label className={`setup-depth ${depth === "quick" ? "on" : ""}`}>
-            <input
-              type="radio"
-              name="bom-depth"
-              checked={depth === "quick"}
-              disabled={busy}
-              onChange={() => setDepth("quick")}
-            />
-            <span className="setup-depth-name">Instant Check</span>
-          </label>
-          <label className={`setup-depth ${depth === "detailed" ? "on" : ""}`}>
-            <input
-              type="radio"
-              name="bom-depth"
-              checked={depth === "detailed"}
-              disabled={busy}
-              onChange={() => setDepth("detailed")}
-            />
-            <span className="setup-depth-name">
-              Detailed Review
-              <span className="badge-premium" title="Premium review" aria-label="Premium review">
-                <IconPremium size={12} />
-              </span>
-            </span>
-            <span className="setup-depth-what">
-              Find the deepest errors in your BOM, backed by the datasheets.
-              <button
-                type="button"
-                className="setup-info"
-                title={PRIVACY_AGENT}
-                aria-label={PRIVACY_AGENT}
-                onClick={(e) => e.preventDefault()}
-              >
-                <IconInfo size={13} />
-              </button>
-            </span>
-          </label>
+          {depth === "detailed" && <AgentRow busy={busy} />}
 
-          {depth === "detailed" && <AgentPicker busy={busy} />}
-
-          {/* Two things the user has to have done, and only one of them is ours to
-              check. Said plainly rather than left implied — see the setup screen. */}
-          {depth === "detailed" && !serverConfigured && (
-            <p className="wizard-hint">
-              Your agent has to know about SpinZero’s review server first.{" "}
-              <button className="btn-ghost setup-section-act" onClick={() => openConnect()}>
-                Connect your AI assistant
-              </button>
-            </p>
-          )}
-          {depth === "detailed" && (
-            <p className="wizard-hint">
-              SpinZero starts your agent and adds nothing to it. It runs with your own
-              permissions and can reach your other tools during the review, exactly as it
-              does when you use it yourself.
-            </p>
-          )}
-
-          {/* Readiness is checked on the button press, so this is where its verdict
-              belongs — beside the control the user just used, not in a toast. */}
-          {depth === "detailed" && agentError && (
-            <p className="wizard-hint setup-error">Couldn’t start: {agentError}</p>
-          )}
-          {/* The sheet is reachable while a review runs — you can read the mapping and
-              the depth it is running at. It just cannot start a second one, and saying
-              so beats a disabled button with no explanation. */}
-          {detailedBusy && (
-            <p className="wizard-hint">
-              A detailed review is running. Its progress is in the status bar; you can start
-              another when it finishes.
-            </p>
-          )}
+          {error && <p className="wizard-hint setup-error">{error}</p>}
 
           <div className="wizard-actions">
             <button className="btn-ghost" onClick={closeSetup}>
               Cancel
             </button>
-            {/* Two different disabled states, and conflating them was a small lie: a
-                run someone else already started is not this button "starting". */}
             <button
               className="btn-primary"
-              disabled={busy || (depth === "detailed" && missing.length > 0)}
-              title={missing.length ? `Fill in ${missing.join(", ")} first` : undefined}
-              onClick={start}
+              disabled={busy || blocked}
+              title={
+                detailedBusy
+                  ? "A detailed review is running — see the status bar"
+                  : blocked
+                    ? `Fill in ${missing.join(", ")} first`
+                    : "Ctrl+Enter"
+              }
+              onClick={() => void start()}
             >
-              {detailedBusy ? "Review running…" : running ? "Starting…" : "Run Review"}
+              {detailedBusy ? "Review running…" : running || saving ? "Starting…" : "Run review"}
             </button>
           </div>
         </div>
@@ -272,27 +207,167 @@ export function BomReviewSetup() {
   );
 }
 
+function SegButton({
+  on,
+  disabled,
+  onClick,
+  title,
+  children,
+}: {
+  on: boolean;
+  disabled: boolean;
+  onClick: () => void;
+  title?: string;
+  children: ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      role="radio"
+      aria-checked={on}
+      className={`rs-seg-btn ${on ? "on" : ""}`}
+      disabled={disabled}
+      title={title}
+      onClick={onClick}
+    >
+      {children}
+    </button>
+  );
+}
+
 /**
- * Which agent runs the review.
- *
- * An agent is a command line program that drives a model and speaks MCP. SpinZero
- * starts it and adds no flags of its own, so the whole of the setting is: which
- * program, which arguments, and how it takes its prompt.
- *
- * A profile SpinZero has not run end to end is still offered, and says so. Leaving it
- * out would mean a user with Codex cannot start a review at all; presenting it as
- * tested would be a claim we have not earned. The fields are editable either way, so
- * a wrong guess is a line to correct rather than a dead end.
+ * The column mapping, edited in place. A one-line summary once approved; expanded the
+ * first time, so the name-matching guess is seen before a review reads it. A field
+ * nothing feeds reads downstream as "this data is missing", so those rows are coloured.
  */
-function AgentPicker({ busy }: { busy: boolean }) {
+function MappingSection({ disabled }: { disabled: boolean }) {
+  const view = useBomMappingStore((s) => s.view);
+  const loading = useBomMappingStore((s) => s.loading);
+  const error = useBomMappingStore((s) => s.error);
+  const draft = useBomMappingStore((s) => s.draft);
+  const expanded = useBomMappingStore((s) => s.expanded);
+  const setExpanded = useBomMappingStore((s) => s.setExpanded);
+  const setField = useBomMappingStore((s) => s.setField);
+  const resetField = useBomMappingStore((s) => s.resetField);
+
+  if (!view) {
+    return (
+      <div className="rs-row">
+        <span className="rs-label">Columns</span>
+        <span className="rs-hint">
+          {loading ? "Reading the BOM…" : error ? "No BOM yet — the design has not been extracted." : ""}
+        </span>
+      </div>
+    );
+  }
+
+  const fields = [...view.fields].sort(
+    (a, b) => bomFieldRank(a.logical) - bomFieldRank(b.logical) || a.logical.localeCompare(b.logical),
+  );
+  const samples = new Map(view.columns.map((c) => [c.name, c.sample]));
+  const missing = fields.filter((f) => !effectiveColumn(view, draft, f.logical)).length;
+  const edits = fields.filter((f) => effectiveColumn(view, draft, f.logical) !== f.column).length;
+  // Recomputed against the draft: assigning a column must stop it being listed as
+  // unused in the same breath.
+  const claimed = new Set(fields.map((f) => effectiveColumn(view, draft, f.logical)));
+  const unused = view.unmapped_columns.map((u) => u.column).filter((c) => !claimed.has(c));
+
+  return (
+    <div className="rs-map">
+      <button
+        type="button"
+        className="rs-row rs-map-toggle"
+        aria-expanded={expanded}
+        onClick={() => setExpanded(!expanded)}
+      >
+        <span className="rs-label">Columns</span>
+        <span className="rs-map-summary">
+          <span>
+            {fields.length - missing} of {fields.length} matched
+          </span>
+          {missing > 0 && <span className="rs-map-missing">{missing} not found</span>}
+          {edits > 0 && <span className="rs-map-edited">{edits} edited</span>}
+          <span className={`rs-map-chev ${expanded ? "open" : ""}`}>
+            <IconChevron size={12} />
+          </span>
+        </span>
+      </button>
+
+      {expanded && (
+        <>
+          <div className="rs-map-table" role="table" aria-label="Column mapping">
+            {fields.map((f) => {
+              const col = effectiveColumn(view, draft, f.logical);
+              // Diverging from the alias guess — whether edited now or approved long ago.
+              const changed = col !== f.auto;
+              const sample = col ? (samples.get(col) ?? "") : "";
+              const label = bomFieldLabel(f.logical);
+              return (
+                <div className={`rs-map-row ${col ? "" : "missing"}`} key={f.logical} role="row">
+                  <span className="rs-map-field" title={label}>
+                    {label}
+                  </span>
+                  <select
+                    className="bom-select rs-map-pick"
+                    value={col}
+                    disabled={disabled}
+                    aria-label={`Column for ${label}`}
+                    onChange={(e) => setField(f.logical, e.target.value)}
+                  >
+                    <option value="">Not in BOM</option>
+                    {view.columns.map((c) => (
+                      <option key={c.name} value={c.name}>
+                        {c.name}
+                      </option>
+                    ))}
+                  </select>
+                  <span className="rs-map-sample" title={sample}>
+                    {sample}
+                  </span>
+                  {changed ? (
+                    <button
+                      type="button"
+                      className="btn-ghost rs-map-reset"
+                      disabled={disabled}
+                      title={f.auto ? `Reset to ${f.auto}` : "Reset to not in BOM"}
+                      aria-label={`Reset ${label}`}
+                      onClick={() => resetField(f.logical)}
+                    >
+                      <IconRefresh size={12} />
+                    </button>
+                  ) : (
+                    <span />
+                  )}
+                </div>
+              );
+            })}
+          </div>
+          {unused.length > 0 && (
+            <p className="rs-hint rs-map-unused" title={unused.join(", ")}>
+              Unused columns: {unused.join(", ")}
+            </p>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Which assistant runs the detailed review: one button per connected assistant, plus
+ * the saved choice if it is not among them (so the current state is always visible).
+ * Nothing connected → one button that opens the Connect screen.
+ */
+function AgentRow({ busy }: { busy: boolean }) {
   const saved = useSettingsStore((s) => s.agentProfile);
   const setAgentProfile = useSettingsStore((s) => s.setAgentProfile);
+  const openConnect = useRunLauncherStore((s) => s.openConnect);
+  const connectOpen = useRunLauncherStore((s) => s.connectOpen);
   const current = saved ?? DEFAULT_AGENT_PROFILE;
 
   const [shipped, setShipped] = useState<AgentProfile[]>([]);
+  const [connected, setConnected] = useState<Set<string> | null>(null);
   const [edit, setEdit] = useState(false);
-  const [bin, setBin] = useState(current.bin);
-  const [args, setArgs] = useState(formatArgs(current.args));
 
   useEffect(() => {
     let alive = true;
@@ -301,93 +376,144 @@ function AgentPicker({ busy }: { busy: boolean }) {
       .then((list) => alive && setShipped(list))
       .catch(() => {
         // The backend not answering leaves the saved profile in place, which is the
-        // one that matters. Nothing to tell the user.
+        // one that matters.
       });
     return () => {
       alive = false;
     };
   }, []);
 
-  // The saved profile may not be in the shipped list (a hand-written one), so it is
-  // offered alongside rather than silently replaced by the nearest match.
-  const options = shipped.length ? shipped : [DEFAULT_AGENT_PROFILE];
-  const known = options.some((p) => p.id === current.id);
+  // Re-read when the Connect screen closes: the user may just have connected one.
+  useEffect(() => {
+    if (connectOpen) return;
+    let alive = true;
+    ipc
+      .assistantConnected()
+      .then((list) => alive && setConnected(new Set(list.map((c) => c.id))))
+      .catch(() => alive && setConnected(new Set()));
+    return () => {
+      alive = false;
+    };
+  }, [connectOpen]);
 
-  function pick(id: string) {
-    const chosen = options.find((p) => p.id === id);
-    if (!chosen) return;
-    setBin(chosen.bin);
-    setArgs(formatArgs(chosen.args));
-    // A profile with nothing to run is not saved as the choice — it is the prompt to
-    // fill the fields in, so the editor opens instead.
-    setEdit(!chosen.bin.trim());
-    void setAgentProfile(chosen.bin.trim() ? chosen : { ...chosen, bin: "" });
-  }
+  const isConnected = (p: AgentProfile) => {
+    const client = CLIENT_FOR_PROFILE[p.id];
+    return Boolean(client && connected?.has(client));
+  };
+  const options = (shipped.length ? shipped : [DEFAULT_AGENT_PROFILE]).filter(
+    (p) => isConnected(p) || p.id === current.id,
+  );
+  const currentConnected = isConnected(current);
 
-  function saveEdits() {
-    void setAgentProfile({ ...current, bin: bin.trim(), args: parseArgs(args) });
+  function pick(p: AgentProfile) {
+    void setAgentProfile(p);
     setEdit(false);
   }
 
+  if (connected === null) return null;
+
   return (
     <>
-      <div className="setup-section">
-        Your agent
-        <button className="btn-ghost setup-section-act" disabled={busy} onClick={() => setEdit((v) => !v)}>
-          {edit ? "Done" : "Edit…"}
+      <div className="rs-row">
+        <span className="rs-label">Runs on</span>
+        <div className="rs-seg-line">
+          {options.length > 0 && (
+            <div className="rs-seg" role="radiogroup" aria-label="Runs on">
+              {options.map((p) => (
+                <SegButton
+                  key={p.id}
+                  on={p.id === current.id}
+                  disabled={busy}
+                  title={isConnected(p) ? "Connected" : "Not connected to SpinZero yet"}
+                  onClick={() => pick(p)}
+                >
+                  {p.label}
+                  {isConnected(p) && (
+                    <span className="rs-ok" aria-label="Connected">
+                      <IconCheck size={12} />
+                    </span>
+                  )}
+                </SegButton>
+              ))}
+            </div>
+          )}
+          {!currentConnected && (
+            <button
+              type="button"
+              className="btn-ghost rs-connect"
+              title="Register SpinZero with your assistant"
+              onClick={() => openConnect()}
+            >
+              Connect…
+            </button>
+          )}
+          <button
+            type="button"
+            className={`btn-ghost rs-icon ${edit ? "on" : ""}`}
+            disabled={busy}
+            title="The command SpinZero starts"
+            aria-label="The command SpinZero starts"
+            aria-expanded={edit}
+            onClick={() => setEdit((v) => !v)}
+          >
+            {"</>"}
+          </button>
+          <span className="setup-info" title={PRIVACY_AGENT} aria-label={PRIVACY_AGENT} role="img">
+            <IconInfo size={14} />
+          </span>
+        </div>
+      </div>
+      {edit && <AgentCommand profile={current} busy={busy} onDone={() => setEdit(false)} />}
+    </>
+  );
+}
+
+/** The program and arguments SpinZero starts for this assistant. Rarely edited. */
+function AgentCommand({ profile, busy, onDone }: { profile: AgentProfile; busy: boolean; onDone: () => void }) {
+  const setAgentProfile = useSettingsStore((s) => s.setAgentProfile);
+  const [bin, setBin] = useState(profile.bin);
+  const [args, setArgs] = useState(formatArgs(profile.args));
+
+  function save() {
+    void setAgentProfile({ ...profile, bin: bin.trim(), args: parseArgs(args) });
+    onDone();
+  }
+
+  return (
+    <div className="rs-row">
+      <span />
+      <div className="rs-cmd">
+        <input
+          className="wizard-input rs-cmd-bin"
+          value={bin}
+          spellCheck={false}
+          placeholder="claude"
+          aria-label="Program"
+          onChange={(e) => setBin(e.target.value)}
+        />
+        <input
+          className="wizard-input"
+          value={args}
+          spellCheck={false}
+          placeholder="-p {prompt}"
+          aria-label="Arguments"
+          onChange={(e) => setArgs(e.target.value)}
+        />
+        <span
+          className="setup-info"
+          role="img"
+          title={
+            "{prompt} is where the review instructions go; {project_dir} is this board's folder." +
+            (profile.verified ? "" : " SpinZero has not tested this assistant end to end.")
+          }
+          aria-label="About the command"
+        >
+          <IconInfo size={13} />
+        </span>
+        <button className="btn-ghost" disabled={busy || !bin.trim()} onClick={save}>
+          Save
         </button>
       </div>
-      <select
-        className="rv-select setup-app-select"
-        value={known ? current.id : "custom"}
-        disabled={busy}
-        title="Which program SpinZero starts to run the review"
-        onChange={(e) => pick(e.target.value)}
-      >
-        {options.map((p) => (
-          <option key={p.id} value={p.id}>
-            {p.label}
-          </option>
-        ))}
-      </select>
-      {!current.verified && current.bin.trim() && (
-        <p className="wizard-hint">
-          SpinZero has not tested this one. Check the command below before you run it; if
-          the review never starts, the agent’s own output says why.
-        </p>
-      )}
-      {edit && (
-        <div className="review-service-config">
-          <label className="review-field">
-            <span>Program</span>
-            <input
-              className="wizard-input"
-              value={bin}
-              spellCheck={false}
-              placeholder="claude"
-              onChange={(e) => setBin(e.target.value)}
-            />
-          </label>
-          <label className="review-field">
-            <span>Arguments</span>
-            <input
-              className="wizard-input"
-              value={args}
-              spellCheck={false}
-              placeholder="-p {prompt}"
-              onChange={(e) => setArgs(e.target.value)}
-            />
-          </label>
-          <p className="wizard-hint">
-            <code>{"{prompt}"}</code> is where the review instructions go and{" "}
-            <code>{"{project_dir}"}</code> is this board’s folder. Each argument is passed
-            whole, so a path with a space needs no quoting of yours.
-          </p>
-          <button className="btn-ghost" disabled={!bin.trim()} onClick={saveEdits}>
-            Save
-          </button>
-        </div>
-      )}
-    </>
+    </div>
   );
 }

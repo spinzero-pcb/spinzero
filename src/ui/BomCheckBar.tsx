@@ -1,29 +1,33 @@
 import { useEffect } from "react";
 import { useBomCheckStore } from "../stores/bomCheckStore";
 import { isAgentRunning, useAgentReviewStore } from "../stores/agentReviewStore";
-import { useProjectStore } from "../stores/projectStore";
+import { useBomMappingStore } from "../stores/bomMappingStore";
 import { useRunLauncherStore } from "../stores/runLauncherStore";
 import { useReviewStore } from "../stores/reviewStore";
-import { executionSummary, isClaim, reviewTallies } from "../lib/findings";
-import { isProjectClass, PROJECT_CLASSES } from "../lib/projectClass";
-import { BOM_PROFILES, resolveBomProfile, UNSTATED_BOM_PROFILE } from "../lib/findings";
+import {
+  BOM_PROFILES,
+  executionSummary,
+  isClaim,
+  resolveBomProfile,
+  reviewTallies,
+  UNSTATED_BOM_PROFILE,
+} from "../lib/findings";
 import type { CommentSeverity } from "../lib/types";
 import { IconChecklist } from "./icons";
-import { ReviewMapping } from "./review/ReviewMapping";
-import { ReviewOutcome } from "./review/ReviewOutcome";
-import { ReviewProgress } from "./review/ReviewProgress";
 
-// BOM check strip — the free deterministic review, run from the BOM tab.
+// BOM strip — the BOM tab's door into the review, and the last run's result.
 //
 // The findings themselves are NOT rendered here: they are filed as review comments,
-// so they appear in the review rail and as per-row chips in the table, exactly like a
-// human's comment. This strip is the *run* surface — pick the end application, run it,
-// and read what the run did.
+// so they appear in the review rail and as per-row chips in the table. This strip is
+// one button (opens the BOM Review window) and the result as clickable chips.
+// Everything else — application, mapping, depth — lives in that window, and progress
+// and failures live in the footer, which is on screen in every view.
 //
-// "Review BOM" is the visible door into the SAME setup sheet the footer's "Run a
-// review" opens, pre-picked to this review — so the paid tier, the column mapping and
-// the end application are all one dialog away from the table they describe. It is two
-// entrances to one action, not two actions: nothing here runs a check by itself.
+// **What is a chip and what is a tooltip.** A chip is a number that changes what the
+// user does next: fix something (Critical, Non-critical), distrust a clean result
+// (not verified), or fix the setup (no application, unread columns). A chip that
+// would read zero is not shown. Facts ABOUT the run — what it ran as, what changed
+// since last time, how many rows it touched — are in the chips' tooltip.
 
 /** Findings-schema severity → the review UI's four-level severity vocabulary, so a
  *  finding chip is the same colour here as its comment is in the rail. Findings carry
@@ -41,11 +45,8 @@ export function BomCheckBar() {
   const sessionId = useBomCheckStore((s) => s.sessionId);
   const error = useBomCheckStore((s) => s.error);
   const run = useBomCheckStore((s) => s.run);
-  const cls = useProjectStore((s) => s.project?.class) ?? "general";
-  const setClass = useProjectStore((s) => s.setClass);
-  // The detailed run is the one that takes minutes, so the tab it belongs to says so
-  // rather than leaving the footer as the only place it is visible.
-  const detailedPhase = useAgentReviewStore((s) => s.phase);
+  // The detailed run's progress is in the footer; here the button just says it is busy.
+  const detailedBusy = useAgentReviewStore((s) => isAgentRunning(s.phase));
 
   // Mod+Shift+B runs the check while the BOM tab is mounted. Scoped to this component
   // so it can never fire from the schematic/PCB canvases, where it would mean nothing.
@@ -72,129 +73,106 @@ export function BomCheckBar() {
     review.setFilterSeverity(role);
   }
 
-  // THREE tallies, not one count. The strip used to show findings only, so a review
-  // with twenty blind spots and no findings read as a pass. "Not verified" is the
-  // third number, and it is the one that stops that — see `coverageGaps`.
+  function openMapping() {
+    useBomMappingStore.getState().setExpanded(true);
+    useRunLauncherStore.getState().openSetup("bom");
+  }
+
+  // Counted by predicate — see `reviewTallies`. "Not verified" is its own number: a
+  // review with blind spots and no findings must not read as a pass.
   const tallies = reviewTallies(doc);
-  // What the review ran as. The app picks it from the project class and never showed
-  // the result of that choice, so a reader could not tell an automotive review from
-  // one nobody stated an application for.
-  const ranAs = doc ? profileLabel(doc.profile) : null;
-  // Which content produced this. Absent on the free tier, which is deterministic and
-  // has nothing to disclose; on the paid tiers it is the first thing to compare when
-  // two runs of one board disagree.
+  const unstated = doc ? profileLabel(doc.profile) === null : false;
   const execution = executionSummary(doc);
+  const delta = summary
+    ? [
+        summary.filed ? `${summary.filed} new` : "",
+        summary.reopened ? `${summary.reopened} reopened` : "",
+        summary.auto_resolved ? `${summary.auto_resolved} auto-resolved` : "",
+      ]
+        .filter(Boolean)
+        .join(" · ")
+    : "";
+  const about = doc
+    ? [
+        `${rowsWithFindings(doc)} of ${doc.stats.item_count} rows have findings`,
+        profileLabel(doc.profile) ? `Ran as ${profileLabel(doc.profile)}` : "",
+        delta,
+        execution?.text ?? "",
+      ]
+        .filter(Boolean)
+        .join("\n")
+    : "";
+  const clean = doc && tallies.critical === 0 && tallies.nonCritical === 0;
 
   return (
     <div className="bom-check-bar">
       <button
         className="btn-ghost bom-check-run"
         disabled={running}
-        title="Set up and run a BOM review — depth, end application and column mapping"
+        title="Set up and run a BOM review"
         onClick={() => useRunLauncherStore.getState().openSetup("bom")}
       >
         <IconChecklist size={14} />
-        {running ? "Checking…" : "Review BOM"}
+        {running ? "Checking…" : detailedBusy ? "Review running…" : "Review BOM"}
       </button>
-      <select
-        className="bom-select"
-        value={cls}
-        disabled={running}
-        title="End application — decides which rules apply and how severe a gap is"
-        onChange={(e) => isProjectClass(e.target.value) && void setClass(e.target.value)}
-      >
-        {PROJECT_CLASSES.map((c) => (
-          <option key={c.value} value={c.value}>
-            {c.label}
-          </option>
-        ))}
-      </select>
 
-      {isAgentRunning(detailedPhase) && <ReviewProgress />}
-
-      {doc && (
-        <>
-          {/* A denominator, because "12 findings" does not answer the question a
-              reader is actually asking. */}
-          <span className="bom-check-count" title={`${doc.stats.item_count} BOM lines were read`}>
-            {doc.findings.filter(isClaim).length === 0
-              ? "No issues found"
-              : `${rowsWithFindings(doc)} of ${doc.stats.item_count} rows have findings`}
-          </span>
-          <button
-            className={`bom-check-sev sev-${CRITICAL_ROLE} ${tallies.critical ? "" : "none"}`}
-            title="Show the critical findings in the review panel"
-            onClick={() => showInReview(CRITICAL_ROLE)}
-          >
-            {tallies.critical} Critical
-          </button>
-          <button
-            className={`bom-check-sev sev-${NONCRITICAL_ROLE} ${tallies.nonCritical ? "" : "none"}`}
-            title="Show the non-critical findings in the review panel"
-            onClick={() => showInReview(NONCRITICAL_ROLE)}
-          >
-            {tallies.nonCritical} Non-critical
-          </button>
-          {/* The third number, always shown. A zero here is news too: it is the only
-              place that says the review actually checked everything it set out to. */}
-          <span
-            className={`bom-check-gaps ${tallies.notVerified ? "some" : "none"}`}
-            title={
-              tallies.notVerified
-                ? "Checks this review could not make. Open “Not fully verified” for the list."
-                : "Every check this review set out to make was made."
-            }
-          >
-            {tallies.notVerified} not verified
-          </span>
-          {ranAs && (
-            <span
-              className={`bom-check-meta ${doc.column_mapping?.profile_stated === false ? "warn" : ""}`}
-              title="The end application this review ran under. It decides which rules apply."
-            >
-              {ranAs}
-            </span>
-          )}
-          <ReviewMapping doc={doc} />
-          {execution && (
-            <span className="bom-check-meta" title={execution.detail}>
-              {execution.text}
-            </span>
-          )}
-          {summary && (summary.filed > 0 || summary.auto_resolved > 0 || summary.reopened > 0) && (
-            <span className="bom-check-delta">
-              {[
-                summary.filed ? `${summary.filed} new` : "",
-                summary.reopened ? `${summary.reopened} reopened` : "",
-                summary.auto_resolved ? `${summary.auto_resolved} auto-resolved` : "",
-              ]
-                .filter(Boolean)
-                .join(" · ")}
-            </span>
-          )}
-        </>
-      )}
-
-      {/* A column the checker couldn't map reads as "this data is missing" in every
-          rule that needs it — say so out loud rather than letting the user trust a
-          false all-clear. */}
-      {unmapped.length > 0 && (
-        <span
-          className="bom-check-warn"
-          title="These columns are well filled but did not map to a known BOM field, so the checks could not read them."
-        >
-          Unmapped: {unmapped.slice(0, 3).join(", ")}
-          {unmapped.length > 3 ? ` +${unmapped.length - 3}` : ""}
+      {clean && (
+        <span className="bom-check-count ok" title={about}>
+          No issues found
         </span>
       )}
-      {/* A review whose judgment stage died (provider rate limit, cost cap, timeout,
-          a model that ruled on nothing) still returns findings, and the job itself
-          reports "completed" — so without this the user reads an incomplete review as
-          a full one. This used to be a grey chip here and nowhere else, which meant
-          the failure was invisible from every other tab; `ReviewOutcome` is the same
-          verdict, rendered as an alert, and it is in the footer too. */}
-      <ReviewOutcome />
-      {error && <span className="bom-check-warn">Check failed: {error}</span>}
+      {tallies.critical > 0 && (
+        <button
+          className={`bom-check-sev sev-${CRITICAL_ROLE}`}
+          title={`Show in the review panel\n${about}`}
+          onClick={() => showInReview(CRITICAL_ROLE)}
+        >
+          {tallies.critical} Critical
+        </button>
+      )}
+      {tallies.nonCritical > 0 && (
+        <button
+          className={`bom-check-sev sev-${NONCRITICAL_ROLE}`}
+          title={`Show in the review panel\n${about}`}
+          onClick={() => showInReview(NONCRITICAL_ROLE)}
+        >
+          {tallies.nonCritical} Non-critical
+        </button>
+      )}
+      {tallies.notVerified > 0 && (
+        <span
+          className="bom-check-gaps some"
+          title="Checks this review could not make. Open “Not fully verified” for the list."
+        >
+          {tallies.notVerified} not verified
+        </span>
+      )}
+      {unstated && (
+        <button
+          className="btn-ghost bom-check-warn"
+          title="The review ran with no end application, so it could not tell how severe a gap is. Click to set one."
+          onClick={() => useRunLauncherStore.getState().openSetup("bom")}
+        >
+          No application
+        </button>
+      )}
+
+      {/* A column the checker couldn't read looks like missing data to every rule
+          that needs it. One click opens the mapping to fix it. */}
+      {unmapped.length > 0 && (
+        <button
+          className="btn-ghost bom-check-warn"
+          title={`Not read by any check: ${unmapped.join(", ")}\nClick to map them`}
+          onClick={openMapping}
+        >
+          {unmapped.length} column{unmapped.length === 1 ? "" : "s"} unread
+        </button>
+      )}
+      {error && (
+        <span className="bom-check-warn" title={error}>
+          Check failed
+        </span>
+      )}
     </div>
   );
 }
@@ -212,13 +190,12 @@ function rowsWithFindings(doc: { findings: { severity: string; anchors: { refdes
   return rows.size;
 }
 
-/** The end application in the user's words. An unstated profile is named as one
- *  rather than shown as a plausible-looking setting nobody chose. */
-function profileLabel(profile: string): string {
-  if (!profile) return "No application stated";
+/** The end application in the user's words, or null when none was stated. */
+function profileLabel(profile: string): string | null {
+  if (!profile) return null;
   // Through the resolver, so a document that stored the retired `automotive` id still
   // reads as a label rather than as a raw word from a JSON file.
   const id = resolveBomProfile(profile);
-  if (id === UNSTATED_BOM_PROFILE) return "No application stated";
+  if (id === UNSTATED_BOM_PROFILE) return null;
   return BOM_PROFILES.find((p) => p.id === id)?.label ?? id;
 }

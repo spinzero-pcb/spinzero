@@ -125,7 +125,7 @@ export function RunReviewMenu() {
     if (!menuOpen) return;
     ipc
       .assistantConnected()
-      .then(setConnected)
+      .then((list) => setConnected(list.map((c) => c.label)))
       .catch(() => setConnected([]));
   }, [menuOpen]);
 

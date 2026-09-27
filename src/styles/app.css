@@ -2745,8 +2745,34 @@ textarea.wizard-input {
   height: 100%;
   border-radius: 999px;
   background: var(--accent);
+  background-image: linear-gradient(
+    90deg,
+    transparent 0%,
+    color-mix(in srgb, var(--accent-fg, #fff) 35%, transparent) 50%,
+    transparent 100%
+  );
+  background-size: 48px 100%;
+  background-repeat: no-repeat;
+  animation: review-progress-shimmer 1.6s linear infinite;
   transition: width 0.4s ease;
 }
+/* A sheen travelling along the filled part: "alive", without claiming progress the
+   run has not reported. */
+@keyframes review-progress-shimmer {
+  from { background-position: -48px 0; }
+  to { background-position: calc(100% + 48px) 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .review-progress-fill { animation: none; background-image: none; }
+}
+.review-progress-label { color: var(--fg-1); white-space: nowrap; }
+.review-progress-time {
+  flex: none;
+  min-width: 3.2em;
+  font-variant-numeric: tabular-nums;
+  color: var(--fg-3, var(--fg-2));
+}
+.review-progress:hover .review-progress-label { color: var(--fg-0); }
 /* --- last review's failure -----------------------------------------------------
    Deliberately not styled like the caveats beside it. An incomplete review is not a
    footnote on a result, it is a reason to distrust the result, so it gets a filled
@@ -2861,10 +2887,20 @@ textarea.wizard-input {
   padding: 0 var(--sp-1);
   line-height: 1;
 }
+.review-activity-step { color: var(--fg-0); }
+.review-activity-sub { color: var(--fg-2); }
+.review-activity-foot {
+  display: flex;
+  justify-content: flex-end;
+  padding: var(--sp-1) var(--sp-2);
+  border-top: 1px solid var(--border-1);
+}
+.review-activity-cancel { color: var(--err); font-size: var(--fs-0); }
 
 .review-activity-list {
   max-height: 320px;
   overflow-y: auto;
+  overflow-x: hidden;
   padding: var(--sp-1) 0;
 }
 
@@ -2942,118 +2978,126 @@ textarea.wizard-input {
 }
 .tag-soon { color: var(--fg-2); border-style: dashed; }
 
-/* ---------- review setup sheet ---------- */
+/* ---------- BOM review window ----------
+   One sheet: label column on the left, controls on the right, so the eye runs down
+   a single edge. Wider than the default wizard card because a mapping row carries a
+   field, a picker and a sample cell side by side. */
+.review-setup { width: 600px; }
+.review-setup .wizard-head { justify-content: space-between; }
+.review-setup .wizard-body { gap: var(--sp-3); }
 
-.review-setup .setup-section {
-  margin: var(--sp-3) 0 var(--sp-1);
-  color: var(--fg-2);
-  font-size: var(--fs-0);
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
+.rs-row {
+  display: grid;
+  grid-template-columns: 96px minmax(0, 1fr);
+  align-items: center;
+  gap: var(--sp-3);
 }
-.review-setup .setup-section {
-  display: flex;
-  align-items: baseline;
-  gap: var(--sp-2);
-}
-/* "Edit…" rides in the section header rather than sitting in the content as a
-   button of its own: the mapping is now on screen, so editing it is a footnote. */
-.review-setup .setup-section-act {
-  margin-left: auto;
-  padding: 0 var(--sp-1);
-  text-transform: none;
-  letter-spacing: 0;
-}
+.rs-row-sub { margin-top: calc(-1 * var(--sp-2)); }
+.rs-label { color: var(--fg-1); font-size: var(--fs-1); }
+.rs-hint { color: var(--fg-2); font-size: var(--fs-0); line-height: 1.45; }
 
-/* End application: a labelled control on one line. It is scope, not a section — the
-   sheet has exactly one of these and a full uppercase heading over a single dropdown
-   was three lines saying what one says. */
-.review-setup .setup-app {
+/* Segmented control: two choices, both visible, one click. */
+.rs-seg-line { display: flex; align-items: center; gap: var(--sp-2); justify-self: start; }
+.rs-seg {
+  justify-self: start;
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  background: var(--bg-1);
+  border: 1px solid var(--border-1);
+  border-radius: var(--radius-2);
+}
+.rs-seg-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px var(--sp-3);
+  border: 0;
+  border-radius: var(--radius-1);
+  background: none;
+  color: var(--fg-1);
+  font: inherit;
+  font-size: var(--fs-1);
+  cursor: pointer;
+}
+.rs-seg-btn:hover:not(:disabled) { color: var(--fg-0); }
+.rs-seg-btn.on { background: var(--accent-dim); color: var(--fg-0); box-shadow: inset 0 0 0 1px var(--accent); }
+.rs-seg-btn:disabled { cursor: default; opacity: 0.6; }
+
+/* "Runs on": a tick on a connected assistant, the Connect door when the chosen one is
+   not, and the `</>` toggle for the command SpinZero starts. */
+.rs-ok { display: inline-grid; color: var(--ok); }
+.rs-connect { color: var(--accent); font-size: var(--fs-0); }
+.rs-icon { font-family: var(--font-mono); font-size: var(--fs-0); padding: 2px var(--sp-2); }
+.rs-icon.on { color: var(--fg-0); border-color: var(--accent); }
+.rs-cmd { display: flex; align-items: center; gap: var(--sp-1); }
+.rs-cmd .wizard-input { min-width: 0; flex: 1; font-family: var(--font-mono); font-size: var(--fs-0); }
+.rs-cmd .rs-cmd-bin { flex: 0 0 110px; }
+.rs-meta { color: var(--fg-2); }
+
+/* Column mapping: a summary row that unfolds into the editable table in place. */
+.rs-map { display: flex; flex-direction: column; gap: var(--sp-2); }
+.rs-map-toggle {
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.rs-map-summary {
   display: flex;
   align-items: center;
   gap: var(--sp-2);
-}
-.review-setup .setup-app-label {
-  color: var(--fg-1);
+  color: var(--fg-0);
   font-size: var(--fs-1);
 }
-.review-setup .setup-app-select { flex: 1; min-width: 0; }
+.rs-map-toggle:hover .rs-map-summary { color: var(--accent); }
+.rs-map-missing { color: var(--warn); font-size: var(--fs-0); }
+.rs-map-edited { color: var(--accent); font-size: var(--fs-0); }
+.rs-map-chev { display: inline-grid; margin-left: auto; color: var(--fg-2); transition: transform 0.15s; }
+.rs-map-chev.open { transform: rotate(90deg); }
 
-/* The mapping itself, read-only. Showing it beats counting it: "14 of 19 inputs read"
-   is a number the user cannot act on, while the rows say which ones. An unread field
-   is coloured rather than annotated — the gap IS the message. */
-.setup-map {
+.rs-map-table {
   display: flex;
   flex-direction: column;
   gap: 1px;
-  max-height: 34vh;
+  max-height: 40vh;
   overflow-y: auto;
   overflow-x: hidden;
-  margin: 0;
   padding: var(--sp-1);
-  list-style: none;
   background: var(--bg-1);
   border: 1px solid var(--border-1);
   border-radius: var(--radius-1);
 }
-.setup-map-row {
-  display: flex;
-  align-items: baseline;
-  gap: var(--sp-2);
-  padding: 2px var(--sp-1);
-  font-size: var(--fs-0);
-}
-.setup-map-field { color: var(--fg-1); flex: none; }
-.setup-map-col {
-  margin-left: auto;
-  min-width: 0;
-  color: var(--fg-0);
-  font-family: var(--font-mono);
-  text-align: right;
-  overflow-wrap: anywhere;
-}
-.setup-map-row.unmapped .setup-map-field { color: var(--warn); }
-.setup-map-row.unmapped .setup-map-col {
-  color: var(--warn);
-  font-family: inherit;
-  font-style: italic;
-}
-
-/* Depth is a choice INSIDE the sheet, not a second entry in the picker: two tiers
-   across six reviews would be twelve tiles, and one radio is not. */
-.setup-depth {
+.rs-map-row {
   display: grid;
-  grid-template-columns: auto 1fr auto;
-  gap: 2px var(--sp-2);
+  grid-template-columns: 120px 170px minmax(0, 1fr) 22px;
   align-items: center;
-  padding: var(--sp-2);
-  margin-bottom: var(--sp-1);
-  border: 1px solid var(--border-0);
-  border-radius: var(--radius-2);
-  cursor: pointer;
-}
-.setup-depth.on {
-  border-color: var(--accent);
-  background: var(--accent-dim);
-}
-.setup-depth-name {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  color: var(--fg-0);
-  font-size: var(--fs-1);
-}
-.setup-depth-what {
-  grid-column: 2 / -1;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  color: var(--fg-1);
+  gap: var(--sp-2);
+  padding: 1px var(--sp-1);
+  border-radius: var(--radius-1);
   font-size: var(--fs-0);
-  line-height: 1.45;
 }
-/* The privacy promise is one hover away, not one paragraph down: what is sent and how
-   long it is kept matters, but spelling it out in the sheet buries the choice. */
+.rs-map-row:hover { background: var(--bg-2); }
+.rs-map-row > * { min-width: 0; }
+.rs-map-field { color: var(--fg-1); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rs-map-row.missing .rs-map-field,
+.rs-map-row.missing .rs-map-pick { color: var(--warn); }
+.rs-map-pick { width: 100%; min-width: 0; }
+.rs-map-sample {
+  color: var(--fg-2);
+  font-family: var(--font-mono);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.rs-map-reset { display: inline-grid; place-items: center; padding: 2px; color: var(--fg-2); }
+.rs-map-reset:hover { color: var(--fg-0); }
+.rs-map-unused { margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* The privacy promise is one hover away, not one paragraph down. */
 .setup-info {
   display: inline-grid;
   place-items: center;
@@ -3062,7 +3106,7 @@ textarea.wizard-input {
   cursor: help;
 }
 .setup-info:hover { color: var(--fg-0); }
-.review-setup .setup-error { color: var(--err); }
+.review-setup .setup-error { color: var(--err); margin: 0; }
 
 /* ---------- review stream ---------- */
 
@@ -4357,6 +4401,8 @@ textarea.wizard-input {
 
 /* Caveats: an unmapped column or a failed run — the check's own blind spots. */
 .bom-check-warn { color: var(--warn); }
+button.bom-check-warn { padding: 1px var(--sp-2); font-size: var(--fs-0); }
+.bom-check-count.ok { color: var(--ok); }
 
 /* ---- detailed BOM review (paid tier) ------------------------------------ */
 /* The button sits in the BOM check strip; the pre-flight dialog reuses the wizard
@@ -4402,9 +4448,6 @@ textarea.wizard-input {
   box-sizing: border-box;
 }
 .setup-window-card { width: 100%; max-width: 720px; box-shadow: none; align-self: flex-start; }
-.setup-window-card .bom-map-table { max-height: none; overflow: visible; }
-.setup-window-card .bom-map-row { grid-template-columns: 170px minmax(0, 1fr) minmax(0, 1fr) 48px; }
-.setup-window-card .bom-map-pick { max-width: none; }
 /* End application: one line of small chips, every option visible. */
 .sw-app { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 .sw-app-label { color: var(--fg-1); font-size: var(--fs-1); margin-right: var(--sp-1); }
@@ -4472,61 +4515,6 @@ textarea.wizard-input {
   border-top: 1px solid var(--border-1);
 }
 .setup-window-done { color: var(--fg-1); font-size: var(--fs-1); }
-
-/* BOM column mapping approval — a wider wizard card, because every row has to show
-   a field name, a column picker and a real sample cell side by side; stacking them
-   would hide the sample, which is the only part that settles an ambiguous header. */
-.bom-mapping { width: 720px; }
-
-.bom-map-table {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  max-height: 46vh;
-  overflow-y: auto;
-  padding: var(--sp-1);
-  background: var(--bg-1);
-  border: 1px solid var(--border-1);
-  border-radius: var(--radius-1);
-}
-
-.bom-map-row {
-  display: grid;
-  grid-template-columns: 180px 200px 1fr 48px;
-  align-items: center;
-  gap: var(--sp-2);
-  padding: 2px var(--sp-1);
-  border-radius: var(--radius-1);
-}
-
-/* A field nothing feeds is the case this dialog exists to make visible. */
-.bom-map-row.unread .bom-map-field { color: var(--fg-3); }
-.bom-map-row.edited { background: var(--bg-2); }
-
-.bom-map-field {
-  color: var(--fg-1);
-  font-size: var(--fs-0);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.bom-map-pick { max-width: 200px; width: 100%; }
-
-.bom-map-sample {
-  color: var(--fg-2);
-  font-size: var(--fs-0);
-  font-family: var(--font-mono);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.bom-map-reset {
-  display: inline-block;
-  min-width: 48px;
-  font-size: var(--fs-0);
-}
 
 /* Reviews rail — where checks are launched. Sized for the 280px side panel: every
    row stacks, and the premium case is a couple of lines rather than a table, because
@@ -4930,50 +4918,6 @@ textarea.wizard-input {
   font-variant-numeric: tabular-nums;
   cursor: help;
 }
-.bom-check-gaps.none { color: var(--fg-3, var(--fg-2)); }
 .bom-check-gaps.some { color: var(--warn); }
 
-/* A severity tally with nothing in it recedes rather than disappearing: the reader
-   compares three numbers, and a chip that comes and goes moves the other two. */
-.bom-check-sev.none { color: var(--fg-3, var(--fg-2)); background: none; }
 
-.bom-check-meta.warn { color: var(--warn); }
-
-.review-mapping { position: relative; display: inline-flex; }
-.review-mapping-pop {
-  position: absolute;
-  left: 0;
-  top: calc(100% + 6px);
-  z-index: 80;
-  width: 420px;
-  max-height: 22rem;
-  overflow-y: auto;
-  padding: var(--sp-3);
-  background: var(--bg-2);
-  border: 1px solid var(--border-1);
-  border-radius: var(--radius-2);
-  box-shadow: var(--shadow-2);
-}
-.review-mapping-table { width: 100%; border-collapse: collapse; font-size: var(--fs-0); }
-.review-mapping-table td { padding: 2px var(--sp-1); vertical-align: baseline; }
-.review-mapping-col { color: var(--fg-1); }
-.review-mapping-arrow { color: var(--fg-3, var(--fg-2)); width: 1.4em; text-align: center; }
-.review-mapping-field { color: var(--fg-2); font-family: var(--font-mono); }
-.review-mapping-fill {
-  text-align: right;
-  color: var(--fg-3, var(--fg-2));
-  font-variant-numeric: tabular-nums;
-}
-/* A column barely filled is almost always the wrong column, and that is the single
-   thing this panel exists to let somebody spot. */
-.review-mapping-fill.low { color: var(--warn); }
-.review-mapping-head td {
-  padding-top: var(--sp-2);
-  color: var(--fg-3, var(--fg-2));
-  border-top: 1px solid var(--border-0);
-}
-.review-mapping-absent {
-  margin: var(--sp-2) 0 0;
-  font-size: var(--fs-0);
-  color: var(--fg-2);
-}

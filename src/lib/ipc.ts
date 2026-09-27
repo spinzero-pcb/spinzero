@@ -157,6 +157,8 @@ export const ipc = {
     invoke<void>("start_agent_review", { agent, brief }),
   agentReviewRunning: () => invoke<boolean>("agent_review_running"),
   /** The agent profiles SpinZero ships, for the setup screen's picker. */
+  /** Stop the agent review this app started. False when none of ours is running. */
+  cancelAgentReview: () => invoke<boolean>("cancel_agent_review"),
   agentProfiles: () => invoke<AgentProfile[]>("agent_profiles"),
   /** This project's newest review, whoever started it — read off the review server's
    *  own `status.json`. Asked on mount so a reopened window picks up a run in flight. */
@@ -166,7 +168,7 @@ export const ipc = {
    *  where the licence file is, and which assistants this machine has. */
   assistantSetup: () => invoke<AssistantSetup>("assistant_setup"),
   /** The assistants whose own config lists SpinZero. Reads files, spawns nothing. */
-  assistantConnected: () => invoke<string[]>("assistant_connected"),
+  assistantConnected: () => invoke<{ id: string; label: string }[]>("assistant_connected"),
   /** Run one client's own `mcp add`. We never edit its config file ourselves. */
   registerAssistant: (clientId: string) =>
     invoke<RegisterOutcome>("register_assistant", { clientId }),
@@ -266,7 +268,8 @@ export type AgentEvent =
   | { kind: "progress"; line: string }
   | { kind: "status"; status: RunStatus }
   | { kind: "finished"; seconds: number }
-  | { kind: "failed"; detail: string };
+  | { kind: "failed"; detail: string }
+  | { kind: "cancelled" };
 
 export function onAgentEvent(handler: (ev: AgentEvent) => void): Promise<UnlistenFn> {
   return listen<AgentEvent>("agent-event", (e) => handler(e.payload));

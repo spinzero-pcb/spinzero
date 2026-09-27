@@ -1284,6 +1284,14 @@ fn start_agent_review(
         .start(app, handle.project_dir.clone(), agent, brief)
 }
 
+/// Stop the agent review this app started, and everything it started. Nothing is
+/// imported. False when no agent of ours is running (a review started in the user's
+/// own terminal is theirs to stop).
+#[tauri::command]
+fn cancel_agent_review(state: State<AppState>) -> Result<bool, String> {
+    state.agent.lock_safe().cancel()
+}
+
 /// The agent profiles SpinZero ships, for the setup screen's picker.
 #[tauri::command]
 fn agent_profiles() -> Vec<agent::AgentProfile> {
@@ -1316,7 +1324,7 @@ async fn assistant_setup() -> Result<assistant::AssistantSetup, String> {
 }
 
 #[tauri::command]
-async fn assistant_connected() -> Vec<String> {
+async fn assistant_connected() -> Vec<assistant::ConnectedClient> {
     tauri::async_runtime::spawn_blocking(assistant::connected_clients)
         .await
         .unwrap_or_default()
@@ -1704,6 +1712,7 @@ pub fn run() {
             list_review_inbox,
             import_review_inbox,
             start_agent_review,
+            cancel_agent_review,
             agent_review_running,
             agent_profiles,
             agent_review_status,

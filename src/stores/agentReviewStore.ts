@@ -28,6 +28,12 @@ import { useToastStore } from "./toastStore";
 // **Finishing is not ingesting.** The agent writes `findings.json` into
 // `<project>/reviews/inbox/`; the user still imports it.
 //
+// **Cancel stops the spending.** It kills the agent's whole process tree, so its
+// sub-agents stop too and no more tokens go out. Nothing is imported, and the review
+// server's status file for that run is ignored from then on: it still says "running",
+// because nobody told it otherwise. Only a run this window started can be cancelled;
+// one started in the user's own terminal is theirs to stop.
+//
 // **Nothing is persisted.** A run is a subprocess and a file on disk; the durable part
 // is the drop-box.
 
@@ -61,7 +67,14 @@ interface AgentReviewState {
   /** Wall clock of the last completed run, for the "took Ns" note. */
   seconds: number | null;
   activity: ActivityEntry[];
+  /** When this window started the run, for the elapsed clock. Null for a run
+   *  somebody started elsewhere, which this window cannot time or cancel. */
+  startedAt: number | null;
+  /** Review ids whose status file must be ignored: runs the user cancelled. */
+  cancelledIds: string[];
   start: () => Promise<void>;
+  /** Stop the run this window started. Nothing is imported. */
+  cancel: () => Promise<void>;
   /** Subscribe to `agent-event`. Called once from the shell; returns the unsubscribe. */
   subscribe: () => Promise<() => void>;
   /** Ask the backend what it can see: a run of ours that survived a window reload, and
@@ -137,6 +150,8 @@ export const useAgentReviewStore = create<AgentReviewState>((set, get) => ({
   error: null,
   seconds: null,
   activity: [],
+  startedAt: null,
+  cancelledIds: [],
 
   clearError: () => set({ error: null }),
 
@@ -151,9 +166,9 @@ export const useAgentReviewStore = create<AgentReviewState>((set, get) => ({
       return;
     }
     const profile = currentBomProfile();
-    // The same gate every tier used: never spend a review on a column mapping nobody
-    // has looked at. The dialog takes over and re-enters here once approved.
-    const approved = await useBomMappingStore.getState().ensureApproved(profile, () => void get().start());
+    // The same gate the instant check uses: never spend a review on a column mapping
+    // nobody has looked at.
+    const approved = await useBomMappingStore.getState().ensureApproved(profile);
     if (!approved) return;
 
     // Both preflight answers, handed over in the prompt. The server would otherwise
@@ -163,12 +178,44 @@ export const useAgentReviewStore = create<AgentReviewState>((set, get) => ({
       mapping: await confirmedMapping(profile),
     };
 
-    set({ phase: "starting", error: null, line: "", seconds: null, status: null, activity: [] });
+    set({
+      phase: "starting",
+      error: null,
+      line: "",
+      seconds: null,
+      status: null,
+      activity: [],
+      startedAt: Date.now(),
+    });
     try {
       await ipc.startAgentReview(agent, brief);
       set({ phase: "running" });
     } catch (e) {
-      set({ phase: "failed", error: e instanceof Error ? e.message : String(e) });
+      set({ phase: "failed", startedAt: null, error: e instanceof Error ? e.message : String(e) });
+    }
+  },
+
+  cancel: async () => {
+    try {
+      const stopped = await ipc.cancelAgentReview();
+      if (!stopped) {
+        useToastStore.getState().push({
+          kind: "warning",
+          title: "Nothing to cancel here",
+          message: "This review was started outside SpinZero. Stop it in the assistant that runs it.",
+        });
+        return;
+      }
+      // The `cancelled` event resets the phase. Mark the run now so a status write
+      // that lands before the event cannot bring the bar back.
+      const id = get().status?.review_id;
+      if (id) set({ cancelledIds: [...get().cancelledIds, id] });
+    } catch (e) {
+      useToastStore.getState().push({
+        kind: "error",
+        title: "Could not cancel the review",
+        message: e instanceof Error ? e.message : String(e),
+      });
     }
   },
 
@@ -177,8 +224,9 @@ export const useAgentReviewStore = create<AgentReviewState>((set, get) => ({
       const [running, status] = await Promise.all([ipc.agentReviewRunning(), ipc.agentReviewStatus()]);
       // A review this window did not start is still this board's review, so it is
       // shown. That is the whole point of reading a file instead of a pipe.
-      const live = status !== null && status.phase !== "done" && status.phase !== "failed";
-      if (status) set({ status });
+      const ignored = status !== null && get().cancelledIds.includes(status.review_id);
+      const live = !ignored && status !== null && status.phase !== "done" && status.phase !== "failed";
+      if (status && !ignored) set({ status });
       if ((running || live) && get().phase === "idle") set({ phase: "running" });
     } catch {
       // The backend not answering is not something to put in front of anyone; the
@@ -200,6 +248,7 @@ export const useAgentReviewStore = create<AgentReviewState>((set, get) => ({
           push(set, get, "agent", ev.line.slice(0, 200));
           break;
         case "status": {
+          if (get().cancelledIds.includes(ev.status.review_id)) break;
           const previous = get().status;
           set({ status: ev.status, phase: get().phase === "idle" ? "running" : get().phase });
           const said = describeStatus(previous, ev.status);
@@ -207,7 +256,7 @@ export const useAgentReviewStore = create<AgentReviewState>((set, get) => ({
           break;
         }
         case "finished": {
-          set({ phase: "done", seconds: ev.seconds, line: "" });
+          set({ phase: "done", seconds: ev.seconds, line: "", startedAt: null });
           push(set, get, "step", "The agent finished");
           // The findings are in the drop-box, not in the app. Refresh the inbox so the
           // launcher shows the row, and say where to click.
@@ -227,7 +276,7 @@ export const useAgentReviewStore = create<AgentReviewState>((set, get) => ({
           break;
         }
         case "failed":
-          set({ phase: "failed", error: ev.detail, line: "" });
+          set({ phase: "failed", error: ev.detail, line: "", startedAt: null });
           push(set, get, "error", ev.detail);
           useToastStore.getState().push({
             kind: "error",
@@ -235,6 +284,20 @@ export const useAgentReviewStore = create<AgentReviewState>((set, get) => ({
             message: ev.detail,
           });
           break;
+        case "cancelled": {
+          const id = get().status?.review_id;
+          set({
+            phase: "idle",
+            status: null,
+            line: "",
+            error: null,
+            startedAt: null,
+            cancelledIds: id && !get().cancelledIds.includes(id) ? [...get().cancelledIds, id] : get().cancelledIds,
+          });
+          push(set, get, "step", "Cancelled");
+          useToastStore.getState().push({ kind: "info", title: "Review cancelled", message: "Nothing was imported." });
+          break;
+        }
       }
     });
   },

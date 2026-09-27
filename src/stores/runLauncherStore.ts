@@ -52,6 +52,7 @@ export const useRunLauncherStore = create<RunLauncherState>((set, get) => ({
 
   // Closes the popover and any open setup sheet: this screen is a full dialog, and
   // leaving a sheet behind it means dismissing one reveals the other.
-  openConnect: () => set({ menuOpen: false, setupFor: null, connectOpen: true }),
+  // The BOM Review window stays open underneath: its Connect… button comes back to it.
+  openConnect: () => set({ menuOpen: false, connectOpen: true }),
   closeConnect: () => set({ connectOpen: false }),
 }));

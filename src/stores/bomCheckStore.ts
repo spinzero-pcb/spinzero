@@ -111,10 +111,8 @@ export const useBomCheckStore = create<BomCheckState>((set, get) => ({
     // and file the whole check twice.
     set({ running: true, error: null, healthDismissed: false });
     // A review is only as good as the column mapping it read. If this project has
-    // never had one approved, the dialog takes over and re-enters here once it has.
-    const approved = await useBomMappingStore
-      .getState()
-      .ensureApproved(currentBomProfile(), () => void get().run());
+    // never had one approved, the BOM Review window opens instead of a run.
+    const approved = await useBomMappingStore.getState().ensureApproved(currentBomProfile());
     if (!approved) {
       set({ running: false });
       return;

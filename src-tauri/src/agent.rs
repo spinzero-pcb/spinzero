@@ -28,12 +28,13 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter};
 
 use crate::mcpstatus::RunStatus;
+use crate::util::LockExt;
 
 /// Progress from a running agent review, streamed to the frontend as `agent-event`.
 ///
@@ -53,6 +54,8 @@ pub enum AgentEvent {
     /// The agent's process ended. The findings, if any, are in the review inbox.
     Finished { seconds: u64 },
     Failed { detail: String },
+    /// The user cancelled. The process tree is gone and nothing is to be imported.
+    Cancelled,
 }
 
 pub fn emit(app: &AppHandle, ev: AgentEvent) {
@@ -220,11 +223,30 @@ fn build_args(profile: &AgentProfile, project_dir: &Path, prompt: &str) -> Vec<S
 #[derive(Default)]
 pub struct AgentRun {
     running: Arc<AtomicBool>,
+    /// The agent's process id while it runs.
+    pid: Arc<Mutex<Option<u32>>>,
+    /// Set by `cancel`, so the thread that waits on the process reports a cancel and
+    /// not a failure.
+    cancelled: Arc<AtomicBool>,
 }
 
 impl AgentRun {
     pub fn is_running(&self) -> bool {
         self.running.load(Ordering::SeqCst)
+    }
+
+    /// Stop the running agent and every process it started. The agent runs its steps
+    /// in sub-agents, and a CLI is often a shim that starts the real program, so
+    /// killing only the direct child would leave the part that spends tokens running.
+    /// Returns false when no agent of ours is running.
+    pub fn cancel(&self) -> Result<bool, String> {
+        let Some(pid) = *self.pid.lock_safe() else {
+            return Ok(false);
+        };
+        self.cancelled.store(true, Ordering::SeqCst);
+        log::info!("cancelling the agent review");
+        kill_tree(pid)?;
+        Ok(true)
     }
 
     /// Spawn the agent and stream its output. Returns as soon as the process is up;
@@ -244,6 +266,9 @@ impl AgentRun {
             return Err("a review is already running through your agent.".into());
         }
         let running = self.running.clone();
+        let pid_slot = self.pid.clone();
+        let cancelled = self.cancelled.clone();
+        cancelled.store(false, Ordering::SeqCst);
         let text = prompt(&project_dir, &brief);
         let args = build_args(&profile, &project_dir, &text);
         let label = profile.label.clone();
@@ -252,7 +277,14 @@ impl AgentRun {
             let started = std::time::Instant::now();
             emit(&app, AgentEvent::Started { agent: label.clone() });
 
-            let spawned = Command::new(&bin)
+            let mut cmd = Command::new(&bin);
+            // Its own process group on Unix, so `cancel` can signal the whole tree.
+            #[cfg(unix)]
+            {
+                use std::os::unix::process::CommandExt;
+                cmd.process_group(0);
+            }
+            let spawned = cmd
                 .args(&args)
                 .current_dir(&project_dir)
                 .stdout(Stdio::piped())
@@ -281,6 +313,8 @@ impl AgentRun {
                     return;
                 }
             };
+
+            *pid_slot.lock_safe() = Some(child.id());
 
             if profile.prompt_via == PromptVia::Stdin {
                 if let Some(mut stdin) = child.stdin.take() {
@@ -317,8 +351,14 @@ impl AgentRun {
             }
 
             let status = child.wait();
+            *pid_slot.lock_safe() = None;
             running.store(false, Ordering::SeqCst);
             let seconds = started.elapsed().as_secs();
+            if cancelled.swap(false, Ordering::SeqCst) {
+                log::info!("agent review cancelled after {seconds}s");
+                emit(&app, AgentEvent::Cancelled);
+                return;
+            }
             match status {
                 Ok(s) if s.success() => {
                     log::info!("agent review finished in {seconds}s");
@@ -340,6 +380,31 @@ impl AgentRun {
             }
         });
         Ok(())
+    }
+}
+
+/// Kill a process and all of its descendants.
+fn kill_tree(pid: u32) -> Result<(), String> {
+    #[cfg(windows)]
+    let out = {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()
+    };
+    // The agent leads its own process group (see `start`), so a negative id signals
+    // every process in it.
+    #[cfg(unix)]
+    let out = Command::new("kill").args(["-KILL", &format!("-{pid}")]).output();
+    match out {
+        Ok(o) if o.status.success() => Ok(()),
+        Ok(o) => Err(format!(
+            "could not stop the agent: {}",
+            String::from_utf8_lossy(&o.stderr).trim()
+        )),
+        Err(e) => Err(format!("could not stop the agent: {e}")),
     }
 }
 

@@ -7,12 +7,14 @@ import {
   type ActivityEntry,
 } from "../../stores/agentReviewStore";
 
-// The detailed review's progress, in the two places it has to be visible: the BOM tab
-// it was launched from, and the footer, which is on screen in every view.
+// The detailed review's progress. It lives in the footer only — on screen in every
+// view — so there is exactly one progress indicator for one run.
 //
-// **A bar and a number, nothing else.** A percentage is the one thing a reader wants
-// from a progress bar — is this halfway or nearly done — and it is three characters
-// wide. The words are in the tooltip.
+// **Fixed-width, so the footer holds still:** a fixed label, the bar, a percentage and
+// an elapsed clock (tabular figures). The step name is in the tooltip and at the top
+// of the panel the bar opens, with Cancel. The elapsed clock is what tells a slow run
+// from a hung one when the percentage cannot move — the datasheet stretch can hold
+// one number for minutes.
 //
 // **The numbers are the review server's, not ours.** They come from the run's own
 // `status.json`: datasheets collected, then part numbers accounted for. The bar used
@@ -31,6 +33,8 @@ export function ReviewProgress() {
   const status = useAgentReviewStore((s) => s.status);
   const line = useAgentReviewStore((s) => s.line);
   const phase = useAgentReviewStore((s) => s.phase);
+  const startedAt = useAgentReviewStore((s) => s.startedAt);
+  const elapsed = useElapsed(startedAt);
 
   // Re-rendered on a timer, because a stall is the passage of time and nothing else
   // arrives to trigger a render. One tick a minute is enough to notice one.
@@ -48,20 +52,23 @@ export function ReviewProgress() {
 
   return (
     <span className="review-progress-wrap">
-      {open && <ActivityFeed onClose={() => setOpen(false)} />}
+      {open && (
+        <ActivityFeed label={label} canCancel={startedAt !== null} onClose={() => setOpen(false)} />
+      )}
       <button
         type="button"
         className={`review-progress ${stalled ? "stalled" : ""}`}
         onClick={() => setOpen((v) => !v)}
         aria-expanded={open}
         title={
-          `Detailed BOM review — ${label}` +
+          label +
           (stalled ? "\nNothing has been reported for a while. The run may have stopped." : "") +
           (line ? `\n${line}` : "") +
-          `\nClick for activity`
+          "\nClick for details"
         }
-        aria-label="Detailed BOM review progress — click for activity"
+        aria-label="Detailed BOM review progress — click for details"
       >
+        <span className="review-progress-label">BOM review</span>
         <span
           className="review-progress-bar"
           role="progressbar"
@@ -72,14 +79,40 @@ export function ReviewProgress() {
           <span className="review-progress-fill" style={{ width: `${shown}%` }} />
         </span>
         <span className="review-progress-pct">{stalled ? "stalled" : `${shown}%`}</span>
+        {elapsed && <span className="review-progress-time">{elapsed}</span>}
       </button>
     </span>
   );
 }
 
-/** The event stream, newest at the bottom — the direction a log reads. */
-function ActivityFeed({ onClose }: { onClose: () => void }) {
+/** "3:07" since `since`, ticking once a second; null when this window did not start
+ *  the run and so does not know when it began. */
+function useElapsed(since: number | null): string | null {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (since === null) return;
+    const id = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(id);
+  }, [since]);
+  if (since === null) return null;
+  const s = Math.max(0, Math.floor((now - since) / 1000));
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+}
+
+/** The step it is on, the event stream behind it, and the way out. Newest event at
+ *  the bottom — the direction a log reads. */
+function ActivityFeed({
+  label,
+  canCancel,
+  onClose,
+}: {
+  label: string;
+  /** Only a run this window started can be stopped from here. */
+  canCancel: boolean;
+  onClose: () => void;
+}) {
   const activity = useAgentReviewStore((s) => s.activity);
+  const cancel = useAgentReviewStore((s) => s.cancel);
   const scroller = useRef<HTMLDivElement>(null);
   // Follow the tail, but only while the reader is AT the tail: yanking someone back
   // down every fifteen seconds makes the panel unusable for the one thing it is for,
@@ -105,7 +138,7 @@ function ActivityFeed({ onClose }: { onClose: () => void }) {
   return (
     <div className="review-activity" role="log" aria-label="Detailed review activity">
       <div className="review-activity-head">
-        <span>Activity</span>
+        <span className="review-activity-step">{label}</span>
         <button className="btn-ghost review-activity-close" onClick={onClose} aria-label="Close activity">
           ✕
         </button>
@@ -124,6 +157,20 @@ function ActivityFeed({ onClose }: { onClose: () => void }) {
           activity.map((entry, i) => <ActivityRow key={entry.seq} entry={entry} previous={activity[i - 1]} />)
         )}
       </div>
+      {canCancel && (
+        <div className="review-activity-foot">
+          <button
+            className="btn-ghost review-activity-cancel"
+            title="Stop the assistant now. Nothing is imported."
+            onClick={() => {
+              onClose();
+              void cancel();
+            }}
+          >
+            Cancel review
+          </button>
+        </div>
+      )}
     </div>
   );
 }

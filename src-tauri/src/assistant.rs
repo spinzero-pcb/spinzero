@@ -423,12 +423,23 @@ pub fn setup() -> AssistantSetup {
     }
 }
 
-/// The labels of the clients whose config lists SpinZero. Reads files only and spawns
-/// nothing, so the review launcher can ask every time it opens.
-pub fn connected_clients() -> Vec<String> {
+/// A client whose own config lists SpinZero.
+#[derive(Serialize)]
+pub struct ConnectedClient {
+    pub id: String,
+    pub label: String,
+}
+
+/// The clients whose config lists SpinZero. Reads files only and spawns nothing, so
+/// the review launcher can ask every time it opens.
+pub fn connected_clients() -> Vec<ConnectedClient> {
     let mut clients = clients("");
     mark_connected(&mut clients);
-    clients.into_iter().filter(|c| c.connected).map(|c| c.label).collect()
+    clients
+        .into_iter()
+        .filter(|c| c.connected)
+        .map(|c| ConnectedClient { id: c.id, label: c.label })
+        .collect()
 }
 
 #[derive(Serialize)]
