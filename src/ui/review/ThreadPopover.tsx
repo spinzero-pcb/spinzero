@@ -75,7 +75,7 @@ function initials(name: string): string {
 }
 
 /** Renders the new-comment composer (when `compose` is set) or the thread popover
- *  for the open comment — both float over the canvas (docs/phase2-ui-plan.md §4). */
+ *  for the open comment — both float over the canvas (docs/archive/phase2-ui-plan.md §4). */
 export function ThreadPopover() {
   const compose = useReviewStore((s) => s.compose);
   const openThreadId = useReviewStore((s) => s.openThreadId);

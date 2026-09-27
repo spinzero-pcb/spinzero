@@ -7,7 +7,7 @@ import { nav, pcbNav, type ChipComment } from "../canvas/navigator";
 // Keeps the canvases' object-anchored comment chips in sync with the review state
 // and the live design (re-check status is derived from the design, so chips must
 // recompute when either changes). Renders nothing — it only drives the imperative
-// canvas bridges (docs/phase2-ui-plan.md §3, build order step 4).
+// canvas bridges (docs/archive/phase2-ui-plan.md §3, build order step 4).
 export function CommentBridge() {
   const comments = useReviewStore((s) => s.comments);
   const indexes = useDesignStore((s) => s.indexes);
