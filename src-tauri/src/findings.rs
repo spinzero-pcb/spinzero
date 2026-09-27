@@ -1,6 +1,6 @@
 //! The findings document, and the column mapping that goes with it.
 //!
-//! These are the PUBLISHED shapes — `schemas/findings-1.2.json` is the same document
+//! These are the PUBLISHED shapes — `schemas/findings-1.3.json` is the same document
 //! written down — and they live here rather than inside the rule pack because the app
 //! reads them from three places, only one of which is the rule pack:
 //!
@@ -106,7 +106,7 @@ pub struct FindingsDoc {
     /// How the review was produced, and which of the user's columns it read.
     ///
     /// Carried VERBATIM and never inspected here. Both blocks exist for the frontend,
-    /// which decodes them against `schemas/findings-1.2.json`; giving Rust a second
+    /// which decodes them against `schemas/findings-1.3.json`; giving Rust a second
     /// typed copy would be two definitions of one contract, and the day they drift is
     /// the day a field silently stops arriving. Untyped, they cannot drift — they can
     /// only be dropped, which is what this field exists to stop.

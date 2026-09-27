@@ -435,8 +435,9 @@ pub fn validated_doc(value: serde_json::Value) -> Result<FindingsDoc, String> {
     // Every version we have ever written, because these documents live in the user's
     // project folder and a review from six months ago must still open. 1.2 renamed the
     // severity words; `Severity::parse` still accepts the 1.0/1.1 spellings, so an old
-    // document renders rather than failing to load.
-    const SUPPORTED: &[&str] = &["1.0", "1.1", "1.2"];
+    // document renders rather than failing to load. 1.3 adds the `Not verified`
+    // severity, and it is the version the MCP harness writes into the inbox.
+    const SUPPORTED: &[&str] = &["1.0", "1.1", "1.2", "1.3"];
     if !SUPPORTED.contains(&doc.schema_version.as_str()) {
         return Err(format!(
             "findings schema_version {} is not supported by this app (expected one of {})",
@@ -912,6 +913,19 @@ mod tests {
 
         assert!(read_inbox(&root, "bom-detailed-2026.json").is_ok());
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_harness_document_version_imports_and_an_unknown_one_does_not() {
+        let doc = |v: &str| {
+            serde_json::json!({
+                "schema_version": v, "engine_version": "x", "pipeline": "bom-detailed",
+                "profile": "default", "findings": [], "bom_audit": [], "stats": {}
+            })
+        };
+        assert!(validated_doc(doc("1.3")).is_ok(), "the harness writes 1.3");
+        let err = validated_doc(doc("9.9")).expect_err("an unknown version is refused");
+        assert!(err.contains("not supported"), "{err}");
     }
 
     #[test]

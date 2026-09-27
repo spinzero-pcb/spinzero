@@ -108,7 +108,7 @@ export interface FindingsDoc {
   column_mapping?: ColumnMapping;
 }
 
-/** Mirrors `$defs/column_mapping` in `schemas/findings-1.2.json`. */
+/** Mirrors `$defs/column_mapping` in `schemas/findings-1.3.json`. */
 export interface ColumnMapping {
   fields: {
     field: string;
@@ -133,7 +133,7 @@ export interface ColumnMapping {
  *  but somebody else's model doing the judging, and a reader is entitled to know that
  *  before they trust it. `prompt_pack` is the other half — two reviews of the same
  *  board that disagree are explained by a content version far more often than by a
- *  regression. Mirrors `$defs/execution` in `schemas/findings-1.2.json`. */
+ *  regression. Mirrors `$defs/execution` in `schemas/findings-1.3.json`. */
 export interface Execution {
   surface: "local" | "mcp" | "hosted";
   /** What the client reported itself as. Never verified — read it as a claim. */
