@@ -112,7 +112,7 @@ impl AgentProfile {
 /// Claude Code is the only one marked verified, because it is the only one this
 /// machine could run end to end. The rest are starting points: the picker fills the
 /// fields in and the user edits them, which is a better answer than leaving somebody
-/// with Codex to work out the flags from nothing. See `docs/app-review-deviations.md`.
+/// with Codex to work out the flags from nothing. See `docs/bom-review-flow.md` section C, "The status file".
 pub fn builtin_profiles() -> Vec<AgentProfile> {
     vec![
         AgentProfile::new("claude-code", "Claude Code", "claude", &["-p", "{prompt}"], true),
