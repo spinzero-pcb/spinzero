@@ -20,16 +20,17 @@ import { IconCheck, IconChevron, IconInfo, IconPremium, IconRefresh } from "../i
 // detailed review which assistant runs it. Pressing Run saves the mapping (that IS
 // the approval) and starts the review. Explanations are tooltips, not paragraphs.
 //
-// **Which assistant.** One button per assistant that is connected (its own config
-// lists SpinZero), so the choice is visible and one click. The program and arguments
+// **Which AI agent.** A dropdown of every agent the app can start. A connected one
+// (its own config lists SpinZero) gets a green tick beside the dropdown; one that is
+// not gets Connect… there instead, and Run waits. The program and arguments
 // SpinZero starts are behind the `</>` button: a default that works needs no editing,
 // and the rare user who does need it finds it where the other screens put commands.
 //
 // The end application is `project.class`, not a second setting — see lib/projectClass.
 
 const PRIVACY_AGENT =
-  "Runs on this machine with your own AI assistant, on your subscription. Only part " +
-  "numbers are looked up online. The assistant runs with its own permissions.";
+  "Runs on this machine with your own AI agent, on your subscription. Only part " +
+  "numbers are looked up online. The agent runs with its own permissions.";
 
 const DEPTH_HINT: Record<BomDepth, string> = {
   quick: "Rule checks · a few seconds · runs locally",
@@ -91,8 +92,11 @@ export function BomReviewSetup() {
 
   const detailedBusy = isAgentRunning(agentPhase);
   const busy = running || detailedBusy || saving;
+  // Set by the Runs on row: is the chosen agent connected to SpinZero? An agent that
+  // is not would start with no SpinZero tools and fail minutes later.
+  const [agentConnected, setAgentConnected] = useState(true);
   const missing = missingFromAgent(agent);
-  const blocked = depth === "detailed" && missing.length > 0;
+  const blocked = depth === "detailed" && (missing.length > 0 || !agentConnected);
 
   async function start() {
     if (busy || blocked) return;
@@ -178,7 +182,7 @@ export function BomReviewSetup() {
             <span className="rs-hint">{DEPTH_HINT[depth]}</span>
           </div>
 
-          {depth === "detailed" && <AgentRow busy={busy} />}
+          {depth === "detailed" && <AgentRow busy={busy} onConnected={setAgentConnected} />}
 
           {error && <p className="wizard-hint setup-error">{error}</p>}
 
@@ -193,7 +197,9 @@ export function BomReviewSetup() {
                 detailedBusy
                   ? "A detailed review is running — see the status bar"
                   : blocked
-                    ? `Fill in ${missing.join(", ")} first`
+                    ? missing.length
+                      ? `Fill in ${missing.join(", ")} first`
+                      : `Connect ${agent.label} first`
                     : "Ctrl+Enter"
               }
               onClick={() => void start()}
@@ -354,11 +360,10 @@ function MappingSection({ disabled }: { disabled: boolean }) {
 }
 
 /**
- * Which assistant runs the detailed review: one button per connected assistant, plus
- * the saved choice if it is not among them (so the current state is always visible).
- * Nothing connected → one button that opens the Connect screen.
+ * Which AI agent runs the detailed review: a dropdown of every agent the app can start.
+ * "Something else" is not a button; it is the `</>` editor.
  */
-function AgentRow({ busy }: { busy: boolean }) {
+function AgentRow({ busy, onConnected }: { busy: boolean; onConnected: (yes: boolean) => void }) {
   const saved = useSettingsStore((s) => s.agentProfile);
   const setAgentProfile = useSettingsStore((s) => s.setAgentProfile);
   const openConnect = useRunLauncherStore((s) => s.openConnect);
@@ -401,9 +406,12 @@ function AgentRow({ busy }: { busy: boolean }) {
     return Boolean(client && connected?.has(client));
   };
   const options = (shipped.length ? shipped : [DEFAULT_AGENT_PROFILE]).filter(
-    (p) => isConnected(p) || p.id === current.id,
+    (p) => p.id in CLIENT_FOR_PROFILE || p.id === current.id,
   );
   const currentConnected = isConnected(current);
+  // Unknown until the first read; a custom command cannot be checked, so it counts.
+  const ready = connected === null || currentConnected || !(current.id in CLIENT_FOR_PROFILE);
+  useEffect(() => onConnected(ready), [ready, onConnected]);
 
   function pick(p: AgentProfile) {
     void setAgentProfile(p);
@@ -417,31 +425,32 @@ function AgentRow({ busy }: { busy: boolean }) {
       <div className="rs-row">
         <span className="rs-label">Runs on</span>
         <div className="rs-seg-line">
-          {options.length > 0 && (
-            <div className="rs-seg" role="radiogroup" aria-label="Runs on">
-              {options.map((p) => (
-                <SegButton
-                  key={p.id}
-                  on={p.id === current.id}
-                  disabled={busy}
-                  title={isConnected(p) ? "Connected" : "Not connected to SpinZero yet"}
-                  onClick={() => pick(p)}
-                >
-                  {p.label}
-                  {isConnected(p) && (
-                    <span className="rs-ok" aria-label="Connected">
-                      <IconCheck size={12} />
-                    </span>
-                  )}
-                </SegButton>
-              ))}
-            </div>
+          <select
+            className="rv-select rs-agent"
+            aria-label="Runs on"
+            value={current.id}
+            disabled={busy}
+            onChange={(e) => {
+              const p = options.find((o) => o.id === e.target.value);
+              if (p) pick(p);
+            }}
+          >
+            {options.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.label}
+              </option>
+            ))}
+          </select>
+          {currentConnected && (
+            <span className="rs-ok" title="Connected" aria-label="Connected">
+              <IconCheck size={14} />
+            </span>
           )}
-          {!currentConnected && (
+          {!ready && (
             <button
               type="button"
               className="btn-ghost rs-connect"
-              title="Register SpinZero with your assistant"
+              title={`Register SpinZero with ${current.label}`}
               onClick={() => openConnect()}
             >
               Connect…

@@ -47,7 +47,7 @@ describe("executionSummary", () => {
       },
     });
     expect(out?.text).toBe("pack/2026.08.27-1");
-    expect(out?.detail).toContain("Reviewed by your assistant");
+    expect(out?.detail).toContain("Reviewed by your AI agent");
     // "Reported, never verified" is a real caveat, so it is said rather than implied.
     expect(out?.detail).toContain("as reported by the client");
     expect(out?.detail).toContain("bom-rules 0.0.5");

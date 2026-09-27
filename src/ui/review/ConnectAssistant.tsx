@@ -6,7 +6,7 @@ import type { AssistantClient, AssistantSetup } from "../../lib/types";
 import { useToastStore } from "../../stores/toastStore";
 import { IconCheck, IconCopy, IconInfo, IconSparkle } from "../icons";
 
-// "Connect your AI assistant" — the setup screen for running SpinZero reviews through
+// "Connect your AI agent" — the setup screen for running SpinZero reviews through
 // Claude Code, Cursor, Codex, or anything else that speaks MCP.
 //
 // **What this exists to prevent.** A misconfigured MCP server does not fail loudly. The
@@ -125,12 +125,12 @@ export function ConnectAssistant({ onClose }: { onClose: () => void }) {
 
   return (
     <div className="wizard-overlay" onPointerDown={(e) => e.target === e.currentTarget && onClose()}>
-      <div className="wizard-card connect-card" role="dialog" aria-label="Connect your AI assistant">
+      <div className="wizard-card connect-card" role="dialog" aria-label="Connect your AI agent">
         <div className="wizard-head">
           <span className="wizard-icon">
             <IconSparkle size={18} />
           </span>
-          <div className="wizard-title">Connect your AI assistant</div>
+          <div className="wizard-title">Connect your AI agent</div>
           <Info text={PRIVACY} />
         </div>
 
@@ -172,7 +172,7 @@ export function ConnectAssistant({ onClose }: { onClose: () => void }) {
 
               <div className="wizard-label connect-step">
                 <span className="connect-num">2</span>
-                Assistant
+                AI agent
                 <Info text={CLIENTS} />
               </div>
               <ul className="connect-clients">
@@ -256,10 +256,10 @@ export function ConnectAssistant({ onClose }: { onClose: () => void }) {
 
 const PRIVACY =
   "Only part numbers leave this machine, for distributor and datasheet lookups. " +
-  "Your assistant's model provider sees what your assistant reads.";
+  "Your AI agent's model provider sees what the agent reads.";
 
 const CLIENTS =
-  "SpinZero never edits another program's settings. Connect runs your assistant's own " +
+  "SpinZero never edits another program's settings. Connect runs the agent's own " +
   "command. Where there is no command, copy the config into the file it names.";
 
 /** An info icon. Its text shows on hover. */

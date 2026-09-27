@@ -14,7 +14,7 @@ interface RunLauncherState {
   menuOpen: boolean;
   /** Which review's setup sheet is up; null = none. */
   setupFor: ReviewKindId | null;
-  /** The "Connect your AI assistant" screen. Lives here rather than in component
+  /** The "Connect your AI agent" screen. Lives here rather than in component
    *  state because it is reachable from the launcher popover and from the BOM
    *  review's own setup sheet, and two copies would drift. */
   connectOpen: boolean;

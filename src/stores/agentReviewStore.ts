@@ -202,7 +202,7 @@ export const useAgentReviewStore = create<AgentReviewState>((set, get) => ({
         useToastStore.getState().push({
           kind: "warning",
           title: "Nothing to cancel here",
-          message: "This review was started outside SpinZero. Stop it in the assistant that runs it.",
+          message: "This review was started outside SpinZero. Stop it in the AI agent that runs it.",
         });
         return;
       }

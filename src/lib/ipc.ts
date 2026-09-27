@@ -164,7 +164,7 @@ export const ipc = {
    *  own `status.json`. Asked on mount so a reopened window picks up a run in flight. */
   agentReviewStatus: () => invoke<RunStatus | null>("agent_review_status"),
 
-  /** Everything the "Connect your AI assistant" screen needs: where the server is,
+  /** Everything the "Connect your AI agent" screen needs: where the server is,
    *  where the licence file is, and which assistants this machine has. */
   assistantSetup: () => invoke<AssistantSetup>("assistant_setup"),
   /** The assistants whose own config lists SpinZero. Reads files, spawns nothing. */

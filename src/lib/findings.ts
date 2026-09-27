@@ -296,7 +296,7 @@ export function executionSummary(
   if (!e) return null;
   const SURFACE: Record<Execution["surface"], string> = {
     local: "Reviewed in SpinZero",
-    mcp: "Reviewed by your assistant",
+    mcp: "Reviewed by your AI agent",
     hosted: "Reviewed on the hosted service",
   };
   const detail = [

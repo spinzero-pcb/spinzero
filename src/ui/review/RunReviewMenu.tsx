@@ -204,7 +204,7 @@ export function RunReviewMenu() {
             title="Run SpinZero reviews through Claude Code, Cursor, or any MCP client — on your own subscription"
             onClick={() => openConnect()}
           >
-            <span className="run-review-name">Connect your AI assistant</span>
+            <span className="run-review-name">Connect your AI agent</span>
             <span className="run-review-meta">
               {connected.length > 0 ? (
                 <span className="run-review-connected" title={connected.join(", ")}>

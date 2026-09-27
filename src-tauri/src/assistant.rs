@@ -140,7 +140,7 @@ fn ensure_licence_file() -> PathBuf {
                     #\n\
                     # Paste it on a line of its own, below. Lines starting with # are ignored.\n\
                     #\n\
-                    # Nothing else needs the key. Every AI assistant you connect reads it from\n\
+                    # Nothing else needs the key. Every AI agent you connect reads it from\n\
                     # this file, so rotating a key means editing this one line.\n\n\n";
     let _ = std::fs::write(&path, template);
     path
