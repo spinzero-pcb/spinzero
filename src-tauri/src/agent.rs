@@ -303,10 +303,7 @@ impl AgentRun {
                     emit(
                         &app,
                         AgentEvent::Failed {
-                            detail: format!(
-                                "could not start {bin}: {e}. Check the program name in the review setup, \
-                                 and that it is installed and on PATH."
-                            ),
+                            detail: format!("could not start {bin}: {e}"),
                         },
                     );
                     running.store(false, Ordering::SeqCst);
@@ -325,10 +322,19 @@ impl AgentRun {
                 }
             }
 
+            // The last few lines are kept because an agent run with `-p` reports its
+            // own failure on stdout ("Failed to authenticate…"), not on stderr. That
+            // line is the only useful thing a failed run says, so it becomes the
+            // failure's detail instead of an exit code.
+            let mut last_out: Vec<String> = Vec::new();
             if let Some(out) = child.stdout.take() {
                 for line in BufReader::new(out).lines().map_while(Result::ok) {
                     let line = line.trim().to_string();
                     if !line.is_empty() {
+                        last_out.push(line.clone());
+                        if last_out.len() > 5 {
+                            last_out.remove(0);
+                        }
                         emit(&app, AgentEvent::Progress { line });
                     }
                 }
@@ -366,13 +372,24 @@ impl AgentRun {
                 }
                 Ok(s) => {
                     log::warn!("agent review exited {s}");
+                    for line in &last_out {
+                        log::info!("{} agent review output: {line}", crate::telemetry::LOCAL_ONLY);
+                    }
+                    // The agent's own last words, where it said any; the exit code only
+                    // when it said nothing. The frontend turns this into advice.
+                    let said = last_out
+                        .last()
+                        .map(String::as_str)
+                        .or_else(|| tail.lines().rev().find(|l| !l.trim().is_empty()))
+                        .map(str::trim)
+                        .filter(|l| !l.is_empty());
                     emit(
                         &app,
                         AgentEvent::Failed {
-                            detail: format!(
-                                "{label} exited without finishing ({s}). {}",
-                                tail.lines().last().unwrap_or_default()
-                            ),
+                            detail: match said {
+                                Some(line) => line.to_string(),
+                                None => format!("{label} stopped ({s}) and gave no reason."),
+                            },
                         },
                     );
                 }

@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import { useBomCheckStore } from "../../stores/bomCheckStore";
 import { isAgentRunning, useAgentReviewStore } from "../../stores/agentReviewStore";
 import { useRunLauncherStore } from "../../stores/runLauncherStore";
+import { useSettingsStore } from "../../stores/settingsStore";
+import { explainFailure } from "../../lib/agentFailure";
 import { coverageGaps, partCoverage, runHealthSummary, type CoverageGap } from "../../lib/findings";
 import { IconAlert } from "../icons";
 
@@ -111,11 +113,16 @@ export function ReviewOutcome() {
   }
 
   const failed = outcome.kind === "failed";
+  // A failed run says what went wrong and what to do, in that order. The agent's own
+  // words stay underneath, small: they are the evidence, not the message.
+  const advice = failed
+    ? explainFailure(outcome.detail, useSettingsStore.getState().effectiveAgent().label)
+    : null;
   return (
     <div className="review-outcome" ref={wrapRef}>
       <button
         className={`review-outcome-pill ${failed ? "failed" : "incomplete"} ${open ? "on" : ""}`}
-        title={outcome.detail}
+        title={advice ? advice.title : outcome.detail}
         aria-haspopup="dialog"
         aria-expanded={open}
         onClick={() => setOpen((v) => !v)}
@@ -126,19 +133,19 @@ export function ReviewOutcome() {
 
       {open && (
         <div className="review-outcome-pop" role="dialog" aria-label={outcome.text}>
-          <div className="review-outcome-hd">{outcome.text}</div>
-          {/* What it MEANS, before what it was. A stage name answers a question the
-              reader did not ask; "do not trust the all-clear" is the one they did. */}
+          <div className="review-outcome-hd">{advice ? advice.title : outcome.text}</div>
+          {/* What to DO, before what it was. A stage name or an exit code answers a
+              question the reader did not ask. */}
           <p className="review-outcome-what">
-            {failed
-              ? "This review did not finish, so nothing from it has been filed. The findings in the review panel are from an earlier run."
+            {advice
+              ? advice.fix
               : "Some of this board was not checked. Do not read a clean result as an all-clear — the list below is what nobody looked at."}
           </p>
           {/* The coverage sentence first, because "65 of 72 part numbers were accounted
               for" answers the question the list below only implies. */}
           {outcome.coverage && <p className="review-outcome-coverage">{outcome.coverage}</p>}
           {outcome.detail && (
-            <div className="review-outcome-detail">
+            <div className={`review-outcome-detail ${failed ? "said" : ""}`}>
               {outcome.detail.split("\n").map((line, i) => (
                 <div key={i}>{line}</div>
               ))}
@@ -167,10 +174,11 @@ export function ReviewOutcome() {
               className="btn-primary"
               onClick={() => {
                 dismiss();
-                useRunLauncherStore.getState().openSetup("bom");
+                if (advice?.action === "connect") useRunLauncherStore.getState().openConnect();
+                else useRunLauncherStore.getState().openSetup("bom");
               }}
             >
-              Run again
+              {advice?.action === "connect" ? "Connect…" : "Run again"}
             </button>
           </div>
         </div>

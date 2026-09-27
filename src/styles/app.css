@@ -2845,6 +2845,9 @@ textarea.wizard-input {
   line-height: 1.5;
   overflow-wrap: anywhere;
 }
+/* The agent's own words under a failure: evidence, so small and quiet. */
+.review-outcome-detail.said { font-family: var(--font-mono); font-size: var(--fs-0); color: var(--fg-2); }
+
 .review-outcome-acts {
   display: flex;
   justify-content: flex-end;

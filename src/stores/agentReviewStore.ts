@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { ipc, onAgentEvent, type AgentEvent, type RunStatus } from "../lib/ipc";
+import { explainFailure } from "../lib/agentFailure";
 import { stageLabel } from "../lib/findings";
 import { currentBomProfile } from "./bomCheckStore";
 import { useBomMappingStore } from "./bomMappingStore";
@@ -278,11 +279,11 @@ export const useAgentReviewStore = create<AgentReviewState>((set, get) => ({
         case "failed":
           set({ phase: "failed", error: ev.detail, line: "", startedAt: null });
           push(set, get, "error", ev.detail);
-          useToastStore.getState().push({
-            kind: "error",
-            title: "The review did not finish",
-            message: ev.detail,
-          });
+          {
+            // Advice, not the raw line: the footer's Review failed panel keeps that.
+            const advice = explainFailure(ev.detail, useSettingsStore.getState().effectiveAgent().label);
+            useToastStore.getState().push({ kind: "error", title: advice.title, message: advice.fix });
+          }
           break;
         case "cancelled": {
           const id = get().status?.review_id;
