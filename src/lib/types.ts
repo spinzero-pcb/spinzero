@@ -5,7 +5,8 @@ export type ProjectKind = "kicad";
 /** Functional safety / market class of the board (drives review rigor + specs). */
 export type ProjectClass =
   | "general"
-  | "automotive"
+  | "automotive-comfort"
+  | "automotive-safety"
   | "commercial"
   | "medical"
   | "industrial"

@@ -8,7 +8,7 @@ import { useSettingsStore } from "../../stores/settingsStore";
 import type { AgentProfile } from "../../lib/types";
 import { DEFAULT_AGENT_PROFILE, missingFromAgent } from "../../lib/agentProfiles";
 import { bomFieldLabel, bomFieldRank } from "../../lib/bomFields";
-import { bomProfileForClass, isProjectClass, PROJECT_CLASSES } from "../../lib/projectClass";
+import { bomProfileForClass, isProjectClass, normalizeClass, PROJECT_CLASSES } from "../../lib/projectClass";
 import { ipc } from "../../lib/ipc";
 import { IconCheck, IconChevron, IconInfo, IconPremium, IconRefresh } from "../icons";
 
@@ -52,7 +52,7 @@ export function BomReviewSetup() {
 
   const project = useProjectStore((s) => s.project);
   const setClass = useProjectStore((s) => s.setClass);
-  const cls = project?.class ?? "general";
+  const cls = normalizeClass(project?.class);
 
   const depth = useBomCheckStore((s) => s.depth);
   const setDepth = useBomCheckStore((s) => s.setDepth);
