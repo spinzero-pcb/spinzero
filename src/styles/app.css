@@ -2999,6 +2999,8 @@ textarea.wizard-input {
   gap: var(--sp-3);
 }
 .rs-row-sub { margin-top: calc(-1 * var(--sp-2)); }
+/* A depth hint is two short lines on purpose: what it does, then how it compares. */
+.rs-row-sub .rs-hint { white-space: pre-line; }
 .rs-label { color: var(--fg-1); font-size: var(--fs-1); }
 .rs-hint { color: var(--fg-2); font-size: var(--fs-0); line-height: 1.45; }
 
@@ -3030,16 +3032,11 @@ textarea.wizard-input {
 .rs-seg-btn.on { background: var(--accent-dim); color: var(--fg-0); box-shadow: inset 0 0 0 1px var(--accent); }
 .rs-seg-btn:disabled { cursor: default; opacity: 0.6; }
 
-/* "Runs on": a tick on a connected agent, the Connect door when the chosen one is
-   not, and the `</>` toggle for the command SpinZero starts. */
+/* "Runs on": a tick on a connected agent, and the Connect door when the chosen one is
+   not. */
 .rs-ok { display: inline-grid; color: var(--ok); }
 .rs-agent { min-width: 160px; }
 .rs-connect { color: var(--accent); font-size: var(--fs-0); }
-.rs-icon { font-family: var(--font-mono); font-size: var(--fs-0); padding: 2px var(--sp-2); }
-.rs-icon.on { color: var(--fg-0); border-color: var(--accent); }
-.rs-cmd { display: flex; align-items: center; gap: var(--sp-1); }
-.rs-cmd .wizard-input { min-width: 0; flex: 1; font-family: var(--font-mono); font-size: var(--fs-0); }
-.rs-cmd .rs-cmd-bin { flex: 0 0 110px; }
 .rs-meta { color: var(--fg-2); }
 
 /* Column mapping: a summary row that unfolds into the editable table in place. */

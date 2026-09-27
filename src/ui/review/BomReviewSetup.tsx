@@ -8,7 +8,6 @@ import { useSettingsStore } from "../../stores/settingsStore";
 import type { AgentProfile } from "../../lib/types";
 import { DEFAULT_AGENT_PROFILE, missingFromAgent } from "../../lib/agentProfiles";
 import { bomFieldLabel, bomFieldRank } from "../../lib/bomFields";
-import { formatArgs, parseArgs } from "../../lib/mcpConfig";
 import { bomProfileForClass, isProjectClass, PROJECT_CLASSES } from "../../lib/projectClass";
 import { ipc } from "../../lib/ipc";
 import { IconCheck, IconChevron, IconInfo, IconPremium, IconRefresh } from "../icons";
@@ -22,9 +21,8 @@ import { IconCheck, IconChevron, IconInfo, IconPremium, IconRefresh } from "../i
 //
 // **Which AI agent.** A dropdown of every agent the app can start. A connected one
 // (its own config lists SpinZero) gets a green tick beside the dropdown; one that is
-// not gets Connect… there instead, and Run waits. The program and arguments
-// SpinZero starts are behind the `</>` button: a default that works needs no editing,
-// and the rare user who does need it finds it where the other screens put commands.
+// not gets Connect… there instead, and Run waits. The command SpinZero starts for
+// each agent is not shown: the shipped one works, and editing it helps nobody.
 //
 // The end application is `project.class`, not a second setting — see lib/projectClass.
 
@@ -34,7 +32,8 @@ const PRIVACY_AGENT =
 
 const DEPTH_HINT: Record<BomDepth, string> = {
   quick: "Rule checks · a few seconds · runs locally",
-  detailed: "Every part checked against its datasheet · about 10 minutes",
+  detailed: "Your AI agent follows the SpinZero review workflow to check every part against its datasheet." +
+    "\nMuch deeper than Instant · about 10 minutes",
 };
 
 /** Which assistant (a Connect screen client) drives which agent profile. Only these
@@ -361,7 +360,6 @@ function MappingSection({ disabled }: { disabled: boolean }) {
 
 /**
  * Which AI agent runs the detailed review: a dropdown of every agent the app can start.
- * "Something else" is not a button; it is the `</>` editor.
  */
 function AgentRow({ busy, onConnected }: { busy: boolean; onConnected: (yes: boolean) => void }) {
   const saved = useSettingsStore((s) => s.agentProfile);
@@ -372,7 +370,6 @@ function AgentRow({ busy, onConnected }: { busy: boolean; onConnected: (yes: boo
 
   const [shipped, setShipped] = useState<AgentProfile[]>([]);
   const [connected, setConnected] = useState<Set<string> | null>(null);
-  const [edit, setEdit] = useState(false);
 
   useEffect(() => {
     let alive = true;
@@ -415,7 +412,6 @@ function AgentRow({ busy, onConnected }: { busy: boolean; onConnected: (yes: boo
 
   function pick(p: AgentProfile) {
     void setAgentProfile(p);
-    setEdit(false);
   }
 
   if (connected === null) return null;
@@ -456,73 +452,11 @@ function AgentRow({ busy, onConnected }: { busy: boolean; onConnected: (yes: boo
               Connect…
             </button>
           )}
-          <button
-            type="button"
-            className={`btn-ghost rs-icon ${edit ? "on" : ""}`}
-            disabled={busy}
-            title="The command SpinZero starts"
-            aria-label="The command SpinZero starts"
-            aria-expanded={edit}
-            onClick={() => setEdit((v) => !v)}
-          >
-            {"</>"}
-          </button>
           <span className="setup-info" title={PRIVACY_AGENT} aria-label={PRIVACY_AGENT} role="img">
             <IconInfo size={14} />
           </span>
         </div>
       </div>
-      {edit && <AgentCommand profile={current} busy={busy} onDone={() => setEdit(false)} />}
     </>
-  );
-}
-
-/** The program and arguments SpinZero starts for this assistant. Rarely edited. */
-function AgentCommand({ profile, busy, onDone }: { profile: AgentProfile; busy: boolean; onDone: () => void }) {
-  const setAgentProfile = useSettingsStore((s) => s.setAgentProfile);
-  const [bin, setBin] = useState(profile.bin);
-  const [args, setArgs] = useState(formatArgs(profile.args));
-
-  function save() {
-    void setAgentProfile({ ...profile, bin: bin.trim(), args: parseArgs(args) });
-    onDone();
-  }
-
-  return (
-    <div className="rs-row">
-      <span />
-      <div className="rs-cmd">
-        <input
-          className="wizard-input rs-cmd-bin"
-          value={bin}
-          spellCheck={false}
-          placeholder="claude"
-          aria-label="Program"
-          onChange={(e) => setBin(e.target.value)}
-        />
-        <input
-          className="wizard-input"
-          value={args}
-          spellCheck={false}
-          placeholder="-p {prompt}"
-          aria-label="Arguments"
-          onChange={(e) => setArgs(e.target.value)}
-        />
-        <span
-          className="setup-info"
-          role="img"
-          title={
-            "{prompt} is where the review instructions go; {project_dir} is this board's folder." +
-            (profile.verified ? "" : " SpinZero has not tested this assistant end to end.")
-          }
-          aria-label="About the command"
-        >
-          <IconInfo size={13} />
-        </span>
-        <button className="btn-ghost" disabled={busy || !bin.trim()} onClick={save}>
-          Save
-        </button>
-      </div>
-    </div>
   );
 }
