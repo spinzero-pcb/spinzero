@@ -58,11 +58,6 @@ export const KNOWN_ENV: { key: string; label: string; hint: string }[] = [
     label: "Improvement telemetry",
     hint: "On by default. Set to 0 to switch it off.",
   },
-  {
-    key: "SPINZERO_MCP_DEV",
-    label: "Development build",
-    hint: "Set to 1 to run an unlicensed build from source. missingFrom accepts it in place of a licence key, and without a field for it that escape hatch was unreachable from the one screen that depends on it.",
-  },
 ];
 
 /**

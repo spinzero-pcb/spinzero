@@ -8,6 +8,7 @@ mod device;
 mod diff;
 mod events;
 mod index_db;
+mod lane;
 mod logging;
 mod presence;
 mod project;
@@ -1261,8 +1262,9 @@ fn import_review_inbox(
 
 /// Start a BOM review through the user's own AI agent, over MCP.
 ///
-/// The app supplies the prompt and nothing else. The agent's own MCP registration,
-/// permissions and sub-agents are its owner's business — see `agent.rs`. The findings
+/// The app supplies the prompt, and for Claude Code it first points the `spinzero`
+/// registration at this build's own server (`lane.rs`). The agent's permissions and
+/// sub-agents are its owner's business — see `agent.rs`. The findings
 /// come back through the review drop-box like every other review that ran outside this
 /// window, so there is exactly one ingestion path (`bomcheck::inbox_dir`).
 ///
@@ -1276,6 +1278,26 @@ fn start_agent_review(
     brief: agent::ReviewBrief,
 ) -> Result<(), String> {
     let handle = current_project(&state)?;
+    // A dev build's server needs the dev service. Usually start-up already started it,
+    // and this is one port check. If it went down since, it starts again here.
+    lane::ensure_dev_service().map_err(|e| format!("This dev build needs the dev service: {e}"))?;
+    // Claude Code finds the review server through its `spinzero` registration, so make
+    // it this build's own before the review starts. See lane.rs.
+    if agent.id == "claude-code" {
+        let lane = lane::current();
+        match lane::sync() {
+            Ok(outcome) => log::info!("review lane {}: {outcome:?}", lane.name()),
+            // An installed build reviews anyway: the Connect screen set the entry, and a
+            // customer should not be stopped by our housekeeping.
+            Err(e) if lane == lane::Lane::Installed => {
+                log::warn!("could not check the review server registration");
+                log::info!("{} review lane: {e}", telemetry::LOCAL_ONLY);
+            }
+            // A dev or candidate build stops: the review would run on another build's
+            // server and look like it ran on this one.
+            Err(e) => return Err(format!("This {} build could not point Claude Code at its own review server: {e}", lane.name())),
+        }
+    }
     telemetry::bump("agent_reviews");
     log::info!("starting an agent review with the {} profile", agent.id);
     state
@@ -1576,6 +1598,11 @@ fn ensure_valid_cwd() {
 }
 
 pub fn run() {
+    // A dev build runs the fresh `bom-rules` build, like the dev review server does.
+    // First, because it sets an environment variable, which must happen before any
+    // thread starts. See lane.rs.
+    lane::adopt_dev_sidecars();
+
     // Initialise Sentry FIRST and keep its guard for the entire run — it flushes
     // pending telemetry on drop and installs the panic-capture integration that
     // our logging panic hook (set up later) chains onto. DSN-gated, so this stays
@@ -1651,6 +1678,21 @@ pub fn run() {
             ensure_valid_cwd();
             // The main window is `create: false` in tauri.conf.json, so exactly one of
             // the two windows is built here.
+            if !setup_mode {
+                // Point Claude Code's `spinzero` at this build's own server now, so the
+                // review screen's "connected" check reads the right answer. Off the main
+                // thread: it can run the `claude` CLI, which takes a second. A dev build
+                // also starts the dev service here, so it is up before the first review.
+                std::thread::spawn(|| {
+                    if let Err(e) = lane::ensure_dev_service() {
+                        log::info!("{} dev service not started: {e}", telemetry::LOCAL_ONLY);
+                    }
+                    match lane::sync() {
+                        Ok(outcome) => log::info!("review lane {}: {outcome:?}", lane::current().name()),
+                        Err(e) => log::info!("{} review lane not set at start-up: {e}", telemetry::LOCAL_ONLY),
+                    }
+                });
+            }
             if setup_mode {
                 log::info!("starting as the review setup window");
                 tauri::WebviewWindowBuilder::new(app, "setup", tauri::WebviewUrl::App("index.html?setup=1".into()))
