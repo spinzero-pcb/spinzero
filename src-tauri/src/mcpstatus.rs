@@ -65,7 +65,7 @@ pub struct RunStatus {
     pub steps_done: u32,
     #[serde(default)]
     pub steps_total: u32,
-    /// The steps open now, oldest first. Up to three run at once. Empty from a server
+    /// The steps open now, oldest first. Up to ten run at once. Empty from a server
     /// older than parallel steps.
     #[serde(default)]
     pub open_steps: Vec<OpenStepStatus>,

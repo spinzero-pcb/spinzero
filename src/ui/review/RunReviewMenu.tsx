@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { ipc } from "../../lib/ipc";
+import { SEVERITY_WEIGHT } from "../../lib/severity";
 import { isAgentRunning, useAgentReviewStore } from "../../stores/agentReviewStore";
 import { useBomCheckStore } from "../../stores/bomCheckStore";
 import { reviewRows, useReviewRunsStore } from "../../stores/reviewRunsStore";
@@ -27,7 +28,6 @@ import { ReviewProgress } from "./ReviewProgress";
 // answer to "what has this board been through", and a hidden review reads like one
 // that passed.
 
-const SEV_RANK: Record<CommentSeverity, number> = { info: 0, minor: 1, major: 2, critical: 3 };
 
 /** Which review filed this comment, from the pipeline the backend stamps into every
  *  machine-filed comment's predicate (`bomcheck::ingest`). Pipelines are named
@@ -54,7 +54,7 @@ function openFindings(
     if (c.status !== "open" || filedBy(c) !== id) continue;
     count++;
     const sev = c.severity ?? "info";
-    if (SEV_RANK[sev] > SEV_RANK[worst]) worst = sev;
+    if (SEVERITY_WEIGHT[sev] > SEVERITY_WEIGHT[worst]) worst = sev;
   }
   return { count, worst };
 }

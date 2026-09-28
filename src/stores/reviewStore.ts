@@ -181,7 +181,7 @@ export const useReviewStore = create<ReviewState>((set, get) => ({
   activeSessionId: null,
 
   leftTab: "review",
-  filterStatus: "all",
+  filterStatus: "open",
   filterSeverity: "all",
   filterView: "all",
   openThreadId: null,

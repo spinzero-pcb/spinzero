@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { ipc } from "../lib/ipc";
+import { SEVERITY_WEIGHT } from "../lib/severity";
 import { useDesignStore } from "../stores/designStore";
 import { useSelectionStore } from "../stores/selectionStore";
 import { useViewStore } from "../stores/viewStore";
@@ -100,8 +101,6 @@ function coveredRefs(c: Comment): string[] {
   return refs;
 }
 
-/** Severity order, so the row marker shows the worst comment on a line. */
-const SEVERITY_RANK: Record<CommentSeverity, number> = { info: 0, minor: 1, major: 2, critical: 3 };
 
 /** The leading comment gutter's width — mirrors .bom-cmt-col in app.css. */
 const CMT_COL_W = 24;
@@ -449,8 +448,8 @@ export function BomTab() {
         // severe one wins (oldest breaks a tie) — a critical must never hide behind an info.
         const better =
           !prev ||
-          SEVERITY_RANK[severity] > SEVERITY_RANK[prev.severity] ||
-          (SEVERITY_RANK[severity] === SEVERITY_RANK[prev.severity] && number < prev.number);
+          SEVERITY_WEIGHT[severity] > SEVERITY_WEIGHT[prev.severity] ||
+          (SEVERITY_WEIGHT[severity] === SEVERITY_WEIGHT[prev.severity] && number < prev.number);
         if (better) m.set(ref, { id: c.id, number, status, severity });
       }
     }

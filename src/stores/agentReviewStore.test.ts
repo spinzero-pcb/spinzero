@@ -127,34 +127,11 @@ describe("progressLabel", () => {
       "Collecting datasheets · 30 of 88",
     );
     expect(progressLabel(status({ phase: "step_open", parts_done: 12, parts_total: 88 }))).toBe(
-      "12 of 88 parts",
+      "Reviewing parts · 12 of 88",
     );
   });
 
-  it("says 'about' for the step total while more steps can still be formed", () => {
-    // The server forms batches as datasheets arrive, so 7 steps can become 9.
-    expect(
-      progressLabel(status({ phase: "step_open", steps_done: 2, steps_total: 7, parts_done: 30, parts_total: 88 })),
-    ).toBe("Step 3 of about 7 · 30 of 88 parts");
-  });
-
-  it("names the last step as the board-level check once every part is accounted for", () => {
-    expect(
-      progressLabel(status({ phase: "step_open", steps_done: 8, steps_total: 9, parts_done: 88, parts_total: 88 })),
-    ).toBe("Step 9 of 9 · board-level check");
-    // Never past the total, even if the counts run ahead of it.
-    expect(
-      progressLabel(status({ phase: "step_open", steps_done: 9, steps_total: 9, parts_done: 88, parts_total: 88 })),
-    ).toBe("Step 9 of 9 · board-level check");
-  });
-
-  it("drops 'about' on the last step even with parts left", () => {
-    expect(
-      progressLabel(status({ phase: "step_open", steps_done: 3, steps_total: 4, parts_done: 80, parts_total: 88 })),
-    ).toBe("Step 4 of 4 · 80 of 88 parts");
-  });
-
-  it("names every step running at once", () => {
+  it("names no step numbers, however many steps run at once", () => {
     const open = (step: string, index: number, handed = true) => ({
       step,
       index,
@@ -172,7 +149,10 @@ describe("progressLabel", () => {
           open_steps: [open("verify_parts#4", 4), open("verify_parts#5", 5), open("verify_parts#6", 6, false)],
         }),
       ),
-    ).toBe("Steps 4, 5 and 6 of about 9 · 36 of 88 parts");
+    ).toBe("Reviewing parts · 36 of 88");
+  });
+
+  it("names the board step once it is open", () => {
     expect(
       progressLabel(
         status({
@@ -181,10 +161,17 @@ describe("progressLabel", () => {
           steps_total: 9,
           parts_done: 88,
           parts_total: 88,
-          open_steps: [open("board_review", 9)],
+          open_steps: [{ step: "board_review", index: 9, opened_ts: "2026-09-14T10:00:00.000Z", handed_out_ts: null }],
         }),
       ),
-    ).toBe("Step 9 of 9 · board-level check");
+    ).toBe("Checking the whole board");
+    // A server too old to list its steps: the last step with every part accounted for.
+    expect(
+      progressLabel(status({ phase: "step_open", steps_done: 8, steps_total: 9, parts_done: 88, parts_total: 88 })),
+    ).toBe("Checking the whole board");
+    expect(
+      progressLabel(status({ phase: "step_open", steps_done: 3, steps_total: 4, parts_done: 80, parts_total: 88 })),
+    ).toBe("Reviewing parts · 80 of 88");
   });
 
   it("says what a run parked on the preflight is waiting for", () => {

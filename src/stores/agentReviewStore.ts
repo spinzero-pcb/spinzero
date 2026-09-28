@@ -190,33 +190,22 @@ export function progressLabel(status: RunStatus | null, fallback = "Starting the
 }
 
 /**
- * "Step 3 of about 9 · 40 of 88 parts".
+ * "Reviewing parts · 40 of 88", or "Checking the whole board" on the last step.
  *
- * The total is "about" because the server forms batches as datasheets become ready, so
- * `steps_total` can grow during the run. Only the last step is certain: it is the
- * whole-board step, and it opens when every part is accounted for.
+ * No step numbers: the steps are in the activity feed, one live row each, and the
+ * server forms batches as datasheets arrive, so a step total would only be a guess.
  */
 function stepLabel(status: RunStatus): string {
-  const total = status.steps_total;
-  const parts = status.parts_total > 0 ? `${status.parts_done} of ${status.parts_total} parts` : "";
   const open = status.open_steps ?? [];
-  if (open.length) {
-    const top = Math.max(total, ...open.map((o) => o.index));
-    if (open.some((o) => o.step === BOARD_STEP)) return `Step ${top} of ${top} · board-level check`;
-    const indices = open.map((o) => o.index).sort((a, b) => a - b);
-    const head =
-      indices.length === 1
-        ? `Step ${indices[0]} of about ${top}`
-        : `Steps ${indices.slice(0, -1).join(", ")} and ${indices[indices.length - 1]} of about ${top}`;
-    return parts ? `${head} · ${parts}` : head;
-  }
-  if (total <= 0) return parts || stageLabel(status.stage) || "Reviewing against datasheets";
-  const step = Math.min(status.steps_done + 1, total);
-  if (step === total && status.parts_done === status.parts_total) {
-    return `Step ${total} of ${total} · board-level check`;
-  }
-  const head = step === total ? `Step ${step} of ${total}` : `Step ${step} of about ${total}`;
-  return parts ? `${head} · ${parts}` : head;
+  const onBoard = open.length
+    ? open.some((o) => o.step === BOARD_STEP)
+    : status.steps_total > 0 &&
+      status.steps_done + 1 >= status.steps_total &&
+      status.parts_total > 0 &&
+      status.parts_done >= status.parts_total;
+  if (onBoard) return "Checking the whole board";
+  if (status.parts_total > 0) return `Reviewing parts · ${status.parts_done} of ${status.parts_total}`;
+  return stageLabel(status.stage) || "Reviewing parts";
 }
 
 /** "45s" or "7m12s". Short, so it fits in a feed row. */
@@ -437,29 +426,20 @@ function push(set: Setter, get: () => AgentReviewState, tone: ActivityEntry["ton
 }
 
 /**
- * "Step 2 done · 12 parts" when `steps_done` went up, or null. One line per step.
+ * "Step 2 done" when `steps_done` went up. One line per step.
  *
  * It compares two statuses, so a file rewritten with the same counts says nothing, and
  * each step prints once. When the server lists its open steps, the steps that closed
- * are the ones that left the list. The time a step took is not shown.
+ * are the ones that left the list. The panel's title carries the parts count.
  */
 function stepDone(previous: RunStatus | null, next: RunStatus): string[] {
   if (!previous || previous.review_id !== next.review_id) return [];
   if (next.steps_done <= previous.steps_done) return [];
-  const parts = Math.max(0, next.parts_done - previous.parts_done);
   const still = new Set((next.open_steps ?? []).map((o) => o.step));
   const closed = (previous.open_steps ?? []).filter((o) => !still.has(o.step));
-  // The parts count is the change across the whole status write. When two steps
-  // closed in one write it cannot be split between them, so it is left out.
-  const partsText = (n: number) => ` · ${n} ${n === 1 ? "part" : "parts"}`;
-  if (closed.length) {
-    return closed.map((o) => `${stepName(o)} done${closed.length === 1 ? partsText(parts) : ""}`);
-  }
+  if (closed.length) return closed.map((o) => `${stepName(o)} done`);
   const count = next.steps_done - previous.steps_done;
-  return Array.from(
-    { length: count },
-    (_, i) => `Step ${previous.steps_done + i + 1} done${count === 1 ? partsText(parts) : ""}`,
-  );
+  return Array.from({ length: count }, (_, i) => `Step ${previous.steps_done + i + 1} done`);
 }
 
 /**

@@ -29,9 +29,10 @@ import type { OpenStepStatus } from "../../lib/ipc";
 // when the run dies, and a bar that keeps saying "68%" over a dead agent is the one
 // failure this surface must not have.
 //
-// **Up to three steps run at once.** The panel lists each open step with its own clock,
-// and says which ones still wait for a sub-agent. The server's timestamps drive those
-// clocks, so a window opened mid-run shows the right times.
+// **Several steps run at once.** Each open step is a live row at the foot of the
+// feed: "Step 7 in progress" with its own clock, or "Step 9 waiting to start". When the
+// step closes, its live row goes and the feed's "Step 7 done" line takes its place. The
+// server's timestamps drive the clocks, so a window opened mid-run shows the right times.
 //
 // Everything shown here is a count. `status.json` carries no BOM content, so there is
 // no part number to show even if we wanted one.
@@ -123,11 +124,16 @@ function useNow(active: boolean): number {
   return now;
 }
 
-/** When a step's clock starts: when a sub-agent fetched it, else when it opened. Null
- *  when the server's timestamp cannot be read. */
+/** When a sub-agent fetched the step, else when it opened. Null when the server's
+ *  timestamp cannot be read. */
 function stepSince(step: OpenStepStatus): number | null {
   const at = Date.parse(step.handed_out_ts ?? step.opened_ts);
   return Number.isFinite(at) ? at : null;
+}
+
+/** "06:39:25" in local time. `ts` is ISO in UTC, so slicing it showed 13:03 at 18:33 in India. */
+function localTime(ms: number): string {
+  return new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false });
 }
 
 /** "3:07" for a span in milliseconds. */
@@ -149,7 +155,7 @@ function ActivityFeed({
   label: string;
   /** "on this step for 3m12s", from a server that does not list its steps. */
   onStep: string | null;
-  /** The open steps, one row each. */
+  /** The open steps, one live row each at the foot of the feed. */
   steps: OpenStepStatus[];
   now: number;
   /** Only a run this window started can be stopped from here. */
@@ -191,22 +197,6 @@ function ActivityFeed({
           ✕
         </button>
       </div>
-      {steps.length > 0 && (
-        <ul className="review-activity-steps" aria-label="Steps running now">
-          {steps.map((step) => {
-            const since = stepSince(step);
-            const time = since === null ? "" : ` · ${formatDuration(now - since)}`;
-            return (
-              <li key={step.step} className={step.handed_out_ts ? "working" : "waiting"}>
-                <span className="review-activity-step-name">{stepName(step)}</span>
-                <span className="review-activity-step-state">
-                  {step.handed_out_ts ? `working${time}` : `waiting for a sub-agent${time}`}
-                </span>
-              </li>
-            );
-          })}
-        </ul>
-      )}
       <div
         className="review-activity-list"
         ref={scroller}
@@ -215,10 +205,17 @@ function ActivityFeed({
           pinned.current = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
         }}
       >
-        {activity.length === 0 ? (
+        {activity.length === 0 && steps.length === 0 ? (
           <p className="review-activity-empty">Nothing yet — the run has not reported in.</p>
         ) : (
-          activity.map((entry, i) => <ActivityRow key={entry.seq} entry={entry} previous={activity[i - 1]} />)
+          <>
+            {activity.map((entry) => (
+              <ActivityRow key={entry.seq} entry={entry} />
+            ))}
+            {steps.map((step) => (
+              <OpenStepRow key={step.step} step={step} now={now} />
+            ))}
+          </>
         )}
       </div>
       {canCancel && (
@@ -239,19 +236,26 @@ function ActivityFeed({
   );
 }
 
-function ActivityRow({ entry, previous }: { entry: ActivityEntry; previous?: ActivityEntry }) {
-  const gapMs = previous ? Date.parse(entry.ts) - Date.parse(previous.ts) : 0;
-  // Only gaps worth explaining. Several lines in the same second is normal, and
-  // printing "+0s" on each of them buries the one row that says "+6m45s".
-  const gap = gapMs >= 20_000 ? formatDuration(gapMs) : null;
+function ActivityRow({ entry }: { entry: ActivityEntry }) {
   return (
     <div className={`review-activity-row tone-${entry.tone}`} title={entry.text}>
-      {/* Local time. `ts` is ISO in UTC, so slicing it showed 13:03 at 18:33 in India. */}
-      <span className="review-activity-time">
-        {new Date(entry.ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false })}
-      </span>
+      <span className="review-activity-time">{localTime(Date.parse(entry.ts))}</span>
       <span className="review-activity-text">{entry.text}</span>
-      {gap && <span className="review-activity-gap">+{gap}</span>}
+    </div>
+  );
+}
+
+/** A step open now. Only a step a sub-agent is working shows a clock: a waiting step
+ *  has nothing to time yet. */
+function OpenStepRow({ step, now }: { step: OpenStepStatus; now: number }) {
+  const since = stepSince(step);
+  const working = step.handed_out_ts !== null;
+  const text = `${stepName(step)} ${working ? "in progress" : "waiting to start"}`;
+  return (
+    <div className={`review-activity-row open-step ${working ? "working" : "waiting"}`} title={text}>
+      <span className="review-activity-time">{since === null ? "" : localTime(since)}</span>
+      <span className="review-activity-text">{text}</span>
+      {working && since !== null && <span className="review-activity-clock">{formatDuration(now - since)}</span>}
     </div>
   );
 }

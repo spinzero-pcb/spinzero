@@ -249,7 +249,7 @@ export interface RunStatus {
   stage: string | null;
   steps_done: number;
   steps_total: number;
-  /** The steps open now, oldest first. Up to three run at once. Absent from a server
+  /** The steps open now, oldest first. Up to ten run at once. Absent from a server
    *  older than parallel steps. */
   open_steps?: OpenStepStatus[];
   parts_done: number;

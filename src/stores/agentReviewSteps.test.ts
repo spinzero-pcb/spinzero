@@ -86,11 +86,11 @@ describe("step progress", () => {
     send({ steps_done: 1, parts_done: 12, steps_total: 9 });
     send({ steps_done: 1, parts_done: 12, steps_total: 9 });
     send({ steps_done: 1, parts_done: 12, steps_total: 9 });
-    expect(stepLines()).toEqual(["Step 1 done · 12 parts"]);
+    expect(stepLines()).toEqual(["Step 1 done"]);
 
     vi.setSystemTime(T0 + 432_000 + 45_000);
     send({ steps_done: 2, parts_done: 13, steps_total: 9 });
-    expect(stepLines()).toEqual(["Step 1 done · 12 parts", "Step 2 done · 1 part"]);
+    expect(stepLines()).toEqual(["Step 1 done", "Step 2 done"]);
   });
 
   it("prints a separate line for each step that closed, when several run at once", () => {
@@ -99,7 +99,7 @@ describe("step progress", () => {
     send({ steps_done: 2, parts_done: 8, open_steps: [open(2), open(4), open(5)] });
     expect(stepLines()).toEqual(["Step 1 done", "Step 3 done"]);
     send({ steps_done: 3, parts_done: 12, open_steps: [open(4), open(5)] });
-    expect(stepLines()).toEqual(["Step 1 done", "Step 3 done", "Step 2 done · 4 parts"]);
+    expect(stepLines()).toEqual(["Step 1 done", "Step 3 done", "Step 2 done"]);
   });
 
   it("restarts the step clock when steps_done changes, and not otherwise", () => {

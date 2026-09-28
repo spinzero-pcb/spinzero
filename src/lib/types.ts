@@ -336,7 +336,8 @@ export type CommentSource = "human" | "rule" | "agent";
 /** Persisted lifecycle. ⟳ re-check is DERIVED on the frontend (object_hash vs the
  *  live design) and never stored — see deriveDisplayStatus in reviewStore. */
 export type CommentStatus = "open" | "addressed" | "resolved" | "dismissed";
-export type CommentSeverity = "info" | "minor" | "major" | "critical";
+/** `unverified` is a detailed review's coverage gap: see `lib/severity.ts`. */
+export type CommentSeverity = "info" | "minor" | "unverified" | "major" | "critical";
 /** Which canvas a comment is scoped to (item 15): the same object can carry
  *  distinct schematic vs PCB vs BOM comments, and clicking one navigates there. */
 export type CommentView = "schematic" | "pcb" | "bom";

@@ -4,9 +4,9 @@ import { useViewStore } from "../../stores/viewStore";
 import { displayInfo, numberMap, refLabel, useReviewStore } from "../../stores/reviewStore";
 import { formatLocalTime, formatRelative } from "../../lib/time";
 import type { CommentSeverity } from "../../lib/types";
+import { SEVERITIES, SEVERITY_LABEL } from "../../lib/severity";
 import { IconCheck } from "../icons";
 
-const SEVERITIES: CommentSeverity[] = ["info", "minor", "major", "critical"];
 const POP_W = 320;
 const POP_H = 380;
 
@@ -141,7 +141,7 @@ function Composer() {
         >
           {SEVERITIES.map((s) => (
             <option key={s} value={s}>
-              {s}
+              {SEVERITY_LABEL[s]}
             </option>
           ))}
         </select>
@@ -211,7 +211,7 @@ function Thread({ id }: { id: string }) {
         >
           {SEVERITIES.map((s) => (
             <option key={s} value={s}>
-              {s}
+              {SEVERITY_LABEL[s]}
             </option>
           ))}
         </select>

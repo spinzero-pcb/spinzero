@@ -7,8 +7,8 @@ import type { RunStatus } from "../../lib/ipc";
 // The bar answers "how far along"; the panel behind it answers "where is it stuck",
 // which is the question a ten-minute run actually provokes. What is pinned here is
 // that the bar reads off the review server's own counts, that a run which stopped
-// reporting says so rather than holding a number, and that the one row that answers
-// "where did the time go" is legible as a gap.
+// reporting says so rather than holding a number, and that each open step is a live
+// row in the feed, with a clock only while a sub-agent works it.
 
 const at = (iso: string, text: string, tone: ActivityEntry["tone"], seq: number): ActivityEntry => ({
   seq,
@@ -78,13 +78,10 @@ describe("ReviewProgress", () => {
     expect(screen.getByText("Collecting datasheets")).toBeInTheDocument();
   });
 
-  it("prints the gap that names the time nobody could account for", () => {
+  it("prints no gap between rows", () => {
     render(<ReviewProgress />);
     fireEvent.click(screen.getByRole("button", { name: /progress/i }));
-    // 10:09:37 to 10:16:21 is where the run went; a run of same-millisecond events
-    // gets no gap at all, so the number only ever appears where it means something.
-    expect(screen.getByText("+6m44s")).toBeInTheDocument();
-    expect(screen.queryByText(/^\+0s$/)).toBeNull();
+    expect(screen.queryByText(/^\+/)).toBeNull();
   });
 
   it("shows how long the open step has been running, so a slow step does not look frozen", () => {
@@ -92,10 +89,10 @@ describe("ReviewProgress", () => {
     render(<ReviewProgress />);
     fireEvent.click(screen.getByRole("button", { name: /progress/i }));
     expect(screen.getByText(/on this step for 3m12s/)).toBeInTheDocument();
-    expect(screen.getByText(/Step 2 of about 4 · 44 of 88 parts/)).toBeInTheDocument();
+    expect(screen.getByText(/Reviewing parts · 44 of 88/)).toBeInTheDocument();
   });
 
-  it("lists each step running at once, and which one waits for a sub-agent", () => {
+  it("shows each open step as a live feed row, with a clock only while it is worked", () => {
     const base = useAgentReviewStore.getState().status;
     if (!base) throw new Error("the fixture has no status");
     const ts = (agoMs: number) => new Date(Date.now() - agoMs).toISOString();
@@ -111,13 +108,14 @@ describe("ReviewProgress", () => {
     });
     render(<ReviewProgress />);
     fireEvent.click(screen.getByRole("button", { name: /progress/i }));
-    const rows = screen.getByRole("list", { name: "Steps running now" });
-    expect(rows).toHaveTextContent("Step 2working · 3m12s");
-    expect(rows).toHaveTextContent("Step 3waiting for a sub-agent · 30s");
-    expect(screen.getByText(/Steps 2 and 3 of about 4/)).toBeInTheDocument();
+    const log = screen.getByRole("log");
+    expect(screen.getByText("Step 2 in progress").parentElement).toHaveTextContent(/Step 2 in progress3m12s$/);
+    expect(screen.getByText("Step 3 waiting to start").parentElement).not.toHaveTextContent(/\d+s$/);
+    expect(log).toHaveTextContent("Reviewing parts · 44 of 88");
+    expect(log).not.toHaveTextContent(/Steps? 2 and 3/);
   });
 
-  it("gives a single open step its own line too", () => {
+  it("gives a single open step its own row too", () => {
     const base = useAgentReviewStore.getState().status;
     if (!base) throw new Error("the fixture has no status");
     useAgentReviewStore.setState({
@@ -130,7 +128,7 @@ describe("ReviewProgress", () => {
     });
     render(<ReviewProgress />);
     fireEvent.click(screen.getByRole("button", { name: /progress/i }));
-    expect(screen.getByRole("list", { name: "Steps running now" })).toHaveTextContent("Step 2waiting for a sub-agent");
+    expect(screen.getByText("Step 2 waiting to start")).toBeInTheDocument();
   });
 
   it("says so when the run has not reported in yet", () => {

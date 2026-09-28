@@ -1898,6 +1898,7 @@ button {
 /* Colour carries the severity — the same vocabulary as the review rail's rows. */
 .bom-cmt-badge.sev-critical { background: var(--err); }
 .bom-cmt-badge.sev-major { background: var(--warn); }
+.bom-cmt-badge.sev-unverified { background: var(--unverified); }
 .bom-cmt-badge.sev-minor { background: var(--accent); }
 .bom-cmt-badge.sev-info { background: var(--fg-2); }
 /* Status stays readable without stealing the colour: a ring for "needs a re-check",
@@ -2710,6 +2711,7 @@ textarea.wizard-input {
 }
 .run-review-open.sev-critical { background: var(--err-dim); color: var(--err); }
 .run-review-open.sev-major { background: var(--warn-dim); color: var(--warn); }
+.run-review-open.sev-unverified { background: var(--unverified-dim); color: var(--unverified); }
 .run-review-open.sev-minor { background: var(--accent-dim); color: var(--accent); }
 .run-review-open.sev-info { background: var(--bg-3); color: var(--fg-1); }
 .run-review-stale { color: var(--warn); }
@@ -2776,7 +2778,7 @@ textarea.wizard-input {
   flex: none;
   min-width: 3.2em;
   font-variant-numeric: tabular-nums;
-  color: var(--fg-3, var(--fg-2));
+  color: var(--fg-0);
 }
 .review-progress:hover .review-progress-label { color: var(--fg-0); }
 /* --- last review's failure -----------------------------------------------------
@@ -2862,7 +2864,7 @@ textarea.wizard-input {
   min-width: 2.6em;
   font-variant-numeric: tabular-nums;
   text-align: right;
-  color: var(--fg-2);
+  color: var(--fg-0);
 }
 
 /* The activity feed. Opens UPWARD: its anchor lives in the footer, and a panel that
@@ -2898,23 +2900,6 @@ textarea.wizard-input {
 }
 .review-activity-step { color: var(--fg-0); }
 .review-activity-onstep { color: var(--fg-2); font-variant-numeric: tabular-nums; }
-/* One row per step running now, when several run at once. */
-.review-activity-steps {
-  list-style: none;
-  margin: 0;
-  padding: var(--sp-1) var(--sp-3);
-  border-bottom: 1px solid var(--border-1);
-  font-size: var(--fs-0);
-}
-.review-activity-steps li {
-  display: flex;
-  justify-content: space-between;
-  gap: var(--sp-2);
-  padding: 2px 0;
-}
-.review-activity-step-name { color: var(--fg-0); }
-.review-activity-step-state { color: var(--fg-2); font-variant-numeric: tabular-nums; }
-.review-activity-steps li.working .review-activity-step-state { color: var(--accent); }
 .review-activity-sub { color: var(--fg-2); }
 .review-activity-foot {
   display: flex;
@@ -2975,11 +2960,12 @@ textarea.wizard-input {
   color: var(--err);
 }
 
-/* The gap is the point of the whole panel: it is what names the six minutes nothing
-   happened, so it is the one thing in a row that is allowed to shout. */
-.review-activity-gap {
+/* A step open now: a live row at the foot of the feed. Only a working step has a clock. */
+.review-activity-row.open-step.working .review-activity-text { color: var(--fg-0); }
+.review-activity-row.open-step.waiting .review-activity-text { color: var(--fg-2); }
+.review-activity-clock {
   flex: none;
-  color: var(--warn);
+  color: var(--accent);
   font-variant-numeric: tabular-nums;
 }
 
@@ -3282,6 +3268,7 @@ textarea.wizard-input {
 .rv-row.sel { background: var(--accent-dim); }
 .rv-row.sev-critical { border-left-color: var(--err); }
 .rv-row.sev-major { border-left-color: var(--warn); }
+.rv-row.sev-unverified { border-left-color: var(--unverified); border-left-style: dashed; }
 .rv-row.sev-minor { border-left-color: var(--accent); }
 .rv-row.sev-info { border-left-color: var(--fg-2); }
 .rv-row.st-resolved, .rv-row.st-dismissed { opacity: 0.6; }
@@ -3401,6 +3388,7 @@ textarea.wizard-input {
 }
 .rv-sev.sev-critical { background: var(--err-dim); color: var(--err); }
 .rv-sev.sev-major { background: var(--warn-dim); color: var(--warn); }
+.rv-sev.sev-unverified { background: var(--unverified-dim); color: var(--unverified); }
 .rv-sev.sev-minor { background: var(--accent-dim); color: var(--accent); }
 .rv-sev.sev-info { background: var(--bg-3); color: var(--fg-1); }
 
@@ -3619,6 +3607,7 @@ textarea.wizard-input {
 /* Severity color (item 17) for open chips; status rules below override re-check. */
 .cmt-chip.sev-critical { background: var(--err); color: #fff; }
 .cmt-chip.sev-major { background: var(--warn); color: #000; }
+.cmt-chip.sev-unverified { background: var(--unverified); color: #000; }
 .cmt-chip.sev-minor { background: var(--accent); color: #fff; }
 .cmt-chip.sev-info { background: var(--fg-2); color: #000; }
 .cmt-chip.st-recheck { background: var(--warn); color: #000; }
@@ -3642,6 +3631,7 @@ textarea.wizard-input {
 .cmt-rubber { stroke-dasharray: 5 3; }
 .cmt-region.sev-critical { fill: var(--err); stroke: var(--err); }
 .cmt-region.sev-major { fill: var(--warn); stroke: var(--warn); }
+.cmt-region.sev-unverified { fill: var(--unverified); stroke: var(--unverified); }
 .cmt-region.sev-minor { fill: var(--accent); stroke: var(--accent); }
 .cmt-region.sev-info { fill: var(--fg-2); stroke: var(--fg-2); }
 .cmt-region.st-recheck { fill: var(--warn); stroke: var(--warn); }
@@ -4420,6 +4410,7 @@ textarea.wizard-input {
 }
 .bom-check-sev.sev-critical { background: var(--err-dim); color: var(--err); }
 .bom-check-sev.sev-major { background: var(--warn-dim); color: var(--warn); }
+.bom-check-sev.sev-unverified { background: var(--unverified-dim); color: var(--unverified); }
 .bom-check-sev.sev-minor { background: var(--accent-dim); color: var(--accent); }
 .bom-check-sev.sev-info { background: var(--bg-3); color: var(--fg-1); }
 .bom-check-sev:hover { border-color: currentColor; }

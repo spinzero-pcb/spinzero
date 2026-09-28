@@ -5,18 +5,19 @@
 //! that the MCP server runs the same rules over the same BOM, and a free finding must
 //! carry the same fingerprint as the paid finding that refines it.
 //!
-//! Ingestion is the part that matters long-term: the paid detailed review (plan §10)
-//! emits the *same* findings document and lands through this same path — see
-//! `ingest_findings` in lib.rs, which feeds it the service's document. Reconciliation
-//! is per-producer (`source_for`), and the identity key is the finding
-//! `fingerprint`:
+//! Ingestion is the part that matters long-term: the detailed review emits the *same*
+//! findings document and lands through this same path — see `ingest_findings` in
+//! lib.rs. The two producers file differently:
 //!
-//! - fingerprint already on a comment → leave the thread alone (only the severity is
-//!   refreshed), so replies/assignments survive a re-run;
-//! - fingerprint gone → auto-resolve with `AUTO_RESOLVED_REASON`;
-//! - previously auto-resolved fingerprint returns → re-open it. A comment a *human*
-//!   resolved or dismissed stays that way — re-running a check must never overrule a
-//!   person's judgment.
+//! - **The BOM check** keeps one session and reconciles against its own comments, keyed
+//!   by the finding `fingerprint`. A fingerprint already on a comment leaves the thread
+//!   alone (only the severity is refreshed), so replies survive a re-run. A fingerprint
+//!   gone is auto-resolved with `AUTO_RESOLVED_REASON`. An auto-resolved fingerprint
+//!   that returns is re-opened. A comment a *human* resolved or dismissed stays that
+//!   way: re-running a check must never overrule a person's judgment.
+//! - **A detailed review** is a snapshot. Each import gets a session of its own and
+//!   files every finding into it, so the session holds exactly what the report says.
+//!   It touches no other comment: not an earlier review's, and not the BOM check's.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -35,10 +36,8 @@ use crate::reviews;
 pub const AUTO_RESOLVED_REASON: &str = "no longer detected by the BOM check";
 
 /// Which producer filed a comment. Reconciliation is scoped to ONE producer: a
-/// re-run of the free check never auto-resolves a paid finding, and vice versa,
-/// while a finding both tiers detect shares a fingerprint and so shares a comment —
-/// which is how the paid review *refines* the free result instead of duplicating it
-/// (plan §10.4).
+/// re-run of the free check never auto-resolves a detailed-review comment, and a
+/// detailed review touches nothing outside its own session.
 ///
 /// The review comment's `source` follows the pipeline: deterministic rules file as
 /// "rule", the LLM pipeline as "agent". The rail already renders those two
@@ -71,7 +70,7 @@ pub struct CheckOutcome {
 
 /// Findings-schema severity → the review comment vocabulary (four levels).
 ///
-/// The findings contract carries two levels; the comment rail carries four, and its
+/// The findings contract carries three levels; the comment rail carries five, and its
 /// values are persisted on disk, so the two ends stay separate and meet here. The
 /// retired five-level words are still matched so a v1.0 document in a project's
 /// review inbox lands on the colour it was written for instead of on "info".
@@ -81,9 +80,9 @@ fn comment_severity(severity: &str) -> &'static str {
         "Critical" => "critical",
         "Non-critical" => "info",
         // A coverage gap: the review could not check this part, so it claims nothing
-        // about the board. It lands on the quietest level the rail has, and the BOM
-        // bar's "not verified" tally is where it is actually counted.
-        "Not verified" => "info",
+        // about the board. It has a level of its own, because filed as "info" it read
+        // as a remark about a part nobody had looked at.
+        "Not verified" => "unverified",
         // v1.1's two words for the same two levels. Named rather than left to the
         // fallback: `Non-critical` and an unrecognised value both landing on "info" by
         // accident is how a third level silently renders as a remark -- which is why
@@ -223,15 +222,16 @@ fn session_label(pipeline: &str) -> &'static str {
     if pipeline == "bom-rules" { "BOM check" } else { "Detailed BOM review" }
 }
 
-/// Title for a newly created session: the tier plus the day it started.
+/// Title for a newly created session: the tier plus the day it started. A detailed
+/// review also carries the time, because each one is a session of its own and two can
+/// land on one day.
 fn session_title(now: OffsetDateTime, pipeline: &str) -> String {
-    format!(
-        "{} {:04}-{:02}-{:02}",
-        session_label(pipeline),
-        now.year(),
-        now.month() as u8,
-        now.day()
-    )
+    let day = format!("{:04}-{:02}-{:02}", now.year(), now.month() as u8, now.day());
+    if pipeline == "bom-rules" {
+        format!("{} {day}", session_label(pipeline))
+    } else {
+        format!("{} {day} {:02}:{:02}", session_label(pipeline), now.hour(), now.minute())
+    }
 }
 
 /// Find (or create) the session findings are filed into: the newest still-active
@@ -252,6 +252,12 @@ fn ensure_session(pcbreview: &Path, user: &str, label: &str, title: &str) -> Res
     {
         return Ok(existing.id.clone());
     }
+    create_session(pcbreview, user, title)
+}
+
+/// Create a session and return its id.
+fn create_session(pcbreview: &Path, user: &str, title: &str) -> Result<String, String> {
+    let before = reviews::list_sessions(pcbreview);
     let known: BTreeSet<&str> = before.iter().map(|s| s.id.as_str()).collect();
     let sessions = reviews::apply_session_action(
         pcbreview,
@@ -268,7 +274,7 @@ fn ensure_session(pcbreview: &Path, user: &str, label: &str, title: &str) -> Res
         .iter()
         .find(|s| !known.contains(s.id.as_str()))
         .map(|s| s.id.clone())
-        .ok_or_else(|| "could not create the BOM check session".to_string())
+        .ok_or_else(|| "could not create the review session".to_string())
 }
 
 /// The comment body a finding becomes: the description on its own. The rule title
@@ -466,43 +472,41 @@ pub fn ingest(
     doc: FindingsDoc,
     mapping: &MappingReport,
 ) -> Result<CheckOutcome, String> {
-    let now = OffsetDateTime::now_utc();
-    let session_id = ensure_session(
-        pcbreview,
-        user,
-        session_label(&doc.pipeline),
-        &session_title(now, &doc.pipeline),
-    )?;
+    let now = OffsetDateTime::now_local().unwrap_or_else(|_| OffsetDateTime::now_utc());
+    // A detailed review is a snapshot of one run, so it gets a session of its own. When
+    // it joined the last one, MC-02's session read "109" beside a report of 91: the
+    // earlier review's 20 comments, auto-resolved, plus this one's.
+    let snapshot = doc.pipeline != "bom-rules";
+    let title = session_title(now, &doc.pipeline);
+    let session_id = if snapshot {
+        create_session(pcbreview, user, &title)?
+    } else {
+        ensure_session(pcbreview, user, session_label(&doc.pipeline), &title)?
+    };
 
     let source = source_for(&doc.pipeline);
     let existing = reviews::list_comments(pcbreview);
 
-    // Two different scopes, for two different questions.
-    //
-    // `filed_by_a_checker` — every machine-filed comment, whichever tier filed it.
-    // A finding whose fingerprint is already here is the SAME defect, so it updates
-    // that comment instead of filing a second one: this is what makes the paid review
-    // visibly *refine* the free result rather than double it (plan §10.4).
-    let filed_by_a_checker: BTreeMap<String, &reviews::Comment> = existing
-        .iter()
-        .filter(|c| c.source == "rule" || c.source == "agent")
-        .filter_map(|c| c.fingerprint.clone().map(|f| (f, c)))
-        .collect();
-
-    // `mine` — comments THIS producer filed. Only these may be auto-resolved: a tier
-    // must never close a comment it could not have produced (the free rules cannot
-    // re-derive a judgment finding, so a free re-run must not "no longer detect" it).
-    let mine: BTreeMap<String, &reviews::Comment> = existing
-        .iter()
-        .filter(|c| {
-            c.predicate
-                .as_ref()
-                .and_then(|p| p.get("pipeline"))
-                .and_then(|v| v.as_str())
-                == Some(doc.pipeline.as_str())
-        })
-        .filter_map(|c| c.fingerprint.clone().map(|f| (f, c)))
-        .collect();
+    // `mine` — the comments this run reconciles against. For the BOM check, every
+    // comment it filed before. For a detailed review, none: its session is new, and it
+    // must not update a BOM-check comment or close an earlier review's. Only these may
+    // be updated or auto-resolved: a tier never closes a comment it could not have
+    // produced.
+    let mine: BTreeMap<String, &reviews::Comment> = if snapshot {
+        BTreeMap::new()
+    } else {
+        existing
+            .iter()
+            .filter(|c| {
+                c.predicate
+                    .as_ref()
+                    .and_then(|p| p.get("pipeline"))
+                    .and_then(|v| v.as_str())
+                    == Some(doc.pipeline.as_str())
+            })
+            .filter_map(|c| c.fingerprint.clone().map(|f| (f, c)))
+            .collect()
+    };
 
     // Every action this run takes, applied as one log write and one fold at the end.
     // Filing them one at a time rewrote the whole event log and re-folded every log per
@@ -525,7 +529,7 @@ pub fn ingest(
             "confidence": finding.confidence,
         });
 
-        match filed_by_a_checker.get(&finding.fingerprint) {
+        match mine.get(&finding.fingerprint) {
             Some(comment) => {
                 let id = comment.id.clone();
                 // A person's resolve/dismiss stands; only our own auto-resolve reopens.
@@ -808,8 +812,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// A findings document as the paid service would send it: same fingerprint as a
-    /// free-tier finding, higher confidence, plus a judgment finding of its own.
+    /// A findings document as a detailed review would send it: same fingerprint as a
+    /// BOM check finding, higher confidence, plus a judgment finding of its own.
     fn paid_doc(free: &FindingsDoc) -> FindingsDoc {
         let mut doc = free.clone();
         doc.pipeline = "bom-detailed".into();
@@ -834,7 +838,7 @@ mod tests {
     }
 
     #[test]
-    fn the_paid_review_refines_the_free_comment_instead_of_duplicating_it() {
+    fn each_detailed_review_files_every_finding_into_a_session_of_its_own() {
         let root = temp_root("tiers");
         let pcb = root.join(".pcbreview");
         let broken = vec![
@@ -842,43 +846,66 @@ mod tests {
             line(2, &["R1"], "4k7", "RC0402FR-074K7L"),
         ];
 
-        // Free tier files its findings.
+        // The BOM check files its findings.
         let (free, mapping) = run_rules(&broken, "default", &BTreeMap::new()).expect("the rule pack ran");
         let free_count = free.findings.len();
-        let out = ingest(&pcb, "alice", None, free.clone(), &mapping).expect("free ingest");
-        assert_eq!(out.filed, free_count);
+        let free_out = ingest(&pcb, "alice", None, free.clone(), &mapping).expect("free ingest");
+        assert_eq!(free_out.filed, free_count);
 
-        // The paid review reports the same defects (same fingerprints) plus one of
-        // its own: only the new one is filed, the rest update in place.
+        // A detailed review reports the same defects (same fingerprints) plus one of its
+        // own. Every one is filed, into a new session, so the session matches the report.
         let paid = paid_doc(&free);
-        let out = ingest(&pcb, "alice", None, paid, &MappingReport::default())
-            .expect("paid ingest");
-        assert_eq!(out.filed, 1, "only the judgment finding is new");
-        assert_eq!(out.unchanged, free_count, "the rule findings refine the existing comments");
-        assert_eq!(
-            out.comments.iter().filter(|c| c.fingerprint.is_some()).count(),
-            free_count + 1,
-            "no duplicate comment for a defect both tiers found"
-        );
-        let judgment = out
+        let paid_count = paid.findings.len();
+        let first = ingest(&pcb, "alice", None, paid.clone(), &MappingReport::default()).expect("paid ingest");
+        assert_eq!(first.filed, paid_count, "every finding in the report is a comment");
+        assert_eq!(first.unchanged, 0, "no BOM check comment is updated in its place");
+        assert_ne!(first.session_id, free_out.session_id);
+        let in_session = |out: &CheckOutcome, id: &str| {
+            out.comments.iter().filter(|c| c.session_id.as_deref() == Some(id)).count()
+        };
+        assert_eq!(in_session(&first, &first.session_id), paid_count);
+        let judgment = first
             .comments
             .iter()
-            .find(|c| c.source == "agent")
+            .find(|c| c.source == "agent" && c.fingerprint.as_deref() == Some(&paid.findings[paid_count - 1].fingerprint))
             .expect("the judgment finding filed as an agent comment");
         assert_eq!(judgment.view, "bom");
 
-        // A later FREE run must not close the judgment finding: the rules cannot
+        // A second detailed review is a second session. It closes nothing in the first.
+        let second = ingest(&pcb, "alice", None, free_as_detailed(&free), &MappingReport::default())
+            .expect("second paid ingest");
+        assert_ne!(second.session_id, first.session_id);
+        assert_eq!(second.auto_resolved, 0);
+        assert!(
+            second
+                .comments
+                .iter()
+                .filter(|c| c.session_id.as_deref() == Some(first.session_id.as_str()))
+                .all(|c| c.status == "open"),
+            "an earlier review's comments stay as it left them"
+        );
+
+        // A later BOM check must not close a detailed-review comment: the rules cannot
         // produce it, so "no longer detected" would be a lie.
         let (free_again, mapping) = run_rules(&broken, "default", &BTreeMap::new()).expect("the rule pack ran");
         let out = ingest(&pcb, "alice", None, free_again, &mapping).expect("free re-ingest");
         assert_eq!(out.auto_resolved, 0);
-        let judgment = out
-            .comments
-            .iter()
-            .find(|c| c.source == "agent")
-            .expect("still there");
-        assert_eq!(judgment.status, "open");
+        assert_eq!(out.session_id, free_out.session_id, "the BOM check keeps its one session");
+        assert!(out.comments.iter().filter(|c| c.source == "agent").all(|c| c.status == "open"));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The BOM check's own findings, as a detailed review would report them.
+    fn free_as_detailed(free: &FindingsDoc) -> FindingsDoc {
+        let mut doc = free.clone();
+        doc.pipeline = "bom-detailed".into();
+        doc
+    }
+
+    #[test]
+    fn a_not_verified_finding_has_a_level_of_its_own() {
+        assert_eq!(comment_severity("Not verified"), "unverified");
+        assert_eq!(comment_severity("Non-critical"), "info");
     }
 
     #[test]
