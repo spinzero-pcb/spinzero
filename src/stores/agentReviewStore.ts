@@ -354,7 +354,16 @@ export const useAgentReviewStore = create<AgentReviewState>((set, get) => ({
           if (turned) stepStartedAt = now;
           if (ev.status.phase !== "step_open") stepStartedAt = null;
           else if (stepStartedAt === null) stepStartedAt = now;
-          set({ status: ev.status, stepStartedAt, phase: get().phase === "idle" ? "running" : get().phase });
+          // Only a live run makes an idle window busy. On project open the watcher
+          // reports the board's newest file, which can be a run that died hours ago at
+          // `step_open`, or one that finished. Either of those holding "Review
+          // running…" blocks every new review. `refresh` applies the same rule.
+          const live = ev.status.phase !== "done" && ev.status.phase !== "failed" && !isStalled(ev.status, now);
+          set({
+            status: ev.status,
+            stepStartedAt,
+            phase: get().phase === "idle" && live ? "running" : get().phase,
+          });
           for (const line of done) push(set, get, "step", line);
           const said = describeStatus(previous, ev.status);
           if (said) push(set, get, ev.status.phase === "failed" ? "error" : "step", said);
