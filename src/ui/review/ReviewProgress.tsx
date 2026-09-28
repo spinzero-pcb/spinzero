@@ -1,11 +1,14 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
+  formatDuration,
   isStalled,
   percentOf,
   progressLabel,
+  stepName,
   useAgentReviewStore,
   type ActivityEntry,
 } from "../../stores/agentReviewStore";
+import type { OpenStepStatus } from "../../lib/ipc";
 
 // The detailed review's progress. It lives in the footer only — on screen in every
 // view — so there is exactly one progress indicator for one run.
@@ -26,6 +29,10 @@ import {
 // when the run dies, and a bar that keeps saying "68%" over a dead agent is the one
 // failure this surface must not have.
 //
+// **Up to three steps run at once.** The panel lists each open step with its own clock,
+// and says which ones still wait for a sub-agent. The server's timestamps drive those
+// clocks, so a window opened mid-run shows the right times.
+//
 // Everything shown here is a count. `status.json` carries no BOM content, so there is
 // no part number to show even if we wanted one.
 
@@ -34,7 +41,18 @@ export function ReviewProgress() {
   const line = useAgentReviewStore((s) => s.line);
   const phase = useAgentReviewStore((s) => s.phase);
   const startedAt = useAgentReviewStore((s) => s.startedAt);
-  const elapsed = useElapsed(startedAt);
+  const stepStartedAt = useAgentReviewStore((s) => s.stepStartedAt);
+  // One clock for both: the elapsed time and the time on the open step. A step can take
+  // several minutes with no count moving, and this is what shows the run is not frozen.
+  const openSteps = status?.open_steps ?? [];
+  const now = useNow(startedAt !== null || stepStartedAt !== null || openSteps.length > 0);
+  const elapsed = startedAt === null ? null : clock(now - startedAt);
+  // Each open step has its own row in the panel, with its own clock. A server too old
+  // to list its steps gets the window's single step clock in the header instead.
+  const onStep =
+    openSteps.length === 0 && stepStartedAt !== null
+      ? `on this step for ${formatDuration(now - stepStartedAt)}`
+      : null;
 
   // Re-rendered on a timer, because a stall is the passage of time and nothing else
   // arrives to trigger a render. One tick a minute is enough to notice one.
@@ -53,7 +71,14 @@ export function ReviewProgress() {
   return (
     <span className="review-progress-wrap">
       {open && (
-        <ActivityFeed label={label} canCancel={startedAt !== null} onClose={() => setOpen(false)} />
+        <ActivityFeed
+          label={label}
+          onStep={onStep}
+          steps={openSteps}
+          now={now}
+          canCancel={startedAt !== null}
+          onClose={() => setOpen(false)}
+        />
       )}
       <button
         type="button"
@@ -62,6 +87,7 @@ export function ReviewProgress() {
         aria-expanded={open}
         title={
           label +
+          (onStep ? ` · ${onStep}` : "") +
           (stalled ? "\nNothing has been reported for a while. The run may have stopped." : "") +
           (line ? `\n${line}` : "") +
           "\nClick for details"
@@ -85,17 +111,28 @@ export function ReviewProgress() {
   );
 }
 
-/** "3:07" since `since`, ticking once a second; null when this window did not start
- *  the run and so does not know when it began. */
-function useElapsed(since: number | null): string | null {
+/** The current time, ticking once a second while `active`. */
+function useNow(active: boolean): number {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
-    if (since === null) return;
+    if (!active) return;
+    setNow(Date.now());
     const id = window.setInterval(() => setNow(Date.now()), 1000);
     return () => window.clearInterval(id);
-  }, [since]);
-  if (since === null) return null;
-  const s = Math.max(0, Math.floor((now - since) / 1000));
+  }, [active]);
+  return now;
+}
+
+/** When a step's clock starts: when a sub-agent fetched it, else when it opened. Null
+ *  when the server's timestamp cannot be read. */
+function stepSince(step: OpenStepStatus): number | null {
+  const at = Date.parse(step.handed_out_ts ?? step.opened_ts);
+  return Number.isFinite(at) ? at : null;
+}
+
+/** "3:07" for a span in milliseconds. */
+function clock(ms: number): string {
+  const s = Math.max(0, Math.floor(ms / 1000));
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
 }
 
@@ -103,10 +140,18 @@ function useElapsed(since: number | null): string | null {
  *  the bottom — the direction a log reads. */
 function ActivityFeed({
   label,
+  onStep,
+  steps,
+  now,
   canCancel,
   onClose,
 }: {
   label: string;
+  /** "on this step for 3m12s", from a server that does not list its steps. */
+  onStep: string | null;
+  /** The open steps, one row each. */
+  steps: OpenStepStatus[];
+  now: number;
   /** Only a run this window started can be stopped from here. */
   canCancel: boolean;
   onClose: () => void;
@@ -138,11 +183,30 @@ function ActivityFeed({
   return (
     <div className="review-activity" role="log" aria-label="Detailed review activity">
       <div className="review-activity-head">
-        <span className="review-activity-step">{label}</span>
+        <span className="review-activity-step">
+          {label}
+          {onStep && <span className="review-activity-onstep"> · {onStep}</span>}
+        </span>
         <button className="btn-ghost review-activity-close" onClick={onClose} aria-label="Close activity">
           ✕
         </button>
       </div>
+      {steps.length > 0 && (
+        <ul className="review-activity-steps" aria-label="Steps running now">
+          {steps.map((step) => {
+            const since = stepSince(step);
+            const time = since === null ? "" : ` · ${formatDuration(now - since)}`;
+            return (
+              <li key={step.step} className={step.handed_out_ts ? "working" : "waiting"}>
+                <span className="review-activity-step-name">{stepName(step)}</span>
+                <span className="review-activity-step-state">
+                  {step.handed_out_ts ? `working${time}` : `waiting for a sub-agent${time}`}
+                </span>
+              </li>
+            );
+          })}
+        </ul>
+      )}
       <div
         className="review-activity-list"
         ref={scroller}
@@ -179,17 +243,15 @@ function ActivityRow({ entry, previous }: { entry: ActivityEntry; previous?: Act
   const gapMs = previous ? Date.parse(entry.ts) - Date.parse(previous.ts) : 0;
   // Only gaps worth explaining. Several lines in the same second is normal, and
   // printing "+0s" on each of them buries the one row that says "+6m45s".
-  const gap = gapMs >= 20_000 ? formatGap(gapMs) : null;
+  const gap = gapMs >= 20_000 ? formatDuration(gapMs) : null;
   return (
     <div className={`review-activity-row tone-${entry.tone}`} title={entry.text}>
-      <span className="review-activity-time">{entry.ts.slice(11, 19)}</span>
+      {/* Local time. `ts` is ISO in UTC, so slicing it showed 13:03 at 18:33 in India. */}
+      <span className="review-activity-time">
+        {new Date(entry.ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false })}
+      </span>
       <span className="review-activity-text">{entry.text}</span>
       {gap && <span className="review-activity-gap">+{gap}</span>}
     </div>
   );
-}
-
-function formatGap(ms: number): string {
-  const s = Math.round(ms / 1000);
-  return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m${String(s % 60).padStart(2, "0")}s`;
 }

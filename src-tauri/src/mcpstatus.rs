@@ -65,6 +65,10 @@ pub struct RunStatus {
     pub steps_done: u32,
     #[serde(default)]
     pub steps_total: u32,
+    /// The steps open now, oldest first. Up to three run at once. Empty from a server
+    /// older than parallel steps.
+    #[serde(default)]
+    pub open_steps: Vec<OpenStepStatus>,
     #[serde(default)]
     pub parts_done: u32,
     #[serde(default)]
@@ -83,6 +87,19 @@ pub struct RunStatus {
     pub report_path: Option<String>,
     #[serde(default)]
     pub error: Option<String>,
+}
+
+/// One open step. `handed_out_ts` is null while no sub-agent has fetched it.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub struct OpenStepStatus {
+    #[serde(default)]
+    pub step: String,
+    #[serde(default)]
+    pub index: u32,
+    #[serde(default)]
+    pub opened_ts: String,
+    #[serde(default)]
+    pub handed_out_ts: Option<String>,
 }
 
 /// The highest `status_version` this app understands. A file from a newer server is
@@ -274,6 +291,21 @@ mod tests {
         assert_eq!(found.review_id, "new", "a different case and slash is the same folder");
         assert_eq!(found.parts_total, 88);
         let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn reads_the_open_steps_and_defaults_them_when_absent() {
+        let with: RunStatus = serde_json::from_str(
+            r#"{"status_version":1,"open_steps":[
+                {"step":"verify_parts#2","index":2,"opened_ts":"a","handed_out_ts":"b"},
+                {"step":"verify_parts#3","index":3,"opened_ts":"c","handed_out_ts":null}]}"#,
+        )
+        .unwrap();
+        assert_eq!(with.open_steps.len(), 2);
+        assert_eq!(with.open_steps[1].handed_out_ts, None);
+        // An older server writes no list, and that must not cost the progress bar.
+        let without: RunStatus = serde_json::from_str(r#"{"status_version":1}"#).unwrap();
+        assert!(without.open_steps.is_empty());
     }
 
     #[test]

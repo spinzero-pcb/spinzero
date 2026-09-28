@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import { ipc, onAgentEvent, type AgentEvent, type RunStatus } from "../lib/ipc";
+import { ipc, onAgentEvent, type AgentEvent, type OpenStepStatus, type RunStatus } from "../lib/ipc";
 import { explainFailure } from "../lib/agentFailure";
 import { stageLabel } from "../lib/findings";
 import { currentBomProfile } from "./bomCheckStore";
@@ -71,6 +71,10 @@ interface AgentReviewState {
   /** When this window started the run, for the elapsed clock. Null for a run
    *  somebody started elsewhere, which this window cannot time or cancel. */
   startedAt: number | null;
+  /** When the open step began, as this window saw it: the first `step_open` status, or
+   *  the status where `steps_done` last changed. Null when no step is open. It is the
+   *  app's clock, not the server's; the status file does not say when a step began. */
+  stepStartedAt: number | null;
   /** Review ids whose status file must be ignored: runs the user cancelled. */
   cancelledIds: string[];
   start: () => Promise<void>;
@@ -98,26 +102,63 @@ export function isStalled(status: RunStatus | null, now = Date.now()): boolean {
 }
 
 /**
- * How far along, as a percentage.
+ * Where each stage sits on the bar, as [start, end] percentages.
  *
- * Three spans, and one honest denominator in each. The middle one is the whole run as
- * far as a person waiting is concerned, so it gets almost all of the bar; the first is
- * the deterministic layer, weighted by the datasheet count because that is where its
- * time goes.
+ * The part batches are most of the wall clock, so they get most of the bar. The
+ * deterministic layer fills on the datasheet count, because that is where its time
+ * goes. The board step is one step with no count inside it, so it holds one value.
+ */
+export const PROGRESS_SPANS = {
+  /** Waiting for the agent to confirm the setup. */
+  preflight: [0, 2],
+  /** The deterministic layer: rules, distributor lookups, datasheets. A short stage. */
+  preparing: [4, 15],
+  /** The part batches, filled on parts accounted for. Most of the run. */
+  batches: [15, 88],
+  /** The whole-board step. */
+  board: [88, 95],
+  /** Assembling the report, then done. */
+  assembling: [95, 100],
+} as const;
+
+/** The step id of the whole-board step, as the server names it. */
+const BOARD_STEP = "board_review";
+
+/** True when the whole-board step is the one open. An older server lists no open
+ *  steps, and there the board step is the step open after every part is accounted for. */
+function boardStepOpen(status: RunStatus): boolean {
+  if (status.open_steps?.length) return status.open_steps.some((o) => o.step === BOARD_STEP);
+  return status.phase === "step_open" && status.parts_total > 0 && status.parts_done >= status.parts_total;
+}
+
+/**
+ * How far along, as a percentage. See `PROGRESS_SPANS` for the split.
+ *
+ * Parts move only when a batch is submitted, so with three batches running the bar
+ * moves in steps. That is honest: a batch half read has accounted for nothing yet.
  */
 export function percentOf(status: RunStatus | null): number {
   if (!status) return 0;
   if (status.phase === "done") return 100;
-  if (status.phase === "preflight") return 2;
+  if (status.phase === "preflight") return PROGRESS_SPANS.preflight[1];
+  const partsLeft = status.parts_total > 0 && status.parts_done < status.parts_total;
+  // An older server says "assembling" whenever no step is open, including the wait
+  // between two batches. Parts still owed means the run is not assembling yet.
+  if (status.phase === "assembling" && !partsLeft) return 97;
+  if (boardStepOpen(status)) return 90;
+  if (status.parts_total > 0) {
+    const [from, to] = PROGRESS_SPANS.batches;
+    return from + (to - from) * Math.min(1, status.parts_done / status.parts_total);
+  }
   const sheets =
     status.datasheets_total > 0 ? Math.min(1, status.datasheets_read / status.datasheets_total) : 0;
-  if (status.phase === "assembling") return 97;
-  if (status.parts_total > 0) {
-    return 30 + 65 * Math.min(1, status.parts_done / status.parts_total);
-  }
-  // The deterministic layer. Datasheet collection is most of it and is the only part
-  // that reports a fraction, so the span fills on that and nothing else pretends to.
-  return 4 + 26 * sheets;
+  const [from, to] = PROGRESS_SPANS.preparing;
+  return from + (to - from) * sheets;
+}
+
+/** "Step 4" for a batch, "Board check" for the whole-board step. */
+export function stepName(step: Pick<OpenStepStatus, "step" | "index">): string {
+  return step.step === BOARD_STEP ? "Board check" : `Step ${step.index}`;
 }
 
 /** The line under the bar. Counts, never a part number — the status file carries none. */
@@ -131,10 +172,14 @@ export function progressLabel(status: RunStatus | null, fallback = "Starting the
         ? `Collecting datasheets · ${status.datasheets_read} of ${status.datasheets_total}`
         : stageLabel(status.stage) || "Preparing your BOM";
     case "step_open":
+      return stepLabel(status);
     case "assembling":
+      if (status.parts_total > 0 && status.parts_done < status.parts_total) {
+        return `Waiting for the next batch · ${status.parts_done} of ${status.parts_total} parts`;
+      }
       return status.parts_total > 0
-        ? `${status.parts_done} of ${status.parts_total} parts accounted for`
-        : stageLabel(status.stage) || "Reviewing against datasheets";
+        ? `Assembling the report · ${status.parts_done} of ${status.parts_total} parts`
+        : "Assembling the report";
     case "done":
       return "Finished";
     case "failed":
@@ -142,6 +187,42 @@ export function progressLabel(status: RunStatus | null, fallback = "Starting the
     default:
       return fallback;
   }
+}
+
+/**
+ * "Step 3 of about 9 · 40 of 88 parts".
+ *
+ * The total is "about" because the server forms batches as datasheets become ready, so
+ * `steps_total` can grow during the run. Only the last step is certain: it is the
+ * whole-board step, and it opens when every part is accounted for.
+ */
+function stepLabel(status: RunStatus): string {
+  const total = status.steps_total;
+  const parts = status.parts_total > 0 ? `${status.parts_done} of ${status.parts_total} parts` : "";
+  const open = status.open_steps ?? [];
+  if (open.length) {
+    const top = Math.max(total, ...open.map((o) => o.index));
+    if (open.some((o) => o.step === BOARD_STEP)) return `Step ${top} of ${top} · board-level check`;
+    const indices = open.map((o) => o.index).sort((a, b) => a - b);
+    const head =
+      indices.length === 1
+        ? `Step ${indices[0]} of about ${top}`
+        : `Steps ${indices.slice(0, -1).join(", ")} and ${indices[indices.length - 1]} of about ${top}`;
+    return parts ? `${head} · ${parts}` : head;
+  }
+  if (total <= 0) return parts || stageLabel(status.stage) || "Reviewing against datasheets";
+  const step = Math.min(status.steps_done + 1, total);
+  if (step === total && status.parts_done === status.parts_total) {
+    return `Step ${total} of ${total} · board-level check`;
+  }
+  const head = step === total ? `Step ${step} of ${total}` : `Step ${step} of about ${total}`;
+  return parts ? `${head} · ${parts}` : head;
+}
+
+/** "45s" or "7m12s". Short, so it fits in a feed row. */
+export function formatDuration(ms: number): string {
+  const s = Math.max(0, Math.round(ms / 1000));
+  return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m${String(s % 60).padStart(2, "0")}s`;
 }
 
 export const useAgentReviewStore = create<AgentReviewState>((set, get) => ({
@@ -152,6 +233,7 @@ export const useAgentReviewStore = create<AgentReviewState>((set, get) => ({
   seconds: null,
   activity: [],
   startedAt: null,
+  stepStartedAt: null,
   cancelledIds: [],
 
   clearError: () => set({ error: null }),
@@ -187,6 +269,7 @@ export const useAgentReviewStore = create<AgentReviewState>((set, get) => ({
       status: null,
       activity: [],
       startedAt: Date.now(),
+      stepStartedAt: null,
     });
     try {
       await ipc.startAgentReview(agent, brief);
@@ -226,9 +309,19 @@ export const useAgentReviewStore = create<AgentReviewState>((set, get) => ({
       // A review this window did not start is still this board's review, so it is
       // shown. That is the whole point of reading a file instead of a pipe.
       const ignored = status !== null && get().cancelledIds.includes(status.review_id);
-      const live = !ignored && status !== null && status.phase !== "done" && status.phase !== "failed";
+      // A stalled status file is a dead run, not a live one. A cancelled or killed run
+      // leaves its file at "step_open" forever, and the server now touches the file on
+      // every tool call, so five quiet minutes means nobody is working it. Counting it
+      // as live blocked every new review after a cancel and a window reload.
+      const live =
+        !ignored && status !== null && status.phase !== "done" && status.phase !== "failed" && !isStalled(status);
       if (status && !ignored) set({ status });
       if ((running || live) && get().phase === "idle") set({ phase: "running" });
+      // A run somebody else started, which has since died. This window cannot cancel it
+      // and must not wait for it.
+      if (!running && !live && get().phase === "running" && get().startedAt === null) {
+        set({ phase: "idle", status: null, line: "" });
+      }
     } catch {
       // The backend not answering is not something to put in front of anyone; the
       // launcher simply offers to start a review, and a second one is refused there.
@@ -251,13 +344,24 @@ export const useAgentReviewStore = create<AgentReviewState>((set, get) => ({
         case "status": {
           if (get().cancelledIds.includes(ev.status.review_id)) break;
           const previous = get().status;
-          set({ status: ev.status, phase: get().phase === "idle" ? "running" : get().phase });
+          const now = Date.now();
+          // A new run, or a step turned over: the step clock starts again. So does a
+          // step that is open but was never timed, such as the first `step_open`.
+          const sameRun = previous?.review_id === ev.status.review_id;
+          const turned = sameRun && previous.steps_done !== ev.status.steps_done;
+          const done = stepDone(previous, ev.status);
+          let stepStartedAt = sameRun ? get().stepStartedAt : null;
+          if (turned) stepStartedAt = now;
+          if (ev.status.phase !== "step_open") stepStartedAt = null;
+          else if (stepStartedAt === null) stepStartedAt = now;
+          set({ status: ev.status, stepStartedAt, phase: get().phase === "idle" ? "running" : get().phase });
+          for (const line of done) push(set, get, "step", line);
           const said = describeStatus(previous, ev.status);
           if (said) push(set, get, ev.status.phase === "failed" ? "error" : "step", said);
           break;
         }
         case "finished": {
-          set({ phase: "done", seconds: ev.seconds, line: "", startedAt: null });
+          set({ phase: "done", seconds: ev.seconds, line: "", startedAt: null, stepStartedAt: null });
           push(set, get, "step", "The agent finished");
           // The findings are in the drop-box, not in the app. Refresh the inbox so the
           // launcher shows the row, and say where to click.
@@ -265,25 +369,24 @@ export const useAgentReviewStore = create<AgentReviewState>((set, get) => ({
             .getState()
             .load()
             .then(() => {
-              const waiting = useReviewInboxStore.getState().entries.length;
-              useToastStore.getState().push({
-                kind: waiting ? "info" : "error",
-                title: waiting ? "Your agent finished the review" : "Your agent finished, with nothing to import",
-                message: waiting
-                  ? `Import it from "Run a review" to see the findings as review comments.`
-                  : "No findings document reached the review inbox. The agent may have stopped early; its output is in the app log.",
-              });
+              if (useReviewInboxStore.getState().entries.length) {
+                useToastStore.getState().push({
+                  kind: "info",
+                  title: "Your agent finished the review",
+                  message: `Import it from "Run a review" to see the findings as review comments.`,
+                });
+                return;
+              }
+              // A clean exit with nothing in the inbox is a failure. An agent exits 0
+              // when a tool call is denied, so its last line is the reason, and it
+              // gets the same advice as a run that exited with an error.
+              const agent = useSettingsStore.getState().effectiveAgent().label;
+              fail(set, get, ev.last_line?.trim() || `${agent} finished without sending any findings, and gave no reason.`);
             });
           break;
         }
         case "failed":
-          set({ phase: "failed", error: ev.detail, line: "", startedAt: null });
-          push(set, get, "error", ev.detail);
-          {
-            // Advice, not the raw line: the footer's Review failed panel keeps that.
-            const advice = explainFailure(ev.detail, useSettingsStore.getState().effectiveAgent().label);
-            useToastStore.getState().push({ kind: "error", title: advice.title, message: advice.fix });
-          }
+          fail(set, get, ev.detail);
           break;
         case "cancelled": {
           const id = get().status?.review_id;
@@ -293,6 +396,7 @@ export const useAgentReviewStore = create<AgentReviewState>((set, get) => ({
             line: "",
             error: null,
             startedAt: null,
+            stepStartedAt: null,
             cancelledIds: id && !get().cancelledIds.includes(id) ? [...get().cancelledIds, id] : get().cancelledIds,
           });
           push(set, get, "step", "Cancelled");
@@ -306,12 +410,47 @@ export const useAgentReviewStore = create<AgentReviewState>((set, get) => ({
 
 type Setter = (partial: Partial<AgentReviewState>) => void;
 
+/** Mark the run failed, and toast the advice for `detail`. The raw line stays in the
+ *  footer's Review failed panel; the toast says what to do. */
+function fail(set: Setter, get: () => AgentReviewState, detail: string): void {
+  set({ phase: "failed", error: detail, line: "", startedAt: null, stepStartedAt: null });
+  push(set, get, "error", detail);
+  const advice = explainFailure(detail, useSettingsStore.getState().effectiveAgent().label);
+  useToastStore.getState().push({ kind: "error", title: advice.title, message: advice.fix });
+}
+
 function push(set: Setter, get: () => AgentReviewState, tone: ActivityEntry["tone"], text: string): void {
   const activity = get().activity;
   const seq = (activity[activity.length - 1]?.seq ?? 0) + 1;
   set({
     activity: [...activity.slice(-(ACTIVITY_LIMIT - 1)), { seq, ts: new Date().toISOString(), tone, text }],
   });
+}
+
+/**
+ * "Step 2 done · 12 parts" when `steps_done` went up, or null. One line per step.
+ *
+ * It compares two statuses, so a file rewritten with the same counts says nothing, and
+ * each step prints once. When the server lists its open steps, the steps that closed
+ * are the ones that left the list. The time a step took is not shown.
+ */
+function stepDone(previous: RunStatus | null, next: RunStatus): string[] {
+  if (!previous || previous.review_id !== next.review_id) return [];
+  if (next.steps_done <= previous.steps_done) return [];
+  const parts = Math.max(0, next.parts_done - previous.parts_done);
+  const still = new Set((next.open_steps ?? []).map((o) => o.step));
+  const closed = (previous.open_steps ?? []).filter((o) => !still.has(o.step));
+  // The parts count is the change across the whole status write. When two steps
+  // closed in one write it cannot be split between them, so it is left out.
+  const partsText = (n: number) => ` · ${n} ${n === 1 ? "part" : "parts"}`;
+  if (closed.length) {
+    return closed.map((o) => `${stepName(o)} done${closed.length === 1 ? partsText(parts) : ""}`);
+  }
+  const count = next.steps_done - previous.steps_done;
+  return Array.from(
+    { length: count },
+    (_, i) => `Step ${previous.steps_done + i + 1} done${count === 1 ? partsText(parts) : ""}`,
+  );
 }
 
 /**

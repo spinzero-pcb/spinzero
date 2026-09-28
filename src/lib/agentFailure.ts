@@ -38,6 +38,27 @@ export function explainFailure(detail: string, agent: string): FailureAdvice {
       action: "retry",
     };
   }
+  // Before the "cannot reach" rule: the server was reached, and it refused the licence.
+  // The agent's line names SpinZero, so the rule below would call it unreachable.
+  if (/licen[cs]e/.test(d)) {
+    return {
+      title: "SpinZero refused the licence",
+      fix: `The SpinZero server that ${agent} runs could not confirm your licence key. Check the key on the Connect screen, then run the review again.`,
+      action: "connect",
+    };
+  }
+  // Before the "cannot reach" rule: a denied call names the SpinZero tool too, but
+  // the server was reached. The agent's own permissions blocked it.
+  if (/requested permissions|haven't granted|not granted|permission.*denied|denied.*permission/.test(d)) {
+    return {
+      title: `${agent} blocked the SpinZero tools`,
+      fix:
+        agent === "Claude Code"
+          ? `SpinZero runs Claude Code with nobody there to approve a tool. Add "mcp__spinzero" to "permissions.allow" in ~/.claude/settings.json, then run the review again.`
+          : `SpinZero runs ${agent} with nobody there to approve a tool. Allow the SpinZero tools in ${agent}'s settings, then run the review again.`,
+      action: "retry",
+    };
+  }
   if (/spinzero|mcp|no such tool|unknown tool/.test(d)) {
     return {
       title: `${agent} cannot reach SpinZero`,

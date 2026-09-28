@@ -230,6 +230,15 @@ export function onCrunchEvent(
  * Counts, phase names, stage ids and two paths. Nothing here is board content, which
  * is what makes the file safe to write on a customer's machine.
  */
+/** One open step in `status.json`. `handed_out_ts` is null while no sub-agent has
+ *  fetched it. Step ids are the server's ("verify_parts#3", "board_review"). */
+export interface OpenStepStatus {
+  step: string;
+  index: number;
+  opened_ts: string;
+  handed_out_ts: string | null;
+}
+
 export interface RunStatus {
   status_version: number;
   review_id: string;
@@ -240,6 +249,9 @@ export interface RunStatus {
   stage: string | null;
   steps_done: number;
   steps_total: number;
+  /** The steps open now, oldest first. Up to three run at once. Absent from a server
+   *  older than parallel steps. */
+  open_steps?: OpenStepStatus[];
   parts_done: number;
   parts_total: number;
   datasheets_read: number;
@@ -267,7 +279,7 @@ export type AgentEvent =
   | { kind: "started"; agent: string }
   | { kind: "progress"; line: string }
   | { kind: "status"; status: RunStatus }
-  | { kind: "finished"; seconds: number }
+  | { kind: "finished"; seconds: number; last_line: string | null }
   | { kind: "failed"; detail: string }
   | { kind: "cancelled" };
 

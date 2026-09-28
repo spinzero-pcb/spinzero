@@ -89,6 +89,12 @@ export function BomReviewSetup() {
     if (open) clearAgentError();
   }, [open, clearAgentError]);
 
+  // Ask again what is running. A run that died since the window last looked must not
+  // hold "Review running…" over the button.
+  useEffect(() => {
+    if (open) void useAgentReviewStore.getState().refresh();
+  }, [open]);
+
   const detailedBusy = isAgentRunning(agentPhase);
   const busy = running || detailedBusy || saving;
   // Set by the Runs on row: is the chosen agent connected to SpinZero? An agent that

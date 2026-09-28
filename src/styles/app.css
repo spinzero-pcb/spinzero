@@ -2897,6 +2897,24 @@ textarea.wizard-input {
   line-height: 1;
 }
 .review-activity-step { color: var(--fg-0); }
+.review-activity-onstep { color: var(--fg-2); font-variant-numeric: tabular-nums; }
+/* One row per step running now, when several run at once. */
+.review-activity-steps {
+  list-style: none;
+  margin: 0;
+  padding: var(--sp-1) var(--sp-3);
+  border-bottom: 1px solid var(--border-1);
+  font-size: var(--fs-0);
+}
+.review-activity-steps li {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  padding: 2px 0;
+}
+.review-activity-step-name { color: var(--fg-0); }
+.review-activity-step-state { color: var(--fg-2); font-variant-numeric: tabular-nums; }
+.review-activity-steps li.working .review-activity-step-state { color: var(--accent); }
 .review-activity-sub { color: var(--fg-2); }
 .review-activity-foot {
   display: flex;

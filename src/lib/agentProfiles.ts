@@ -14,7 +14,9 @@ export const DEFAULT_AGENT_PROFILE: AgentProfile = {
   label: "Claude Code",
   bin: "claude",
   prompt_via: "arg",
-  args: ["-p", "{prompt}"],
+  // Mirrors `builtin_profiles()` in agent.rs, which says why the flag is here and why
+  // it comes after the prompt.
+  args: ["-p", "{prompt}", "--allowedTools", "mcp__spinzero"],
   verified: true,
 };
 

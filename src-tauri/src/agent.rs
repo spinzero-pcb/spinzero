@@ -11,11 +11,12 @@
 //!
 //! * **Any agent, not one.** The binary, the arguments and the way the prompt is
 //!   handed over are a PROFILE. Claude Code is one of them, not the assumption.
-//! * **We add no flags of our own.** The old code passed `--mcp-config`,
-//!   `--strict-mcp-config` and `--allowedTools mcp__spinzero`. The last of those
-//!   blocked the sub-agents the review server asks for, so the app broke the review
-//!   it was starting. Permissions, sub-agents and MCP registration belong to the
-//!   agent and to its owner.
+//! * **We add no flags of our own.** Every argument is in the profile, where the user
+//!   can see and edit it. The old code passed `--mcp-config`, `--strict-mcp-config` and
+//!   `--allowedTools mcp__spinzero` itself, and the review's sub-agents lost their
+//!   tools. A test on 2026-09-27 showed `--allowedTools` was not the cause: sub-agents
+//!   inherit it. The likely cause was the prompt placed after it, which the flag reads
+//!   as a tool name. So the Claude Code profile carries it again, after the prompt.
 //! * **We answer the questions we already hold.** The server stops and asks for the
 //!   end application and the column mapping. SpinZero knows both. The prompt carries
 //!   them, and tells the agent that nobody is there to be asked.
@@ -52,7 +53,10 @@ pub enum AgentEvent {
     /// otherwise be sized for it — these are emitted a few times a second.
     Status { status: Box<RunStatus> },
     /// The agent's process ended. The findings, if any, are in the review inbox.
-    Finished { seconds: u64 },
+    /// `last_line` is the agent's final line of output. An agent can exit cleanly
+    /// without starting the review (Claude Code does, when a tool call is denied),
+    /// and then that line is the only reason anyone gets.
+    Finished { seconds: u64, last_line: Option<String> },
     Failed { detail: String },
     /// The user cancelled. The process tree is gone and nothing is to be imported.
     Cancelled,
@@ -118,7 +122,17 @@ impl AgentProfile {
 /// with Codex to work out the flags from nothing. See `docs/bom-review-flow.md` section C, "The status file".
 pub fn builtin_profiles() -> Vec<AgentProfile> {
     vec![
-        AgentProfile::new("claude-code", "Claude Code", "claude", &["-p", "{prompt}"], true),
+        // `--allowedTools` pre-approves the SpinZero tools, because nobody is there to
+        // approve them. Tested on Claude Code 2.1.283: sub-agents inherit it, and it
+        // removes no tool. It must come AFTER the prompt: it takes a list, so a prompt
+        // after it is read as one more tool name and the run starts with no prompt.
+        AgentProfile::new(
+            "claude-code",
+            "Claude Code",
+            "claude",
+            &["-p", "{prompt}", "--allowedTools", "mcp__spinzero"],
+            true,
+        ),
         AgentProfile::new("codex-cli", "Codex CLI", "codex", &["exec", "{prompt}"], false),
         AgentProfile::new("gemini-cli", "Gemini CLI", "gemini", &["-p", "{prompt}"], false),
         AgentProfile::new("cursor-cli", "Cursor CLI", "cursor-agent", &["-p", "{prompt}"], false),
@@ -365,16 +379,25 @@ impl AgentRun {
                 emit(&app, AgentEvent::Cancelled);
                 return;
             }
+            // The agent's last words go to the log on every exit. A clean exit is not
+            // proof of a review: the agent can stop on a denied tool call and still
+            // exit 0, and the app tells the user to look here.
+            for line in &last_out {
+                log::info!("{} agent review output: {line}", crate::telemetry::LOCAL_ONLY);
+            }
             match status {
                 Ok(s) if s.success() => {
                     log::info!("agent review finished in {seconds}s");
-                    emit(&app, AgentEvent::Finished { seconds });
+                    emit(
+                        &app,
+                        AgentEvent::Finished {
+                            seconds,
+                            last_line: last_out.last().cloned(),
+                        },
+                    );
                 }
                 Ok(s) => {
                     log::warn!("agent review exited {s}");
-                    for line in &last_out {
-                        log::info!("{} agent review output: {line}", crate::telemetry::LOCAL_ONLY);
-                    }
                     // The agent's own last words, where it said any; the exit code only
                     // when it said nothing. The frontend turns this into advice.
                     let said = last_out
@@ -482,5 +505,15 @@ mod tests {
         }
         // The first is what a fresh install runs with, so it must be one we have run.
         assert!(builtin_profiles()[0].verified);
+    }
+
+    #[test]
+    fn claude_code_gets_its_prompt_before_the_tool_list() {
+        // `--allowedTools` takes a list. A prompt after it is read as a tool name.
+        let claude = &builtin_profiles()[0];
+        let args = build_args(claude, Path::new("/b"), "review it");
+        let prompt_at = args.iter().position(|a| a == "review it").unwrap();
+        let flag_at = args.iter().position(|a| a == "--allowedTools").unwrap();
+        assert!(prompt_at < flag_at);
     }
 }

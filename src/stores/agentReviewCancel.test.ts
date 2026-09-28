@@ -8,12 +8,14 @@ import type { AgentEvent, RunStatus } from "../lib/ipc";
 
 let handler: ((ev: AgentEvent) => void) | null = null;
 const cancelAgentReview = vi.fn(async () => true);
+/** The status file the next `refresh` reads; the default live one when null. */
+let nextStatus: RunStatus | null = null;
 
 vi.mock("../lib/ipc", () => ({
   ipc: {
     cancelAgentReview: () => cancelAgentReview(),
     agentReviewRunning: async () => false,
-    agentReviewStatus: async () => status(),
+    agentReviewStatus: async () => nextStatus ?? status(),
   },
   onAgentEvent: async (h: (ev: AgentEvent) => void) => {
     handler = h;
@@ -76,6 +78,20 @@ describe("cancelling an agent review", () => {
     await useAgentReviewStore.getState().refresh();
     expect(useAgentReviewStore.getState().phase).toBe("idle");
     expect(useAgentReviewStore.getState().status).toBeNull();
+  });
+
+  it("does not treat a stalled run from elsewhere as running, after a reload", async () => {
+    // A reload forgets the cancelled ids, and the dead run's file still says step_open.
+    useAgentReviewStore.setState({ phase: "idle", status: null, startedAt: null, cancelledIds: [] });
+    nextStatus = status({ updated_ts: new Date(Date.now() - 10 * 60_000).toISOString() });
+    await useAgentReviewStore.getState().refresh();
+    expect(useAgentReviewStore.getState().phase).toBe("idle");
+
+    // And one this window believed was running goes back to idle once it stalls.
+    useAgentReviewStore.setState({ phase: "running", startedAt: null });
+    await useAgentReviewStore.getState().refresh();
+    expect(useAgentReviewStore.getState().phase).toBe("idle");
+    nextStatus = null;
   });
 
   it("still follows a new run", async () => {
