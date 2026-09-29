@@ -456,6 +456,16 @@ export function BomTab() {
     return m;
   }, [comments, activeSessionId, indexes]);
 
+  // The designators of the comment whose thread is open. Their row stays marked for as
+  // long as the thread is open, so the row a review card landed on is still findable
+  // after the landing flash has faded.
+  const openThreadId = useReviewStore((s) => s.openThreadId);
+  const targetRefs = useMemo(() => {
+    const c = openThreadId ? comments.find((x) => x.id === openThreadId) : undefined;
+    if (!c || c.view !== "bom" || c.anchor.type !== "component") return null;
+    return new Set(coveredRefs(c));
+  }, [openThreadId, comments]);
+
   const rowComment = (l: BomLine) => {
     for (const d of l.designators) {
       const hit = commentByRef.get(d);
@@ -980,6 +990,7 @@ export function BomTab() {
                 typeof selection.ref === "string" &&
                 l.designators.includes(selection.ref);
               const statusCls = r.status ? ` bom-${r.status}` : "";
+              const target = !child && targetRefs !== null && l.designators.some((d) => targetRefs.has(d));
               const flash =
                 !child &&
                 flashKey !== null &&
@@ -1008,7 +1019,7 @@ export function BomTab() {
                       else rowRefs.current.delete(k);
                     }
                   }}
-                  className={`${active ? "active" : ""}${l.dnp ? " dnp" : ""}${statusCls}${flash}${child ? " bom-child" : ""}`}
+                  className={`${active ? "active" : ""}${target ? " bom-target" : ""}${l.dnp ? " dnp" : ""}${statusCls}${flash}${child ? " bom-child" : ""}`}
                   onClick={(e) => {
                     if (useReviewStore.getState().armed) return addComment(l, r.synthetic, e);
                     if (r.changeIds.length > 0) focusChange(r.changeIds[0]);

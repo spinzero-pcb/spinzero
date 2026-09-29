@@ -1956,6 +1956,25 @@ button {
   100% { background: transparent; }
 }
 .bom-table tbody tr.bom-flash { animation: bom-row-flash 1.5s ease-out; }
+
+/* The row whose comment thread is open (a review card landed here). It stays marked
+   until the thread closes: a tinted row, a solid accent bar on the left, and an accent
+   rule above and below. Listed after the diff tints so it wins over them, and the
+   flash still pulses on top of it. */
+.bom-table tbody tr.bom-target {
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  box-shadow:
+    inset 4px 0 0 var(--accent),
+    inset 0 1px 0 var(--accent),
+    inset 0 -1px 0 var(--accent);
+}
+.bom-table tbody tr.bom-target td { color: var(--fg-0); font-weight: 600; }
+.bom-table tbody tr.bom-target.bom-flash { animation: bom-target-flash 1.5s ease-out; }
+@keyframes bom-target-flash {
+  0%, 20%, 45% { background: color-mix(in srgb, var(--accent) 45%, transparent); }
+  10%, 35% { background: color-mix(in srgb, var(--accent) 22%, transparent); }
+  100% { background: color-mix(in srgb, var(--accent) 22%, transparent); }
+}
 .dim { color: var(--fg-2); }
 
 /* ---------- PCB view (WS8 / items 4,7,8,13) ---------- */

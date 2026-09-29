@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import { ipc, onAgentEvent, type AgentEvent, type OpenStepStatus, type RunStatus } from "../lib/ipc";
 import { explainFailure } from "../lib/agentFailure";
-import { stageLabel } from "../lib/findings";
+import { stageLabel, type ReviewInboxEntry } from "../lib/findings";
 import { currentBomProfile } from "./bomCheckStore";
 import { useBomMappingStore } from "./bomMappingStore";
 import { useProjectStore } from "./projectStore";
@@ -20,14 +20,17 @@ import { useToastStore } from "./toastStore";
 // other review that ran outside this window.
 //
 // **Progress is real, and it is not the agent's.** The review server writes
-// `status.json` for its run; the backend watches it and forwards it here. So the bar
+// `status.jsonl` for its run; the backend watches it and forwards it here. So the bar
 // moves on counts the server actually holds — parts accounted for, datasheets read —
 // and not on a percentage invented over somebody else's loop. It also moves for a
 // review the user started in a terminal, because the file does not care who started
 // the run. The agent's own output is kept as a sign of life and never parsed.
 //
-// **Finishing is not ingesting.** The agent writes `findings.json` into
-// `<project>/reviews/inbox/`; the user still imports it.
+// **A run this window started is imported when it finishes.** The agent writes
+// `findings.json` into `<project>/reviews/inbox/`, and the user already asked for this
+// review by pressing Run, so asking again was one click too many. Only that run's own
+// file is imported, found by the `findings_path` in its status. Anything else in the
+// drop-box still waits for a click.
 //
 // **Cancel stops the spending.** It kills the agent's whole process tree, so its
 // sub-agents stop too and no more tokens go out. Nothing is imported, and the review
@@ -99,6 +102,20 @@ export function isStalled(status: RunStatus | null, now = Date.now()): boolean {
   if (!status || status.phase === "done" || status.phase === "failed") return false;
   const at = Date.parse(status.updated_ts);
   return Number.isFinite(at) && now - at > STALL_MS;
+}
+
+/**
+ * Is `next` an older run than the live one on screen? Then it is not news.
+ *
+ * The watcher reports the newest run for this board. If it ever reports an older one
+ * while the current run is live, that older run's "done" would print "Report written"
+ * halfway through the current review. That happened on 2026-09-28, from a torn status
+ * file. The server now appends instead of rewriting, and this guard stays anyway.
+ */
+export function isOlderRun(previous: RunStatus | null, next: RunStatus, now = Date.now()): boolean {
+  if (!previous || previous.review_id === next.review_id) return false;
+  const live = previous.phase !== "done" && previous.phase !== "failed" && !isStalled(previous, now);
+  return live && next.updated_ts < previous.updated_ts;
 }
 
 /**
@@ -334,6 +351,7 @@ export const useAgentReviewStore = create<AgentReviewState>((set, get) => ({
           if (get().cancelledIds.includes(ev.status.review_id)) break;
           const previous = get().status;
           const now = Date.now();
+          if (isOlderRun(previous, ev.status, now)) break;
           // A new run, or a step turned over: the step clock starts again. So does a
           // step that is open but was never timed, such as the first `step_open`.
           const sameRun = previous?.review_id === ev.status.review_id;
@@ -361,13 +379,19 @@ export const useAgentReviewStore = create<AgentReviewState>((set, get) => ({
         case "finished": {
           set({ phase: "done", seconds: ev.seconds, line: "", startedAt: null, stepStartedAt: null });
           push(set, get, "step", "The agent finished");
-          // The findings are in the drop-box, not in the app. Refresh the inbox so the
-          // launcher shows the row, and say where to click.
+          // The findings are in the drop-box, not in the app. Import this run's own
+          // file; anything else waits in the launcher for a click.
           void useReviewInboxStore
             .getState()
             .load()
-            .then(() => {
-              if (useReviewInboxStore.getState().entries.length) {
+            .then(async () => {
+              const inbox = useReviewInboxStore.getState();
+              const own = await ownFindings(get().status, inbox.entries);
+              if (own) {
+                await inbox.importOne(own);
+                return;
+              }
+              if (inbox.entries.length) {
                 useToastStore.getState().push({
                   kind: "info",
                   title: "Your agent finished the review",
@@ -407,6 +431,37 @@ export const useAgentReviewStore = create<AgentReviewState>((set, get) => ({
 }));
 
 type Setter = (partial: Partial<AgentReviewState>) => void;
+
+/** The bare file name at the end of a Windows or POSIX path. */
+function baseName(path: string): string {
+  return path.split(/[\\/]/).pop() ?? path;
+}
+
+/**
+ * The drop-box entry this run wrote, or null.
+ *
+ * Found by the `findings_path` in the run's status. The agent can exit before the
+ * watcher forwards the final status, so a status with no path is read again once.
+ * An entry that cannot be imported is left for the launcher, which shows its error.
+ */
+export async function ownFindings(
+  status: RunStatus | null,
+  entries: readonly ReviewInboxEntry[],
+): Promise<string | null> {
+  let path = status?.findings_path ?? null;
+  if (!path) {
+    try {
+      const fresh = await ipc.agentReviewStatus();
+      if (fresh && (!status || fresh.review_id === status.review_id)) path = fresh.findings_path;
+    } catch {
+      // No status to read means no file to name. The launcher still lists the row.
+    }
+  }
+  if (!path) return null;
+  const name = baseName(path);
+  const entry = entries.find((e) => e.name === name && !e.error);
+  return entry ? entry.name : null;
+}
 
 /** Mark the run failed, and toast the advice for `detail`. The raw line stays in the
  *  footer's Review failed panel; the toast says what to do. */
@@ -449,7 +504,10 @@ function stepDone(previous: RunStatus | null, next: RunStatus): string[] {
  * A feed with a row for each of those buries the two rows that matter: a stage
  * starting, and a phase turning over.
  */
-function describeStatus(previous: RunStatus | null, next: RunStatus): string | null {
+function describeStatus(last: RunStatus | null, next: RunStatus): string | null {
+  // A phase change means something only within one run. Another run's status is a
+  // fresh start, never "this run moved from step_open to done".
+  const previous = last?.review_id === next.review_id ? last : null;
   if (previous?.phase !== next.phase) {
     switch (next.phase) {
       case "preparing":

@@ -5,16 +5,17 @@
 //! A stdio server also serves only the process that started it, so the app cannot open
 //! a second connection to a running review.
 //!
-//! So the server writes `~/.spinzero/mcp-runs/<review_id>/status.json` on every change
-//! of state, and this module watches for it. Two things follow, and both are the
-//! point:
+//! So the server appends one line to `~/.spinzero/mcp-runs/<review_id>/status.jsonl` on
+//! every change of state, and this module watches for it. Each line is the whole state,
+//! and the file is never rewritten, so the last complete line is always a whole record.
+//! Two things follow, and both are the point:
 //!
 //! * **The app does not have to have started the run.** A review the user started in a
 //!   terminal, in Cursor, or in an editor we have never heard of shows the same bar.
 //! * **Nothing here is board content.** The file holds counts, phase names, stage ids
 //!   and two paths, and this module never reads anything else in that directory.
 //!
-//! A watcher is not a subscription: `status.json` can stop moving because the run died,
+//! A watcher is not a subscription: `status.jsonl` can stop moving because the run died,
 //! not because it is slow. The frontend decides that from `updated_ts`, which is why
 //! the whole record travels rather than a summary.
 
@@ -147,8 +148,7 @@ pub fn newest_for(root: &Path, project_dir: &Path) -> Option<RunStatus> {
     let mut best: Option<RunStatus> = None;
     for entry in std::fs::read_dir(root).ok()? {
         let Ok(entry) = entry else { continue };
-        let path = entry.path().join("status.json");
-        let Some(status) = read_status(&path) else { continue };
+        let Some(status) = read_run(&entry.path()) else { continue };
         let Some(dir) = status.project_dir.as_deref() else { continue };
         if !same_dir(dir, project_dir) {
             continue;
@@ -160,12 +160,48 @@ pub fn newest_for(root: &Path, project_dir: &Path) -> Option<RunStatus> {
     best
 }
 
-fn read_status(path: &Path) -> Option<RunStatus> {
-    // A torn read is expected, not exceptional: the server rewrites this file every
-    // few seconds and a rename can fall back to a plain write. The next sweep picks
-    // it up, so a parse failure is silent by design.
-    let text = std::fs::read_to_string(path).ok()?;
-    let status: RunStatus = serde_json::from_str(&text).ok()?;
+/// The server appends one whole state per line and never rewrites the file.
+const STATUS_LOG: &str = "status.jsonl";
+/// What a server before 2026-09-28 wrote instead: one state, rewritten in place. Read
+/// only for runs that have no log, so an old run still shows in the launcher.
+const LEGACY_STATUS: &str = "status.json";
+/// How much of the log's end to read. One line is about 2 KB with ten open steps, so
+/// this holds many lines, and the file is never read whole.
+const TAIL_BYTES: u64 = 64 * 1024;
+
+/// One run's current state, from its directory.
+fn read_run(dir: &Path) -> Option<RunStatus> {
+    let log = dir.join(STATUS_LOG);
+    if log.is_file() {
+        // A run with a log is read from the log only. Falling back to anything else
+        // would show a state other than this run's latest.
+        return last_line(&log);
+    }
+    let text = std::fs::read_to_string(dir.join(LEGACY_STATUS)).ok()?;
+    parse(&text)
+}
+
+/// The last complete line of the log that parses.
+///
+/// A line counts only once its newline is written. Text after the last newline is an
+/// append still in progress, and it is skipped, not read as a torn state.
+fn last_line(path: &Path) -> Option<RunStatus> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = std::fs::File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    let start = len.saturating_sub(TAIL_BYTES);
+    file.seek(SeekFrom::Start(start)).ok()?;
+    let mut buf = Vec::new();
+    file.read_to_end(&mut buf).ok()?;
+    let text = String::from_utf8_lossy(&buf);
+    let complete = &text[..text.rfind('\n')?];
+    // When the tail starts mid-file, its first piece is part of a line, and it fails to
+    // parse like any other broken line.
+    complete.rsplit('\n').find_map(parse)
+}
+
+fn parse(text: &str) -> Option<RunStatus> {
+    let status: RunStatus = serde_json::from_str(text.trim()).ok()?;
     (status.status_version <= SUPPORTED_VERSION && status.status_version > 0).then_some(status)
 }
 
@@ -260,23 +296,56 @@ mod tests {
     use super::*;
     use std::fs;
 
-    fn write(dir: &Path, id: &str, project: &str, updated: &str) {
-        let run = dir.join(id);
-        fs::create_dir_all(&run).unwrap();
+    /// One state as the server writes it: a single line of JSON.
+    fn line(id: &str, project: &str, phase: &str, updated: &str) -> String {
         // A backslash is an escape in JSON, so the fixture has to escape it the way
         // the server's own writer does. `"C:\boards"` would parse as a backspace.
         let project = project.replace('\\', "\\\\");
+        format!(
+            r#"{{"status_version":1,"review_id":"{id}","pipeline":"bom-detailed","profile":"commercial","project_dir":"{project}","phase":"{phase}","stage":null,"steps_done":1,"steps_total":4,"parts_done":12,"parts_total":88,"datasheets_read":80,"datasheets_total":88,"started_ts":"2026-09-14T00:00:00.000Z","updated_ts":"{updated}","findings_path":null,"report_path":null,"error":null}}"#
+        )
+    }
+
+    fn write(dir: &Path, id: &str, project: &str, updated: &str) {
+        let run = dir.join(id);
+        fs::create_dir_all(&run).unwrap();
+        fs::write(run.join(STATUS_LOG), format!("{}\n", line(id, project, "step_open", updated))).unwrap();
+    }
+
+    #[test]
+    fn a_half_appended_line_is_skipped_and_the_run_keeps_its_last_state() {
+        let tmp = std::env::temp_dir().join(format!("sz-status-a-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        // An older run that finished. Before the log, a torn file in the live run made
+        // the watcher show this one, and the feed said "Report written" mid-run.
+        let done = tmp.join("old");
+        fs::create_dir_all(&done).unwrap();
+        fs::write(done.join(STATUS_LOG), format!("{}\n", line("old", "/b", "done", "2026-09-14T01:00:00.000Z"))).unwrap();
+        let live = tmp.join("live");
+        fs::create_dir_all(&live).unwrap();
         fs::write(
-            run.join("status.json"),
+            live.join(STATUS_LOG),
             format!(
-                r#"{{"status_version":1,"review_id":"{id}","pipeline":"bom-detailed","profile":"commercial",
-                    "project_dir":"{project}","phase":"step_open","stage":null,"steps_done":1,"steps_total":4,
-                    "parts_done":12,"parts_total":88,"datasheets_read":80,"datasheets_total":88,
-                    "started_ts":"2026-09-14T00:00:00.000Z","updated_ts":"{updated}",
-                    "findings_path":null,"report_path":null,"error":null}}"#
+                "{}\n{}\n{{\"status_version\":1,\"review_id\":\"li",
+                line("live", "/b", "preparing", "2026-09-14T02:00:00.000Z"),
+                line("live", "/b", "step_open", "2026-09-14T02:01:00.000Z"),
             ),
         )
         .unwrap();
+        let found = newest_for(&tmp, Path::new("/b")).unwrap();
+        assert_eq!(found.review_id, "live");
+        assert_eq!(found.phase, "step_open", "the last COMPLETE line is the state");
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn an_old_run_without_a_log_is_still_read() {
+        let tmp = std::env::temp_dir().join(format!("sz-status-l-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(tmp.join("r")).unwrap();
+        fs::write(tmp.join("r").join(LEGACY_STATUS), line("r", "/b", "done", "2026-09-14T01:00:00.000Z")).unwrap();
+        assert_eq!(newest_for(&tmp, Path::new("/b")).unwrap().phase, "done");
+        let _ = fs::remove_dir_all(&tmp);
     }
 
     #[test]
@@ -314,8 +383,8 @@ mod tests {
         let _ = fs::remove_dir_all(&tmp);
         fs::create_dir_all(tmp.join("r")).unwrap();
         fs::write(
-            tmp.join("r").join("status.json"),
-            r#"{"status_version":99,"project_dir":"/b","updated_ts":"z"}"#,
+            tmp.join("r").join(STATUS_LOG),
+            "{\"status_version\":99,\"project_dir\":\"/b\",\"updated_ts\":\"z\"}\n",
         )
         .unwrap();
         assert!(newest_for(&tmp, Path::new("/b")).is_none());
@@ -328,7 +397,7 @@ mod tests {
         let _ = fs::remove_dir_all(&tmp);
         write(&tmp, "good", "/b", "2026-09-14T01:00:00.000Z");
         fs::create_dir_all(tmp.join("torn")).unwrap();
-        fs::write(tmp.join("torn").join("status.json"), "{\"status_ver").unwrap();
+        fs::write(tmp.join("torn").join(LEGACY_STATUS), "{\"status_ver").unwrap();
         assert_eq!(newest_for(&tmp, Path::new("/b")).unwrap().review_id, "good");
         let _ = fs::remove_dir_all(&tmp);
     }

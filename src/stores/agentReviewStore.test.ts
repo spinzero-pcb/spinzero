@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import { isStalled, percentOf, progressLabel, PROGRESS_SPANS, STALL_MS } from "./agentReviewStore";
+import { isOlderRun, isStalled, ownFindings, percentOf, progressLabel, PROGRESS_SPANS, STALL_MS } from "./agentReviewStore";
 import type { RunStatus } from "../lib/ipc";
 
 // The bar's arithmetic, and the one thing it must never do: report progress on a run
-// that has stopped reporting. A watcher is not a subscription — `status.json` stops
+// that has stopped reporting. A watcher is not a subscription — `status.jsonl` stops
 // moving when the run dies, and a bar still reading "68%" over a dead agent is worse
 // than no bar at all.
 
@@ -182,5 +182,45 @@ describe("progressLabel", () => {
 
   it("carries the failure sentence rather than a phase name", () => {
     expect(progressLabel(status({ phase: "failed", error: "the agent exited" }))).toBe("the agent exited");
+  });
+});
+
+describe("isOlderRun", () => {
+  const now = Date.parse("2026-09-14T10:01:00.000Z");
+  const live = status({ review_id: "new", phase: "step_open", updated_ts: "2026-09-14T10:00:30.000Z" });
+
+  it("drops an older run's finished status while the current run is live", () => {
+    // The feed said "Report written" halfway through a run when the watcher did this.
+    const old = status({ review_id: "old", phase: "done", updated_ts: "2026-09-14T08:00:00.000Z" });
+    expect(isOlderRun(live, old, now)).toBe(true);
+  });
+
+  it("takes a newer run, the same run, and anything after a finished one", () => {
+    expect(isOlderRun(live, status({ review_id: "newer", updated_ts: "2026-09-14T10:00:50.000Z" }), now)).toBe(false);
+    expect(isOlderRun(live, { ...live, phase: "done" }, now)).toBe(false);
+    const finished = { ...live, phase: "done" as const };
+    expect(isOlderRun(finished, status({ review_id: "old", updated_ts: "2026-09-14T08:00:00.000Z" }), now)).toBe(false);
+    expect(isOlderRun(null, live, now)).toBe(false);
+  });
+});
+
+describe("ownFindings", () => {
+  const entry = (name: string, error: string | null = null) => ({
+    name,
+    pipeline: "bom-detailed",
+    engine_version: "1",
+    finding_count: 3,
+    error,
+  });
+
+  it("names this run's own file, from a Windows path", async () => {
+    const s = status({ phase: "done", findings_path: "C:\\b\\reviews\\inbox\\bom-detailed-x.json" });
+    expect(await ownFindings(s, [entry("other.json"), entry("bom-detailed-x.json")])).toBe("bom-detailed-x.json");
+  });
+
+  it("leaves any other file, and a file that cannot be imported, for a click", async () => {
+    const s = status({ phase: "done", findings_path: "/b/reviews/inbox/mine.json" });
+    expect(await ownFindings(s, [entry("other.json")])).toBeNull();
+    expect(await ownFindings(s, [entry("mine.json", "not a findings document")])).toBeNull();
   });
 });
