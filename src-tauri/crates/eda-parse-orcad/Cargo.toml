@@ -1,0 +1,9 @@
+[package]
+name = "eda-parse-orcad"
+version = "0.0.1"
+edition = "2021"
+description = "Read-only reader for Cadence OrCAD Capture designs (.DSN/.OLB) and OrCAD/Allegro PCB Editor boards (.brd)"
+license = "GPL-3.0-or-later"
+
+[dependencies]
+ole-cfb = { path = "../ole-cfb" }

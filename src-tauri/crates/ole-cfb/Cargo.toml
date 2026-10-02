@@ -1,0 +1,8 @@
+[package]
+name = "ole-cfb"
+version = "0.0.1"
+edition = "2021"
+description = "Read-only MS-CFB (OLE compound file) reader shared by the Altium and OrCAD parsers"
+license = "GPL-3.0-or-later"
+
+[dependencies]
