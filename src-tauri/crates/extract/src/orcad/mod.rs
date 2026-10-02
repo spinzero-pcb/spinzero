@@ -174,6 +174,10 @@ pub struct BoardInfo {
     pub layers: usize,
     pub components: usize,
     pub nets: usize,
+    /// The board's physical constraint sets (track width, spacing, ...).
+    pub constraint_sets: Vec<pcb::ConstraintSet>,
+    /// What reading the board skipped or approximated.
+    pub stats: pcb::BoardStats,
 }
 
 /// Find the design a project argument names: an `.OPJ` (its first schematic

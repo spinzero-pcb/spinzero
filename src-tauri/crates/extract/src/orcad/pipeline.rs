@@ -96,6 +96,8 @@ pub fn run_design(project: &Path, out_dir: &Path, emit: &mut dyn FnMut(Msg)) -> 
                     layers: a.summary.layers,
                     components: a.summary.components,
                     nets: a.summary.nets,
+                    constraint_sets: a.constraint_sets.clone(),
+                    stats: a.stats.clone(),
                 });
                 Some(a.geometry)
             }
@@ -195,6 +197,8 @@ fn run_board_only(board: &Path, out_dir: &Path, emit: &mut dyn FnMut(Msg)) -> Re
             layers: a.summary.layers,
             components: a.summary.components,
             nets: a.summary.nets,
+            constraint_sets: a.constraint_sets.clone(),
+            stats: a.stats.clone(),
         }),
         variants: Vec::new(),
         unresolved: super::Unresolved::default(),

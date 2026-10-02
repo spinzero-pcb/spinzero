@@ -620,7 +620,6 @@ fn tech(ps: &Padstack, ver: Ver) -> [Option<&PadComp>; 4] {
 #[derive(Debug, Default, Clone, Serialize)]
 pub struct BoardStats {
     pub format: String,
-    pub program: String,
     /// Blocks read, and the reason the walk stopped early (if it did).
     pub blocks: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -664,7 +663,6 @@ pub fn build(b: &Board, source: &str) -> Built {
     let mut layers = Layers::new(b);
     let mut stats = BoardStats {
         format: format!("Allegro {}", db.header.ver.label()),
-        program: db.header.program.trim().to_string(),
         blocks: db.stream.blocks.len(),
         stopped: db.stream.stopped.clone(),
         ..Default::default()
@@ -1327,6 +1325,63 @@ fn match_group(db: &Db, net: &Block) -> Option<String> {
     None
 }
 
+/// One physical constraint set, as its first copper layer states it.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct ConstraintSet {
+    pub name: String,
+    pub line_width_mm: f64,
+    pub spacing_mm: f64,
+    /// 17.2 and later state a clearance of their own.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub clearance_mm: Option<f64>,
+    /// Differential-pair gap, when the set defines one (17.2 and later).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diff_pair_gap_mm: Option<f64>,
+    /// Nets that use the set.
+    pub nets: usize,
+}
+
+/// The board's physical constraint sets. Record fields by format, checked on
+/// BeagleBone Black (17.2) and TRS-80 (16.6) against their known rules:
+/// 17.2+ keeps width, spacing, clearance and pair gap at words 1, 2, 4 and 7;
+/// earlier boards keep width and spacing at words 0 and 1.
+pub fn constraint_sets(b: &Board) -> Vec<ConstraintSet> {
+    let db = &b.db;
+    let classes = net_classes(b);
+    let mm = |v: i32| r4(v as f64 * db.header.scale());
+    let mut out = Vec::new();
+    for blk in &db.stream.blocks {
+        let Data::ConstraintSet { name, field: fptr, records } = &blk.data else { continue };
+        let Some(r) = records.first() else { continue };
+        let mut n = db.s(*name).to_string();
+        if n.is_empty() {
+            // The set's field names it in a schematic cross-reference,
+            // `@lib.xxx(view):\NAME\`.
+            n = fields(db, *fptr)
+                .into_iter()
+                .find_map(|(_, v)| field_text(db, v))
+                .and_then(|t| t.rsplit(":\\").next().map(|s| s.trim_end_matches('\\').to_string()))
+                .unwrap_or_default();
+        }
+        if n.is_empty() {
+            // Some 16.x boards key the name by a table index this reader does
+            // not resolve (0x03000001); the set keeps a positional name.
+            n = format!("UNNAMED_{}", out.len());
+        }
+        let modern = db.header.ver >= Ver::V172;
+        let class = if n.eq_ignore_ascii_case("DEFAULT") { "Default".to_string() } else { n.clone() };
+        out.push(ConstraintSet {
+            nets: classes.iter().find(|(c, _)| *c == class).map(|(_, m)| m.len()).unwrap_or(0),
+            name: n,
+            line_width_mm: mm(if modern { r[1] } else { r[0] }),
+            spacing_mm: mm(if modern { r[2] } else { r[1] }),
+            clearance_mm: modern.then(|| mm(r[4])),
+            diff_pair_gap_mm: (modern && r[7] != 0).then(|| mm(r[7])),
+        });
+    }
+    out
+}
+
 pub struct BoardSummary {
     pub layers: usize,
     pub components: usize,
@@ -1344,6 +1399,7 @@ pub struct BoardArtifacts {
     pub format: String,
     pub summary: BoardSummary,
     pub stats: BoardStats,
+    pub constraint_sets: Vec<ConstraintSet>,
 }
 
 /// Read a board and write `pcb/geometry.json` plus the per-layer SVGs.
@@ -1381,11 +1437,16 @@ pub fn extract_board(path: &Path, out_dir: &Path, emit: &mut dyn FnMut(Msg)) -> 
         }
     };
     emit(Msg::Progress(format!("pcb: {} layer svgs", svgs.len())));
+    // A 3D artifact is worth having and never worth losing the board over.
+    if let Err(e) = write_models(&b, g, path, out_dir, emit) {
+        emit(Msg::Progress(format!("models skipped: {e}")));
+    }
     Ok(BoardArtifacts {
         geometry: rel,
         svgs,
         theme: board_theme(g),
         net_classes: net_classes(&b),
+        constraint_sets: constraint_sets(&b),
         format: built.stats.format.clone(),
         summary: BoardSummary {
             layers: g.layers.len(),
@@ -1394,6 +1455,153 @@ pub fn extract_board(path: &Path, out_dir: &Path, emit: &mut dyn FnMut(Msg)) -> 
         },
         stats: built.stats,
     })
+}
+
+/// Field codes on a footprint definition naming its 3D model.
+const MODEL_FILE: u16 = 0x345;
+const MODEL_PLACE: u16 = 0x346;
+
+/// One footprint definition's 3D model: the file name and its placement.
+struct ModelRef {
+    file: String,
+    offset: (f64, f64, f64),
+    rotate: (f64, f64, f64),
+}
+
+/// The model a footprint definition names. `0x345` is `file, bytes, mtime,
+/// colour, r, g, b, triangles`; `0x346` is `units, dx, dy, dz, rx, ry, rz`
+/// relative to the symbol origin in a Z-up, Y-up frame.
+fn model_of(db: &Db, def_fields: u32) -> Option<ModelRef> {
+    let fs = fields(db, def_fields);
+    let text = |code| fs.iter().find(|(c, _)| *c == code).and_then(|(_, v)| field_text(db, v));
+    let file = text(MODEL_FILE)?.split(',').next()?.trim().to_string();
+    if file.is_empty() {
+        return None;
+    }
+    let mut offset = (0.0, 0.0, 0.0);
+    let mut rotate = (0.0, 0.0, 0.0);
+    if let Some(p) = text(MODEL_PLACE) {
+        let v: Vec<&str> = p.split(',').map(str::trim).collect();
+        let unit = match v.first().map(|u| u.to_ascii_uppercase()).as_deref() {
+            Some("CM") => 10.0,
+            Some("MICRONS") => 0.001,
+            Some("MILS") => 0.0254,
+            Some("INCH") | Some("INCHES") => 25.4,
+            _ => 1.0,
+        };
+        let f = |i: usize| v.get(i).and_then(|x| x.parse::<f64>().ok()).unwrap_or(0.0);
+        offset = (r4(f(1) * unit), r4(f(2) * unit), r4(f(3) * unit));
+        // Stored the way the KiCad path stores a model's rotation: negated.
+        rotate = (r4(-f(4)), r4(-f(5)), r4(-f(6)));
+    }
+    Some(ModelRef { file, offset, rotate })
+}
+
+/// A model file named by the board, looked for beside it (and in the usual
+/// model folders there), case-insensitively. Allegro keeps only the name.
+fn find_model(board_dir: &Path, name: &str) -> Option<std::path::PathBuf> {
+    let want = name.to_ascii_lowercase();
+    for d in [board_dir.to_path_buf(), board_dir.join("step"), board_dir.join("3d"), board_dir.join("models"), board_dir.join("..").join("step")] {
+        for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+            if e.file_name().to_string_lossy().to_ascii_lowercase() == want && e.path().is_file() {
+                return Some(e.path());
+            }
+        }
+    }
+    None
+}
+
+/// Write `models/models.json` (the shared `extract.models.a0`) for the placed
+/// footprints whose definition names a 3D model, copying any model file found
+/// beside the board.
+fn write_models(b: &Board, g: &Geometry, board_path: &Path, out_dir: &Path, emit: &mut dyn FnMut(Msg)) -> Result<usize, String> {
+    let db = &b.db;
+    let mut by_def: HashMap<u32, ModelRef> = HashMap::new();
+    let mut inst_def: HashMap<u32, u32> = HashMap::new();
+    for blk in &db.stream.blocks {
+        let Data::FootprintDef { fields: f, first_inst, .. } = &blk.data else { continue };
+        if let Some(m) = model_of(db, *f) {
+            by_def.insert(blk.key, m);
+        }
+        let mut k = *first_inst;
+        let mut seen = HashSet::new();
+        while let Some(i) = db.stream.get(k) {
+            if i.kind != 0x2D || !seen.insert(k) {
+                break;
+            }
+            inst_def.insert(i.key, blk.key);
+            k = i.next;
+        }
+    }
+    if by_def.is_empty() {
+        return Ok(0);
+    }
+    let models_dir = out_dir.join("models");
+    let files_dir = models_dir.join("files");
+    let board_dir = board_path.parent().unwrap_or(Path::new("."));
+    let mut copied: HashMap<String, String> = HashMap::new();
+    let (mut refs, mut unresolved) = (0usize, 0usize);
+    let mut entries = Vec::new();
+    for (i, f) in b.footprints.iter().enumerate() {
+        let Some(m) = inst_def.get(&f.key).and_then(|d| by_def.get(d)) else { continue };
+        let Some(c) = g.components.get(i) else { continue };
+        refs += 1;
+        let mut entry = serde_json::json!({
+            "path": m.file,
+            "offset": { "x": m.offset.0, "y": m.offset.1, "z": m.offset.2 },
+            "scale": { "x": 1.0, "y": 1.0, "z": 1.0 },
+            "rotate": { "x": m.rotate.0, "y": m.rotate.1, "z": m.rotate.2 },
+        });
+        let key = m.file.to_ascii_lowercase();
+        let rel = match copied.get(&key) {
+            Some(r) => Some(r.clone()),
+            None => match find_model(board_dir, &m.file) {
+                Some(src) => {
+                    std::fs::create_dir_all(&files_dir).map_err(|e| e.to_string())?;
+                    let name = src.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                    std::fs::copy(&src, files_dir.join(&name)).map_err(|e| e.to_string())?;
+                    let r = format!("files/{name}");
+                    copied.insert(key, r.clone());
+                    Some(r)
+                }
+                None => None,
+            },
+        };
+        match rel {
+            Some(r) => {
+                let ext = Path::new(&r).extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+                entry["file"] = serde_json::json!(r);
+                entry["format"] = serde_json::json!(ext);
+            }
+            None => unresolved += 1,
+        }
+        entries.push(serde_json::json!({
+            "reference": c.reference,
+            "footprint": c.fp,
+            "layer": c.layer,
+            "uuid": c.uuid,
+            "at": { "x": c.x, "y": c.y, "angle": c.angle },
+            "models": [entry],
+        }));
+    }
+    std::fs::create_dir_all(&models_dir).map_err(|e| e.to_string())?;
+    let doc = serde_json::json!({
+        "schema": "extract.models.a0",
+        "count": entries.len(),
+        "refs": refs,
+        "files": copied.len(),
+        "unresolved": unresolved,
+        "models": entries,
+    });
+    std::fs::write(models_dir.join("models.json"), serde_json::to_string_pretty(&doc).map_err(|e| e.to_string())?)
+        .map_err(|e| e.to_string())?;
+    emit(Msg::Artifact("models/models.json".to_string()));
+    emit(Msg::Progress(format!(
+        "models: {refs} refs on {} footprints, {} files found beside the board, {unresolved} unresolved",
+        entries.len(),
+        copied.len()
+    )));
+    Ok(entries.len())
 }
 
 /// Board colours: Allegro's default film colours are user configuration, not
