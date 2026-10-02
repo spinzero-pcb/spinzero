@@ -267,22 +267,23 @@ fn union(a: Bbox, b: Bbox) -> Bbox {
     Bbox { x: x0, y: y0, w: x1 - x0, h: y1 - y0 }
 }
 
-/// The part's description, falling back to the library symbol's own name.
+/// The part's description, exactly as the file has it.
 ///
 /// A placement carries `ComponentDescription` only when the designer filled it
-/// in. Twelve parts across two corpus designs leave it out, and an EMPTY
-/// description is not merely uninformative: `bom.rs` groups on it, so every part
-/// without one collapses onto a single BOM line — `Neutral` and `Line` landed on
-/// the 5BR test-point row. The symbol's `LibReference` is what the file has to
-/// say about the part (`24V to 5V2A`, `10mH_A-B-C-N`), and it is what the
-/// reference publishes for exactly these parts.
+/// in. When it did not, the description is empty, and Altium's own BOM shows it
+/// empty too (`U8` on MB1419). This code used to put the symbol name there so
+/// that parts without a description would not share one BOM line. That is no
+/// longer needed: the app groups Altium lines on the library part
+/// (`LIBRARY_PART_PARAM`), not on the description, and the fab CSV key already
+/// holds `library_ref`.
 fn description(c: &SchComponent) -> String {
-    if c.description.trim().is_empty() {
-        c.library_ref.clone()
-    } else {
-        c.description.clone()
-    }
+    c.description.clone()
 }
+
+/// Parameter key carrying the library part of a placement: `DesignItemId`, else
+/// `LibReference`. Altium's BOM groups on it, and the app's table reads it by this
+/// name (`ALTIUM_GROUP_BY` in `bomColumns.ts`). Keep the two in step.
+pub const LIBRARY_PART_PARAM: &str = "altium_library_part";
 
 /// Parameter key carrying the library a symbol was placed from.
 pub const SOURCE_LIB_PARAM: &str = "altium_source_library";
@@ -320,6 +321,10 @@ fn parameters_of(
     }
     if let Some(lib) = source_library(c) {
         m.insert(SOURCE_LIB_PARAM.into(), lib);
+    }
+    let part = if c.design_item_id.trim().is_empty() { &c.library_ref } else { &c.design_item_id };
+    if !part.trim().is_empty() {
+        m.insert(LIBRARY_PART_PARAM.into(), part.clone());
     }
     m.insert(KIND_PARAM.into(), c.kind.as_str().into());
     m.insert("kicad_in_bom".into(), c.kind.in_bom().to_string());
@@ -404,6 +409,31 @@ mod tests {
         assert_eq!(out[0].parameters[SOURCE_LIB_PARAM], "PCBLibraryData.SVNDbLib");
         assert_eq!(out[0].footprint, "RESC1608X55N");
         assert_eq!(out[0].hierarchy.sheet_path_uuids, "/");
+    }
+
+    /// The BOM groups an Altium line on the library part: `DesignItemId`, else
+    /// `LibReference`. The extractor carries it as one parameter.
+    #[test]
+    fn library_part_is_the_design_item_id_else_the_lib_reference() {
+        let mut a = comp("C1", vec![], ComponentKind::Standard);
+        a.design_item_id = "CAP_Dup1".into();
+        a.library_ref = "CAP".into();
+        let b = comp("C2", vec![], ComponentKind::Standard); // no DesignItemId: LibReference "R"
+        let (out, _) = built(&doc(vec![a, b]), "/", None);
+        let part = |d: &str| out.iter().find(|c| c.designator == d).unwrap().parameters[LIBRARY_PART_PARAM].clone();
+        assert_eq!(part("C1"), "CAP_Dup1");
+        assert_eq!(part("C2"), "R");
+    }
+
+    /// A part with no `ComponentDescription` has an empty description, as in Altium's
+    /// own BOM. The symbol name is not a stand-in.
+    #[test]
+    fn a_missing_description_stays_empty() {
+        let mut c = comp("U8", vec![], ComponentKind::Standard);
+        c.description = String::new();
+        c.library_ref = "STM32_LQFP64_6".into();
+        let (out, _) = built(&doc(vec![c]), "/", None);
+        assert_eq!(out[0].description, "");
     }
 
     /// Corner case 13 reaching the BOM: a graphical decoration must not become a

@@ -191,6 +191,9 @@ impl Pin {
 #[derive(Debug, Clone, Default)]
 pub struct Component {
     pub library_ref: String,
+    /// `DesignItemId`: the library part this placement came from. Altium's BOM
+    /// groups on it. A file that predates the key leaves it empty.
+    pub design_item_id: String,
     pub description: String,
     /// Text of the `RECORD=34` designator child.
     pub designator: String,
@@ -258,6 +261,9 @@ pub struct PowerPort {
     pub font: i64,
     pub orientation: i64,
     pub show_net_name: bool,
+    /// An off-sheet connector. Altium stores it as a power port with this flag
+    /// and draws a double chevron instead of the style's glyph.
+    pub cross_sheet: bool,
 }
 
 /// A port (`RECORD=18`). It has TWO connection points, its left and right edges.
@@ -507,6 +513,9 @@ pub struct SchText {
     /// `WordWrap`: the frame wraps its text to its own box. Altium's default is
     /// on, and every frame in the corpus sets it.
     pub word_wrap: bool,
+    /// `TextMargin` of a `RECORD=209` note, in sheet units: the gap between the
+    /// box edge and its text. Zero for every other text.
+    pub margin: i64,
     /// True when the text belongs to the drawing sheet's template rather than to
     /// the design — Altium's analogue of KiCad's worksheet.
     pub template: bool,
@@ -993,6 +1002,7 @@ pub fn parse_records(recs: Vec<TextRecord>) -> SchDoc {
                 comp_at.insert(i, out.components.len());
                 out.components.push(Component {
                     library_ref: r.s("LibReference").to_string(),
+                    design_item_id: r.s("DesignItemId").to_string(),
                     description: r.s("ComponentDescription").to_string(),
                     designator: String::new(),
                     designator_uuid: String::new(),
@@ -1217,6 +1227,7 @@ pub fn parse_records(recs: Vec<TextRecord>) -> SchDoc {
                 font: r.i("FontID").unwrap_or(1),
                 orientation: r.i("Orientation").unwrap_or(0),
                 show_net_name: r.b("ShowNetName"),
+                cross_sheet: r.b("IsCrossSheetConnector"),
             }),
             18 => out.ports.push(Port {
                 at: pt(r, "Location.X", "Location.Y"),
@@ -1277,8 +1288,8 @@ pub fn parse_records(recs: Vec<TextRecord>) -> SchDoc {
             31 => {
                 let custom = r.b("UseCustomSheet");
                 let n_fonts = r.i("FontIdCount").unwrap_or(0);
-                // An absent `SheetStyle` is Altium's factory default, which is B
-                // and NOT A4 — see `units::DEFAULT_SHEET_STYLE`.
+                // An absent `SheetStyle` means 0 (A4), because Altium omits a
+                // key whose value is 0 — see `units::DEFAULT_SHEET_STYLE`.
                 let style = r.i("SheetStyle").unwrap_or(units::DEFAULT_SHEET_STYLE);
                 let (zx, zy, margin) = units::sheet_zones(style);
                 // Pass 1 recorded the template file from RECORD=39; the sheet
@@ -1360,6 +1371,7 @@ pub fn parse_records(recs: Vec<TextRecord>) -> SchDoc {
                     mirrored: r.b("IsMirrored"),
                     show_border: r.b("ShowBorder"),
                     word_wrap: !r.has("WordWrap") || r.b("WordWrap"),
+                    margin: if t == 209 { r.i("TextMargin").unwrap_or(0) } else { 0 },
                     template,
                     uuid: r.s("UniqueID").to_string(),
                 });

@@ -215,7 +215,7 @@ export function PropertiesCard() {
               empty: "not routed",
               chips: (pn?.layers ?? []).map((l) => (
                 <button key={l} className="xchip" onClick={() => goPcb(l)} title={l}>
-                  <span className="layer-dot" style={{ background: layerColorVar(l) }} />
+                  <span className="layer-dot" style={{ background: layerColorVar(l, indexes?.layers.find((x) => x.name === l)?.color) }} />
                   <span className="txt">{l}</span>
                 </button>
               )),

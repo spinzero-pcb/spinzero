@@ -73,11 +73,33 @@ impl Field {
         }
     }
 
+    /// Key names that say "this is the manufacturer's part number" outright. A key that
+    /// matches one of these ranks above a generic one ("Part Number", "PART_NUMBER"),
+    /// whatever its fill rate: an Altium design keeps its own internal number in
+    /// `PART_NUMBER` and the maker's in `Manufacturer PN`, and the maker's is the MPN.
+    /// The generic keys stay in the list behind them, so a KiCad design that has only
+    /// "Part Number" resolves as before.
+    fn strong(self) -> &'static [&'static str] {
+        match self {
+            Field::Mpn => &[
+                "mpn",
+                "manufacturerpn",
+                "manufacturerpartnumber",
+                "manufacturerpartno",
+                "mfrpn",
+                "mfrpartnumber",
+                "mfgpn",
+                "mfgpartnumber",
+            ],
+            _ => &[],
+        }
+    }
+
     /// (positive substrings, negative substrings, prefers-URL-shaped-values).
     fn spec(self) -> (&'static [&'static str], &'static [&'static str], bool) {
         match self {
             Field::Mpn => (
-                &["mpn", "partnumber", "partno", "ordernumber", "orderingcode", "orderno"],
+                &["mpn", "manufacturerpn", "mfrpn", "mfgpn", "partnumber", "partno", "ordernumber", "orderingcode", "orderno"],
                 &["alternate", "supplier", "legacy", "deviceid", "internal", "distributor"],
                 false,
             ),
@@ -94,7 +116,11 @@ impl Field {
                 // PRIMARY manufacturer: "Alternate Manufacturer" has no "part" in it,
                 // so the older negatives did not exclude it, and on a BOM where the
                 // alternate column was better filled it would have won the field.
-                &["part", "order", "status", "number", "alternate", "secondsource"],
+                // "manufacturerpn" and its short forms are part numbers, not names.
+                &[
+                    "part", "order", "status", "number", "alternate", "secondsource",
+                    "manufacturerpn", "mfrpn", "mfgpn",
+                ],
                 false,
             ),
             // The companion of MpnAlt. Both halves are needed, so the positives demand
@@ -199,6 +225,8 @@ pub fn resolve_mapping(components: &[Component]) -> Mapping {
     };
 
     let mut mapping = Mapping::default();
+    // The Altium builder always writes this key (`altium::design::KIND_PARAM`).
+    let is_altium = keys.contains("altium_component_kind");
 
     for field in Field::all() {
         let (pos, neg, url) = field.spec();
@@ -212,8 +240,9 @@ pub fn resolve_mapping(components: &[Component]) -> Mapping {
             // tokens contain no "+" and so behave exactly as they always have.
             let name_hit = pos.iter().any(|t| t.split('+').all(|p| nkey.contains(p)));
             let f = fill(key);
+            let strong = field.strong().iter().any(|t| nkey.contains(t));
             let score = if name_hit {
-                2.0 + f
+                2.0 + f + if strong { 10.0 } else { 0.0 }
             } else if url {
                 // datasheet by value shape only
                 let urls = components
@@ -232,6 +261,12 @@ pub fn resolve_mapping(components: &[Component]) -> Mapping {
             scored.push((score, key.clone()));
         }
         scored.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
+        // Altium: a part with no "Manufacturer PN" has no MPN. Its `PART_NUMBER` is the
+        // company's own number, so it must not stand in. A KiCad design keeps the
+        // fallback (the part-number keys stay behind the strong ones).
+        if is_altium && field == Field::Mpn && scored.iter().any(|(s, _)| *s >= 10.0) {
+            scored.retain(|(s, _)| *s >= 10.0);
+        }
         if !scored.is_empty() {
             mapping
                 .fields
@@ -965,6 +1000,70 @@ mod tests {
         // Fields the members agree on keep their value.
         assert_eq!(l.fields.get("Tol").map(String::as_str), Some("10%"));
         assert_eq!(l.fields.get("value").map(String::as_str), Some("470n"));
+    }
+
+    /// An Altium part keeps its internal number in `PART_NUMBER` and the maker's in
+    /// `Manufacturer PN`. The MPN is the maker's, and the internal number stays in its
+    /// own field.
+    #[test]
+    fn manufacturer_pn_beats_the_internal_part_number() {
+        let comps = vec![
+            comp(
+                "C1",
+                "0.1uF",
+                "C_0402",
+                "capacitor",
+                &[
+                    ("PART_NUMBER", "CAP-00000053"),
+                    ("Manufacturer PN", "885012205037"),
+                    ("Manufacturer", "Wurth Electronics Inc."),
+                ],
+            ),
+            // No maker's number: the internal one is the only candidate left.
+            comp("C2", "1uF", "C_0402", "capacitor", &[("PART_NUMBER", "CAP-00000099")]),
+        ];
+        // Not an Altium design: the fallback holds (see the Altium test below).
+        let mapping = resolve_mapping(&comps);
+        let flat = build_flat(&comps, &mapping, "p", "p");
+        let f = |i: usize, k: &str| flat.lines[i].fields.get(k).map(String::as_str);
+        assert_eq!(f(0, "manufacturer_part_number"), Some("885012205037"));
+        assert_eq!(f(0, "PART_NUMBER"), Some("CAP-00000053"), "kept as its own field");
+        assert_eq!(f(0, "manufacturer"), Some("Wurth Electronics Inc."));
+        assert_eq!(f(1, "manufacturer_part_number"), Some("CAP-00000099"));
+    }
+
+    /// Altium: a part with no "Manufacturer PN" has a blank MPN, as in Altium's own BOM.
+    #[test]
+    fn altium_part_without_manufacturer_pn_has_no_mpn() {
+        let comps = vec![
+            comp(
+                "C1",
+                "0.1uF",
+                "C_0402",
+                "capacitor",
+                &[("altium_component_kind", "standard"), ("PART_NUMBER", "CAP-1"), ("Manufacturer PN", "885")],
+            ),
+            comp(
+                "JP1",
+                "",
+                "JP",
+                "jumper",
+                &[("altium_component_kind", "standard"), ("PART_NUMBER", "JMP-1")],
+            ),
+        ];
+        let mapping = resolve_mapping(&comps);
+        let flat = build_flat(&comps, &mapping, "p", "p");
+        assert_eq!(flat.lines[1].fields.get("manufacturer_part_number"), None);
+        assert_eq!(flat.lines[1].fields.get("PART_NUMBER").map(String::as_str), Some("JMP-1"));
+    }
+
+    /// KiCad: with both "MPN" and a generic "Part Number" key, the MPN key still wins.
+    #[test]
+    fn kicad_mpn_key_still_wins_over_part_number() {
+        let comps = vec![comp("U1", "X", "Y", "ic", &[("Part Number", "INT-1"), ("MPN", "REAL")])];
+        let mapping = resolve_mapping(&comps);
+        let (rows, _) = build_enriched(&comps, &mapping);
+        assert_eq!(rows[0].mpn, "REAL");
     }
 
     #[test]

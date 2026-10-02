@@ -28,7 +28,8 @@ import {
 } from "../lib/bomDiff";
 import {
   DEFAULT_COLS,
-  DEFAULT_GROUP_BY,
+  ALTIUM_GROUP_BY,
+  defaultGroupBy,
   MIXED_VALUES,
   STATUS_COL,
   customFieldValue,
@@ -229,11 +230,13 @@ export function BomTab() {
   // per component, and we fold those onto the fields KiCad flags `group_by` in the active
   // preset. No preset (built-in Default set) → the default key; a preset that flags
   // nothing → one row per component, exactly as KiCad shows it.
-  const grouped = useMemo(
-    () =>
-      lines ? groupLines(lines, activePreset ? (activePreset.fields ?? []) : DEFAULT_GROUP_BY) : null,
-    [lines, activePreset],
-  );
+  const grouped = useMemo(() => {
+    if (!lines) return null;
+    if (activePreset) return groupLines(lines, activePreset.fields ?? []);
+    const key = defaultGroupBy(lines);
+    // Altium's key leaves the footprint out, so a line may span two of them: show the first.
+    return groupLines(lines, key, key === ALTIUM_GROUP_BY);
+  }, [lines, activePreset]);
 
   /** Every column of the active set (before the user's hide list), Δ first in diff mode. */
   const allCols = useMemo<BomCol[]>(() => {

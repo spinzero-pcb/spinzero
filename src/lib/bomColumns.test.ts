@@ -1,5 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { MIXED_VALUES, builtinFor, customFieldValue, groupLines, presetColumns } from "./bomColumns";
+import {
+  ALTIUM_GROUP_BY,
+  DEFAULT_GROUP_BY,
+  MIXED_VALUES,
+  builtinFor,
+  customFieldValue,
+  defaultGroupBy,
+  groupLines,
+  presetColumns,
+} from "./bomColumns";
 import type { BomLine, BomPreset } from "./types";
 
 const line = (fields: Record<string, string>): BomLine => ({
@@ -164,5 +173,56 @@ describe("customFieldValue", () => {
     expect(customFieldValue({ ...line({}), fields: undefined } as any, "X")).toBe("");
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     expect(customFieldValue(line({ X: 5 as any }), "X")).toBe("");
+  });
+});
+
+describe("Altium grouping", () => {
+  const part = (
+    des: string,
+    libPart: string,
+    partNumber: string,
+    value: string,
+    footprint = "R_0603",
+  ): BomLine => ({
+    item: 0,
+    qty: 1,
+    designators: [des],
+    value,
+    footprint,
+    mpn: "",
+    dnp: false,
+    fields: { altium_library_part: libPart, PART_NUMBER: partNumber, footprint, description: "d" },
+  });
+  const group = (lines: BomLine[]) => groupLines(lines, ALTIUM_GROUP_BY, true);
+
+  it("picks the Altium key only for lines that carry the library part", () => {
+    expect(defaultGroupBy([part("R1", "RES", "P", "1k")])).toBe(ALTIUM_GROUP_BY);
+    expect(defaultGroupBy([{ ...part("R1", "RES", "P", "1k"), fields: {} }])).toBe(DEFAULT_GROUP_BY);
+  });
+
+  it("splits one PART_NUMBER and library part on a different value", () => {
+    const out = group([
+      part("R4", "RES", "TMP-406", "100"),
+      part("R18", "RES", "TMP-406", "100"),
+      part("R8", "RES", "TMP-406", "470"),
+    ]);
+    expect(out.map((l) => l.designators)).toEqual([["R4", "R18"], ["R8"]]);
+  });
+
+  it("splits the same PART_NUMBER and value on a different library part", () => {
+    const out = group([part("C1", "CAP_Dup1", "CAP-1", "0.1uF"), part("C13", "CAP_8", "CAP-1", "0.1uF")]);
+    expect(out).toHaveLength(2);
+  });
+
+  it("merges placements that differ only in footprint and keeps the first footprint", () => {
+    const out = group([
+      part("R61", "RES", "RES-15", "10K", "R_0603_HD"),
+      part("R62", "RES", "RES-15", "10K", "R_0603_HD"),
+      part("R63", "RES", "RES-15", "10K", "R_0603"),
+    ]);
+    expect(out).toHaveLength(1);
+    expect(out[0].qty).toBe(3);
+    expect(out[0].footprint).toBe("R_0603_HD");
+    expect(out[0].fields.footprint).toBe("R_0603_HD");
   });
 });

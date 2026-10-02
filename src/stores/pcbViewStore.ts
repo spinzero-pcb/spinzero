@@ -95,7 +95,15 @@ interface PcbViewState {
   /** New revision: reset hides, keep the active layer if it still exists, else
    *  default to the board's own front copper — resolved by role, because an
    *  Altium stack has no layer called F.Cu. */
-  resetForLayers: (layers: LayerLite[]) => void;
+  resetForLayers: (layers: LayerLite[], designTool?: string | null) => void;
+  /** Opacity keys the user has moved; only these are saved, so a default (which
+   *  differs per tool) is never frozen into the settings by moving another slider. */
+  userSet: Set<PcbObjectKey>;
+}
+
+/** Zones draw at full strength in Altium, so its default is 1; KiCad keeps 60%. */
+export function defaultOpacity(designTool?: string | null): Record<PcbObjectKey, number> {
+  return { ...DEFAULT_OPACITY, zones: designTool === "altium" ? 1 : DEFAULT_OPACITY.zones };
 }
 
 // KiCad Appearance→Objects defaults: tracks/vias/pads opaque, zones at 60% so the
@@ -111,6 +119,7 @@ export const usePcbViewStore = create<PcbViewState>((set, get) => ({
   edge: null,
   objects: { tracks: true, vias: true, pads: true, zones: true, footprints: true, text: true },
   opacity: { ...DEFAULT_OPACITY },
+  userSet: new Set(),
   setActive: (active) => set({ active }),
   toggleLayer: (layer) =>
     set((s) => {
@@ -131,30 +140,42 @@ export const usePcbViewStore = create<PcbViewState>((set, get) => ({
   setObject: (key, on) => set((s) => ({ objects: { ...s.objects, [key]: on } })),
   setOpacity: (key, v) => {
     const opacity = { ...get().opacity, [key]: v };
-    set({ opacity });
+    const userSet = new Set(get().userSet).add(key);
+    set({ opacity, userSet });
     // Remember the transparency sliders across sessions (machine-local user
     // preference). Debounced inside the settings store — this fires per drag tick.
-    useSettingsStore.getState().setPcbOpacity(opacity);
+    useSettingsStore
+      .getState()
+      .setPcbOpacity(Object.fromEntries([...userSet].map((k) => [k, opacity[k]])));
   },
   hydrateOpacity: (saved) => {
     if (!saved) return;
-    const opacity = { ...DEFAULT_OPACITY };
+    const opacity = { ...get().opacity };
+    const userSet = new Set<PcbObjectKey>();
     for (const key of PCB_OBJECT_KEYS) {
       const v = saved[key];
       // Clamp to the slider's 0.1..1 range; ignore anything non-finite or out of a
       // sane band so a corrupt settings file can't blank a class.
-      if (typeof v === "number" && isFinite(v) && v >= 0.1 && v <= 1) opacity[key] = v;
+      if (typeof v === "number" && isFinite(v) && v >= 0.1 && v <= 1) {
+        opacity[key] = v;
+        userSet.add(key);
+      }
     }
-    set({ opacity });
+    set({ opacity, userSet });
   },
-  resetForLayers: (layers) => {
+  resetForLayers: (layers, designTool) => {
     const names = layers.map((l) => l.name);
     return set((s) => {
       const hidden = new Set([...s.hidden].filter((l) => names.includes(l)));
       for (const l of layers)
         if (!s.known.includes(l.name) && hiddenByDefault(l)) hidden.add(l.name);
+      // A default follows the tool; a slider the user moved keeps its value.
+      const defaults = defaultOpacity(designTool);
+      const opacity = { ...s.opacity };
+      for (const key of PCB_OBJECT_KEYS) if (!s.userSet.has(key)) opacity[key] = defaults[key];
       return {
         hidden,
+        opacity,
         known: names,
         edge: edgeLayer(layers) ?? null,
         // Keep a still-present active layer; otherwise open on the board's own

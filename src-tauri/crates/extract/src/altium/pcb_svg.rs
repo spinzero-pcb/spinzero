@@ -527,46 +527,106 @@ fn arc_path_d(a: (f64, f64), m: (f64, f64), e: (f64, f64)) -> String {
 /// through exactly the path a KiCad board does.
 pub fn board_theme(g: &Geometry) -> BTreeMap<String, String> {
     let mut out = BTreeMap::new();
-    let mut inner = 0;
-    for l in &g.layers {
-        let key = match (l.role, l.side) {
-            ("copper", Some("front")) => "copper.f".to_string(),
-            ("copper", Some("back")) => "copper.b".to_string(),
-            ("copper", _) => {
-                inner += 1;
-                format!("copper.in{inner}")
-            }
-            ("silkscreen", Some("front")) => "f_silks".into(),
-            ("silkscreen", Some("back")) => "b_silks".into(),
-            ("mask", Some("front")) => "f_mask".into(),
-            ("mask", Some("back")) => "b_mask".into(),
-            ("paste", Some("front")) => "f_paste".into(),
-            ("paste", Some("back")) => "b_paste".into(),
-            ("edge", _) => "edge_cuts".into(),
-            _ => continue,
-        };
-        // Altium's factory palette: top copper red, bottom blue, the inner
-        // layers walking its default sequence, overlays yellow over grey, the
-        // masks purple, the pastes grey, and the keep-out magenta.
-        let hex = match key.as_str() {
-            "copper.f" => "#FF0000",
-            "copper.b" => "#0000FF",
-            "f_silks" => "#FFFF00",
-            "b_silks" => "#808080",
-            "f_mask" | "b_mask" => "#800080",
-            "f_paste" | "b_paste" => "#969696",
-            "edge_cuts" => "#FF00FF",
-            _ => INNER_COPPER[(inner.max(1) - 1) % INNER_COPPER.len()],
-        };
-        out.insert(key, hex.to_string());
+    for (key, hex) in layer_palette(&g.layers).into_iter().flatten() {
+        out.insert(key, hex);
     }
     out.insert("via_hole_walls".into(), HOLE.to_string());
     out
 }
 
+/// The theme key and Altium colour of each layer, by index. A layer with no
+/// colour of its own (a mechanical layer) is `None`.
+fn layer_palette(layers: &[crate::ir::LayerDef]) -> Vec<Option<(String, String)>> {
+    let mut inner = 0;
+    layers
+        .iter()
+        .map(|l| {
+            let key = match (l.role, l.side) {
+                ("copper", Some("front")) => "copper.f".to_string(),
+                ("copper", Some("back")) => "copper.b".to_string(),
+                ("copper", _) => {
+                    inner += 1;
+                    format!("copper.in{inner}")
+                }
+                ("silkscreen", Some("front")) => "f_silks".into(),
+                ("silkscreen", Some("back")) => "b_silks".into(),
+                ("mask", Some("front")) => "f_mask".into(),
+                ("mask", Some("back")) => "b_mask".into(),
+                ("paste", Some("front")) => "f_paste".into(),
+                ("paste", Some("back")) => "b_paste".into(),
+                ("edge", _) => "edge_cuts".into(),
+                _ => return None,
+            };
+            // The file holds no layer colours, so this is Altium's factory
+            // palette: top copper red, bottom blue, the inner layers walking
+            // its default sequence, overlays yellow over olive, solder masks
+            // purple over magenta, pastes grey over dark red, and the board
+            // shape magenta. Read from Altium's own Layers panel.
+            let hex = match key.as_str() {
+                "copper.f" => "#FF0000",
+                "copper.b" => "#0000FF",
+                "f_silks" => "#FFFF00",
+                "b_silks" => "#808000",
+                "f_mask" => "#800080",
+                "b_mask" => "#FF00FF",
+                "f_paste" => "#808080",
+                "b_paste" => "#800000",
+                "edge_cuts" => "#FF00FF",
+                _ => INNER_COPPER[(inner.max(1) - 1) % INNER_COPPER.len()],
+            };
+            Some((key, hex.to_string()))
+        })
+        .collect()
+}
+
+/// Give every layer that has an Altium colour that colour, so the viewer paints
+/// it directly instead of looking up a KiCad layer name it does not know.
+///
+/// This is the 2D palette. The `.PcbDoc` also states 3D colours (`CFG3D.*`);
+/// those are for a 3D view and are not used here.
+pub fn paint_layers(layers: &mut [crate::ir::LayerDef]) {
+    let palette = layer_palette(layers);
+    for (l, p) in layers.iter_mut().zip(palette) {
+        l.color = p
+            .map(|(_, hex)| hex)
+            .or_else(|| (l.role == "user").then(|| other_layer_color(&l.name)).flatten());
+    }
+}
+
+/// Altium's default 2D colour for a mechanical or special layer, by name. The
+/// mechanical layers walk magenta, purple, green, olive; the rest are fixed.
+/// Read from Altium's Layers panel for MB1419.
+fn other_layer_color(name: &str) -> Option<String> {
+    let n = name.trim();
+    let hex = match n.to_ascii_lowercase().as_str() {
+        "multi-layer" => "#C0C0C0",
+        "drill guide" => "#800000",
+        "drill drawing" => "#FF0000",
+        _ => {
+            // `M14-Top Assembly` or `Mechanical 14`.
+            let rest = n
+                .strip_prefix("Mechanical ")
+                .or_else(|| n.strip_prefix('M'))?;
+            let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+            let num: u32 = digits.parse().ok()?;
+            let tail = &rest[digits.len()..];
+            if num == 0 || !(tail.is_empty() || tail.starts_with(['-', ' ', '('])) {
+                return None;
+            }
+            // The 16th mechanical layer is black in Altium's default scheme.
+            if num == 16 {
+                "#000000"
+            } else {
+                ["#FF00FF", "#800080", "#008000", "#808000"][(num as usize - 1) % 4]
+            }
+        }
+    };
+    Some(hex.to_string())
+}
+
 /// Altium's default sequence for the inner copper layers.
 const INNER_COPPER: [&str; 8] = [
-    "#808000", "#008080", "#800000", "#008000", "#804000", "#008040", "#400080", "#408000",
+    "#BC8E00", "#70DBFA", "#00CC66", "#9A84FF", "#00FFFF", "#800080", "#804000", "#408000",
 ];
 
 #[cfg(test)]
@@ -757,6 +817,32 @@ mod tests {
 
     /// The theme covers the stack the board actually has, under the keys the
     /// frontend already reads.
+    #[test]
+    fn paint_layers_gives_each_colour_layer_its_own_colour() {
+        let mut ls = vec![
+            layer("Top Layer", "copper", Some("front"), 0),
+            layer("Signal Layer 1", "copper", Some("inner"), 1),
+            layer("Signal Layer 2", "copper", Some("inner"), 2),
+            layer("Bottom Layer", "copper", Some("back"), 3),
+            layer("Mechanical 2", "user", None, 4),
+        ];
+        paint_layers(&mut ls);
+        let mut ov = vec![layer("Top Overlay", "silkscreen", Some("front"), 0)];
+        paint_layers(&mut ov);
+        assert_eq!(ov[0].color.as_deref(), Some("#FFFF00"), "the 2D overlay is the default yellow");
+        assert_eq!(ls[0].color.as_deref(), Some("#FF0000"));
+        assert_eq!(ls[3].color.as_deref(), Some("#0000FF"));
+        assert_ne!(ls[1].color, ls[2].color, "inner layers differ");
+        assert!(ls[1].color.is_some());
+        assert_eq!(ls[4].color.as_deref(), Some("#800080"), "Mechanical 2 is purple");
+        assert_eq!(other_layer_color("M14-Top Assembly").as_deref(), Some("#800080"));
+        assert_eq!(other_layer_color("M16-Top Courtyard").as_deref(), Some("#000000"));
+        assert_eq!(other_layer_color("M20-X").as_deref(), Some("#808000"));
+        assert_eq!(other_layer_color("Drill Drawing").as_deref(), Some("#FF0000"));
+        assert_eq!(other_layer_color("Multi-Layer").as_deref(), Some("#C0C0C0"));
+        assert_eq!(other_layer_color("Margin"), None);
+    }
+
     #[test]
     fn the_board_theme_keys_the_stack_it_finds() {
         let t = board_theme(&geometry());

@@ -120,6 +120,28 @@ export const DEFAULT_GROUP_BY: BomPresetField[] = [
   "DNP",
 ].map((name) => ({ name, label: name, show: true, group_by: true }));
 
+/** The `fields` key the Altium extractor writes for a line's library part (`DesignItemId`,
+ *  else `LibReference`) — `LIBRARY_PART_PARAM` in `altium/design.rs`. Only Altium lines
+ *  carry it, which is how the table tells the two kinds of design apart. */
+export const ALTIUM_LIBRARY_PART = "altium_library_part";
+
+/** Altium's own BOM grouping: the library part + the company part number + the value
+ *  (Comment). The footprint and the description are NOT in the key — Altium merges two
+ *  placements that differ only there (R_0603 and R_0603_HD), and a placement with a
+ *  different value (R8 "470" against R4 "100", both TMP-406) stays its own line. */
+export const ALTIUM_GROUP_BY: BomPresetField[] = [
+  ALTIUM_LIBRARY_PART,
+  "PART_NUMBER",
+  "Value",
+  "DNP",
+].map((name) => ({ name, label: name, show: true, group_by: true }));
+
+/** The grouping key for a design that has no KiCad preset: Altium's when the lines come
+ *  from an Altium design, else the original default. */
+export function defaultGroupBy(lines: BomLine[]): BomPresetField[] {
+  return lines.some((l) => ALTIUM_LIBRARY_PART in (l.fields ?? {})) ? ALTIUM_GROUP_BY : DEFAULT_GROUP_BY;
+}
+
 /** The value a preset field name reads on a line — built-in columns off the line
  *  itself, everything else out of `line.fields`. */
 export function fieldValue(line: BomLine, name: string, label?: string): string {
@@ -159,8 +181,16 @@ const byDesignator = (a: string, b: string) => a.localeCompare(b, undefined, { n
  *  whose flagged fields all match fold into one: designators concatenated, quantities
  *  summed, and any other field the members disagree on collapsed to MIXED_VALUES (a field
  *  one member carries and another doesn't counts as a disagreement). Item numbers are
- *  re-issued in the resulting order. No flagged fields → the input, untouched. */
-export function groupLines(lines: BomLine[], keyFields: BomPresetField[]): BomLine[] {
+ *  re-issued in the resulting order. No flagged fields → the input, untouched.
+ *
+ *  `firstFootprint` is for a key that leaves the footprint out (Altium's): members of a
+ *  line may then disagree on it, and the line shows the FIRST member's footprint (the
+ *  lowest designator's) instead of the mixed marker. */
+export function groupLines(
+  lines: BomLine[],
+  keyFields: BomPresetField[],
+  firstFootprint = false,
+): BomLine[] {
   // U+001F between fields, spelled as an escape rather than a raw control character:
   // without it Value "1" + Footprint "0k_R0402" and Value "10" + Footprint "k_R0402"
   // would collide into one line with a summed qty. Same convention as `lineKey`
@@ -180,14 +210,17 @@ export function groupLines(lines: BomLine[], keyFields: BomPresetField[]): BomLi
     }
     const fields: Record<string, string> = {};
     for (const k of new Set([...Object.keys(prev.fields), ...Object.keys(line.fields)])) {
-      fields[k] = mergeValue(prev.fields[k] ?? "", line.fields[k] ?? "");
+      fields[k] =
+        firstFootprint && k.toLowerCase() === "footprint"
+          ? (prev.fields[k] ?? line.fields[k] ?? "")
+          : mergeValue(prev.fields[k] ?? "", line.fields[k] ?? "");
     }
     groups.set(key, {
       ...prev,
       qty: prev.qty + line.qty,
       designators: [...prev.designators, ...line.designators].sort(byDesignator),
       value: mergeValue(prev.value, line.value),
-      footprint: mergeValue(prev.footprint, line.footprint),
+      footprint: firstFootprint ? prev.footprint : mergeValue(prev.footprint, line.footprint),
       mpn: mergeValue(prev.mpn, line.mpn),
       // Only an all-DNP line reads as DNP (the tint and the "DNP only" chip mean
       // "nothing here gets populated").
