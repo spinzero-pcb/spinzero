@@ -20,32 +20,32 @@ pub enum Msg {
 
 /// Manifest entry for a rendered schematic sheet.
 #[derive(Serialize)]
-struct SchematicSvg {
-    file: String,
-    sheet_number: i64,
-    sheet_name: String,
-    sheet_path: String,
+pub(crate) struct SchematicSvg {
+    pub(crate) file: String,
+    pub(crate) sheet_number: i64,
+    pub(crate) sheet_name: String,
+    pub(crate) sheet_path: String,
     /// KiCad page label (`(page "N")`); empty when the project uses automatic
     /// numbering, so the viewer falls back to `sheet_number`.
     #[serde(skip_serializing_if = "String::is_empty", default)]
-    page: String,
+    pub(crate) page: String,
 }
 
 /// The bundle manifest the app reads.
 #[derive(Serialize)]
-struct Manifest {
-    schema: String,
-    design_json: String,
-    schematic_svgs: Vec<SchematicSvg>,
-    pcb_svgs: Vec<serde_json::Value>,
+pub(crate) struct Manifest {
+    pub(crate) schema: String,
+    pub(crate) design_json: String,
+    pub(crate) schematic_svgs: Vec<SchematicSvg>,
+    pub(crate) pcb_svgs: Vec<serde_json::Value>,
     /// Cache-relative path of the structured PCB geometry IR (the GPU renderer's
     /// input). Absent for schematic-only bundles or older extractions.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pcb_geometry: Option<String>,
+    pub(crate) pcb_geometry: Option<String>,
     /// Cache-relative path of the per-element schematic geometry (the diff engine's
     /// input for splitting + anchoring graphical edits). Absent for older extractions.
     #[serde(skip_serializing_if = "Option::is_none")]
-    schematic_geometry: Option<String>,
+    pub(crate) schematic_geometry: Option<String>,
 }
 
 /// Resolve the root schematic path for a project argument (`.kicad_pro` or a
@@ -291,7 +291,7 @@ fn sheet_display_name(info: &SheetInfo) -> String {
 }
 
 /// Filesystem-safe slug for a sheet file name.
-fn slug(s: &str) -> String {
+pub(crate) fn slug(s: &str) -> String {
     let s: String = s
         .chars()
         .map(|ch| if ch.is_ascii_alphanumeric() || ch == '-' { ch } else { '_' })
@@ -306,6 +306,9 @@ fn slug(s: &str) -> String {
 /// Schematic/PCB SVG rendering is layered in next; the manifest's SVG lists are
 /// empty until then, which the app tolerates.
 pub fn run_design(project: &Path, out_dir: &Path, emit: &mut dyn FnMut(Msg)) -> Result<(), String> {
+    if crate::orcad::is_orcad_project(project) {
+        return crate::orcad::pipeline::run_design(project, out_dir, emit);
+    }
     if crate::altium::is_altium_project(project) {
         return run_design_altium(project, out_dir, emit);
     }
@@ -821,6 +824,9 @@ fn onoff(b: bool) -> &'static str {
 /// Parse a project's full hierarchy into the component list (shared by `bom`),
 /// so subsheet parts are not missing from the BOM.
 pub fn load_components(project: &Path) -> Result<(String, Vec<Component>), String> {
+    if crate::orcad::is_orcad_project(project) {
+        return crate::orcad::pipeline::load_components(project);
+    }
     if crate::altium::is_altium_project(project) {
         let mut sink = |_: Msg| {};
         let h = crate::altium::load_hierarchy(project, &mut sink)?;

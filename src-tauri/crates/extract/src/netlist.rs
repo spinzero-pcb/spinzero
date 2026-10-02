@@ -558,7 +558,7 @@ pub fn merge_frags(frags: Vec<Frag>) -> Vec<Net> {
 /// then content (driver, terminal refs, graphical uuids) so the net array — and the
 /// `uid`s the caller assigns by position — never depend on HashMap iteration order.
 /// terminals + graphical buckets are already sorted/deduped above.
-fn net_order_key(n: &Net) -> (String, String, String, String) {
+pub(crate) fn net_order_key(n: &Net) -> (String, String, String, String) {
     let terminals = n
         .terminals
         .iter()

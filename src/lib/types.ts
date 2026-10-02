@@ -1,6 +1,6 @@
 // Mirrors the serde types in src-tauri/src — keep field names in sync (snake_case over IPC).
 
-export type ProjectKind = "kicad" | "altium";
+export type ProjectKind = "kicad" | "altium" | "orcad";
 
 /** Functional safety / market class of the board (drives review rigor + specs). */
 export type ProjectClass =
@@ -14,11 +14,12 @@ export type ProjectClass =
 /** An EDA project file detected inside a design folder (mirrors project.rs). */
 export interface DetectedDesign {
   kind: ProjectKind;
-  /** Absolute path to the .kicad_pro / .PrjPcb file (or the legacy file we matched). */
+  /** Absolute path to the .kicad_pro / .PrjPcb / .opj file (or the loose design,
+   *  board, or legacy file we matched). */
   file: string;
   name: string;
   /** A legacy KiCad ≤5 layout (.pro/.sch) — detectable but not importable until the
-   *  user re-saves it from KiCad 6+. Never set for an Altium design. */
+   *  user re-saves it from KiCad 6+. Never set for an Altium or OrCAD design. */
   legacy?: boolean;
 }
 

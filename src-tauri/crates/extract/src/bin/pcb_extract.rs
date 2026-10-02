@@ -96,10 +96,16 @@ fn cmd_dump(args: &[String]) -> ExitCode {
         }
     }
     let Some(file) = file else {
-        eprintln!("usage: pcb-extract dump <file.SchDoc|.PcbDoc> [--full] [--stream <name>]");
+        eprintln!("usage: pcb-extract dump <file.SchDoc|.PcbDoc|.DSN|.OLB|.brd> [--full] [--stream <name>]");
         return ExitCode::from(2);
     };
-    match extract::altium::dump::dump_head(&file, level, stream.as_deref(), head) {
+    let ext = file.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+    let result = if matches!(ext.as_str(), "dsn" | "olb" | "brd") {
+        extract::orcad::dump::dump(&file, level)
+    } else {
+        extract::altium::dump::dump_head(&file, level, stream.as_deref(), head)
+    };
+    match result {
         Ok(v) => {
             println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default());
             ExitCode::SUCCESS

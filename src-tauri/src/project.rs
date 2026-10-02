@@ -192,7 +192,7 @@ pub fn local_data_root(project_dir: &Path) -> PathBuf {
 
 #[derive(Clone, Serialize)]
 pub struct DetectedDesign {
-    pub kind: String, // "kicad" | "altium"
+    pub kind: String, // "kicad" | "altium" | "orcad"
     /// Absolute path to the EDA project file (.kicad_pro / .PrjPcb), or for a legacy
     /// KiCad project the legacy project/schematic file we matched on.
     pub file: String,
@@ -337,6 +337,8 @@ pub fn detect_design(design_path: &Path) -> Option<DetectedDesign> {
             ("kicad", 0)
         } else if let Some(rank) = altium_rank(ext) {
             ("altium", rank)
+        } else if let Some(rank) = extract::orcad::orcad_rank(path) {
+            ("orcad", rank)
         } else {
             // Not a modern KiCad project file — remember a legacy KiCad candidate
             // for the fallback. (Only KiCad projects are detected.)
@@ -1010,6 +1012,42 @@ mod detect_tests {
         fs::write(deep.join("b.kicad_pro"), "{}").unwrap();
         let det = detect_design(&d).expect("detected");
         assert_eq!(det.kind, "altium", "depth decides, not a tool preference");
+        fs::remove_dir_all(&d).ok();
+    }
+
+    const CFB: [u8; 8] = [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
+
+    #[test]
+    fn orcad_project_is_detected() {
+        let d = tmp();
+        fs::write(d.join("b.opj"), "(ExpressProject \"b\")\n").unwrap();
+        fs::write(d.join("B.DSN"), CFB).unwrap();
+        let det = detect_design(&d).expect("detected");
+        assert_eq!(det.kind, "orcad");
+        assert!(det.file.ends_with("b.opj"), "the project file wins, got {}", det.file);
+        fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn a_loose_capture_design_or_allegro_board_is_a_design() {
+        let d = tmp();
+        fs::write(d.join("b.brd"), [0x00, 0x05, 0x14, 0x00, 0, 0, 0, 0]).unwrap();
+        let det = detect_design(&d).expect("a board alone is a design");
+        assert_eq!(det.kind, "orcad");
+        fs::write(d.join("b.DSN"), CFB).unwrap();
+        let det = detect_design(&d).expect("detected");
+        assert!(det.file.ends_with("b.DSN"), "the schematic is entered first, got {}", det.file);
+        fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn specctra_and_eagle_files_are_not_orcad() {
+        // Same extensions, other tools: a Specctra session is text, an Eagle
+        // board is XML.
+        let d = tmp();
+        fs::write(d.join("route.dsn"), "(pcb route.dsn\n").unwrap();
+        fs::write(d.join("eagle.brd"), "<?xml version=\"1.0\"?>\n").unwrap();
+        assert!(detect_design(&d).is_none());
         fs::remove_dir_all(&d).ok();
     }
 

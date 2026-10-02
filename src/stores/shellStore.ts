@@ -55,7 +55,7 @@ export const useShellStore = create<ShellState>((set) => ({
       set({ wizardOpen: true, wizardInitialFolder: dir, err: null });
     } else {
       const msg =
-        "That folder isn’t a SpinZero project or an EDA design. Pick the folder that contains your .kicad_pro or .PrjPcb file.";
+        "That folder isn’t a SpinZero project or an EDA design. Pick the folder that contains your .kicad_pro, .PrjPcb or OrCAD .opj file.";
       set({ err: msg });
       useToastStore.getState().push({ kind: "error", title: "Nothing to open here", message: msg });
     }

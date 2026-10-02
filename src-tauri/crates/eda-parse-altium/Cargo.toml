@@ -6,5 +6,6 @@ description = "Read-only reader for Altium Designer project, schematic and board
 license = "GPL-3.0-or-later"
 
 [dependencies]
+ole-cfb = { path = "../ole-cfb" }
 # Altium stores an embedded image zlib-deflated inside the Storage stream.
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }

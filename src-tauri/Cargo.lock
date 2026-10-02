@@ -1140,11 +1140,19 @@ name = "eda-parse-altium"
 version = "0.0.1"
 dependencies = [
  "flate2",
+ "ole-cfb",
 ]
 
 [[package]]
 name = "eda-parse-kicad"
 version = "0.0.1"
+
+[[package]]
+name = "eda-parse-orcad"
+version = "0.0.1"
+dependencies = [
+ "ole-cfb",
+]
 
 [[package]]
 name = "embed-resource"
@@ -1243,6 +1251,8 @@ version = "0.0.1"
 dependencies = [
  "eda-parse-altium",
  "eda-parse-kicad",
+ "eda-parse-orcad",
+ "ole-cfb",
  "regex",
  "serde",
  "serde_json",
@@ -3015,6 +3025,10 @@ checksum = "ff76201f031d8863c38aa7f905eca4f53abbfa15f609db4277d44cd8938f33fe"
 dependencies = [
  "memchr",
 ]
+
+[[package]]
+name = "ole-cfb"
+version = "0.0.1"
 
 [[package]]
 name = "once_cell"

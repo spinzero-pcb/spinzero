@@ -1,7 +1,8 @@
 //! Read-only MS-CFB (OLE compound file) reader.
 //!
-//! Altium's `.SchDoc`, `.PcbDoc`, `.SchLib` and `.PcbLib` are compound files: a
-//! directory tree of storages and streams inside one file. We only ever read, so
+//! Altium's `.SchDoc`, `.PcbDoc`, `.SchLib` and `.PcbLib` and OrCAD Capture's
+//! `.DSN` and `.OLB` are compound files: a directory tree of storages and streams
+//! inside one file. We only ever read, so
 //! this covers the header, the FAT/DIFAT chains, the mini-FAT, the directory
 //! tree and stream extraction — nothing else.
 //!
@@ -302,6 +303,9 @@ fn entry_name(e: &[u8]) -> String {
 }
 
 #[cfg(test)]
+mod test_support;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -313,14 +317,14 @@ mod tests {
 
     #[test]
     fn reads_a_hand_built_v3_container() {
-        let cfb = Cfb::parse(&crate::test_support::tiny_cfb()).expect("parse");
+        let cfb = Cfb::parse(&test_support::tiny_cfb()).expect("parse");
         assert_eq!(cfb.stream("Storage/Data"), Some(&b"hello altium"[..]));
         assert_eq!(cfb.paths().collect::<Vec<_>>(), vec!["Storage/Data"]);
     }
 
     #[test]
     fn stream_lookup_is_case_insensitive_as_a_fallback() {
-        let cfb = Cfb::parse(&crate::test_support::tiny_cfb()).expect("parse");
+        let cfb = Cfb::parse(&test_support::tiny_cfb()).expect("parse");
         assert!(cfb.stream("storage/data").is_none());
         assert_eq!(cfb.stream_ci("storage/data"), Some(&b"hello altium"[..]));
     }

@@ -5,7 +5,7 @@
 //! into the bundle lives in the `extract` crate, so both design sources share
 //! one set of output structs.
 
-pub mod cfb;
+pub use ole_cfb as cfb;
 pub mod doc;
 pub mod image;
 pub mod library;

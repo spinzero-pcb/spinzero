@@ -30,6 +30,10 @@ const SOURCE_EXTENSIONS: &[&str] = &[
     // lower-cases the extension first — Altium's own capitalisation (`.PrjPcb`,
     // `.SchDoc`) varies between the designer's file and the project's reference.
     "prjpcb", "schdoc", "pcbdoc", "schlib", "pcblib",
+    // OrCAD Capture project, design and library, and the Allegro board. Capture's
+    // backups (`.DBK`, `.OBK`) and Allegro's numbered saves (`board.brd,1`) carry
+    // other extensions and so stay out.
+    "opj", "dsn", "olb", "brd",
 ];
 
 const LIB_TABLE_NAMES: &[&str] = &["sym-lib-table", "fp-lib-table"];
@@ -221,6 +225,23 @@ mod tests {
         // reference to it, and the filter lower-cases before matching.
         assert!(relevant("board.pcbdoc"));
         assert!(relevant("Lib/Parts.SchLib"));
+    }
+
+    #[test]
+    fn orcad_sources_trigger_a_crunch() {
+        assert!(relevant("Board.opj"));
+        assert!(relevant("BOARD.DSN"));
+        assert!(relevant("lib/Parts.OLB"));
+        assert!(relevant("allegro/board.brd"));
+    }
+
+    #[test]
+    fn orcad_save_churn_does_not() {
+        assert!(!relevant("BOARD.DBK"));
+        assert!(!relevant("lib/Parts.OBK"));
+        assert!(!relevant("allegro/board.brd,1"));
+        assert!(!relevant("allegro/allegro.jrl"));
+        assert!(!relevant("allegro/signal.log"));
     }
 
     #[test]
