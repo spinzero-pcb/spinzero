@@ -184,7 +184,7 @@ const SUFFIX_MARK: char = '\u{1F}';
 /// net in the design has the same bare name, in which case it takes `_` and
 /// the block name (`N00439_MV1`, `LED_BLUE1_LED MODULE`). Nets of the root
 /// folder never take a suffix.
-pub fn finalize_names(nets: &mut Vec<crate::netlist::Net>) {
+pub fn finalize_names(nets: &mut [crate::netlist::Net]) {
     let base = |n: &str| n.split(SUFFIX_MARK).next().unwrap_or(n).to_string();
     let mut count: HashMap<String, usize> = HashMap::new();
     for n in nets.iter() {

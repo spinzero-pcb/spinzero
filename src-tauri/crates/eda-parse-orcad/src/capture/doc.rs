@@ -238,7 +238,7 @@ pub fn parse(bytes: &[u8]) -> Result<CaptureDoc, String> {
         let name = &raw;
         let streams = by_folder.get(name).cloned().unwrap_or_default();
         let mut ordered = if modern {
-            stream_order(&cfb, &name)
+            stream_order(&cfb, name)
         } else {
             cfb.stream(&format!("Views/{name}/Schematic")).and_then(legacy::page_order).unwrap_or_default()
         };

@@ -1252,6 +1252,7 @@ dependencies = [
  "eda-parse-altium",
  "eda-parse-kicad",
  "eda-parse-orcad",
+ "ole-cfb",
  "regex",
  "serde",
  "serde_json",

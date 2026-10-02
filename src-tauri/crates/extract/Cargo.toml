@@ -15,6 +15,7 @@ path = "src/bin/pcb_extract.rs"
 [dependencies]
 eda-parse-altium = { path = "../eda-parse-altium" }
 eda-parse-orcad = { path = "../eda-parse-orcad" }
+ole-cfb = { path = "../ole-cfb" }
 eda-parse-kicad = { path = "../eda-parse-kicad" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

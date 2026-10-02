@@ -11,6 +11,7 @@
 //! occurrence its own set of sheets with its own designators and net names.
 
 pub mod design;
+pub mod dump;
 pub mod netlist;
 pub mod pcb;
 pub mod pipeline;
@@ -264,7 +265,7 @@ pub fn load(project: &Path, emit: &mut dyn FnMut(Msg)) -> Result<Loaded, String>
 }
 
 /// The occurrence a block or part on a page stands for, within one scope.
-pub fn occurrence_of<'a>(scope: Option<&'a Scope>, db_id: u32) -> Option<&'a Occurrence> {
+pub fn occurrence_of(scope: Option<&Scope>, db_id: u32) -> Option<&Occurrence> {
     scope?.occurrences.iter().find(|o| o.target_db_id == db_id)
 }
 

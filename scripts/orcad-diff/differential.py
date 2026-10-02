@@ -186,11 +186,12 @@ def kicad_netlist(xml_path):
     root = ET.parse(xml_path).getroot()
     out = {}
     for net in root.iter("net"):
-        name = net.get("name", "")
         # KiCad prefixes a sheet path (`/sheet/NAME`); Capture names are bare.
-        bare = name.rsplit("/", 1)[-1]
+        # A Capture name can itself hold '/', so the full name is kept and
+        # compared by its tail.
+        name = net.get("name", "")
         for node in net.iter("node"):
-            out[(node.get("ref", "").upper(), node.get("pin", "").upper())] = bare
+            out[(node.get("ref", "").upper(), node.get("pin", "").upper())] = name
     return out
 
 
@@ -225,8 +226,15 @@ def diff_design(dsn, kicad, tmp):
     # A generated name (N01234) is each tool's own invention: only explicit
     # names are compared.
     named = [k for k in ours if k in theirs and not re.fullmatch(r"N\d+.*", ours[k])]
-    same = sum(1 for k in named if ours[k].upper() == theirs[k].upper())
-    renamed = sorted({(ours[k], theirs[k]) for k in named if ours[k].upper() != theirs[k].upper()})[:15]
+    # Capture's netlister suffixes a name local to a reused folder instance
+    # with `_<block>` where the bare name collides; KiCad puts the instance in
+    # a sheet path instead (stripped above). Same base name, two conventions.
+    def same_name(o, t):
+        o, t = o.upper(), t.upper()
+        tails = {t, t.rsplit("/", 1)[-1]} | ({t[1:]} if t.startswith("/") else set())
+        return any(o == x or o.startswith(x + "_") or t.endswith("/" + o) for x in tails)
+    same = sum(1 for k in named if same_name(ours[k], theirs[k]))
+    renamed = sorted({(ours[k], theirs[k]) for k in named if not same_name(ours[k], theirs[k])})[:15]
     return {
         "grouping_examples": split,
         "naming_examples": renamed,

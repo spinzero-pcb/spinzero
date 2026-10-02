@@ -169,6 +169,7 @@ impl Ctx<'_> {
 
 /// A text run: `at` is the top-left of its box before rotation, `turns`
 /// counter-clockwise quarter turns about that corner.
+#[allow(clippy::too_many_arguments)]
 fn emit_text(s: &mut String, ctx: &Ctx, text: &str, at: (f64, f64), font: u16, turns: u8, anchor: &str, fill: &str) {
     if text.trim().is_empty() {
         return;

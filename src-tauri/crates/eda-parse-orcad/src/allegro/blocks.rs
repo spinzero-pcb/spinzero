@@ -194,7 +194,7 @@ fn find_after_0x27(data: &[u8], from: usize, v: Ver, seen: &HashMap<u32, usize>,
                         && !seen.contains_key(&b.key)
                         && (b.key as u64) >= lo
                         && (b.key as u64) <= hi
-                        && r.pos % 4 == 0 => ok += 1,
+                        && r.pos.is_multiple_of(4) => ok += 1,
                     _ => break,
                 }
             }
@@ -1259,7 +1259,7 @@ pub fn read_stream(data: &[u8], start: usize, header: &Header) -> Stream {
         if r.pos >= data.len() {
             break;
         }
-        if r.pos % 4 != 0 {
+        if !r.pos.is_multiple_of(4) {
             s.misaligned += 1;
         }
         let at = r.pos;
