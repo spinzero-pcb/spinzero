@@ -74,6 +74,9 @@ pub struct Resolved<'a> {
     pub section: String,
     pub symbol: Option<&'a SymbolDef>,
     pub package: Option<&'a Package>,
+    /// Slot of the placed revision -> slot of the revision the package's pin
+    /// list is indexed by, when the part places a later stored revision.
+    pub package_slot: Option<Vec<Option<usize>>>,
     /// Effective properties, lowest precedence first: package, device, the
     /// placed instance, then the occurrence's overrides.
     pub props: BTreeMap<String, String>,
@@ -84,8 +87,12 @@ impl Resolved<'_> {
     /// the symbol pin's own name.
     pub fn pin_number(&self, slot: usize) -> Option<String> {
         if let Some(pkg) = self.package {
-            if let Some(dev) = pkg.devices.get(self.device) {
-                if let Some(Some(n)) = dev.pins.get(slot) {
+            let slot_in_pkg = match &self.package_slot {
+                Some(map) => map.get(slot).copied().flatten(),
+                None => Some(slot),
+            };
+            if let (Some(dev), Some(ps)) = (pkg.devices.get(self.device), slot_in_pkg) {
+                if let Some(Some(n)) = dev.pins.get(ps) {
                     if !n.number.is_empty() {
                         return Some(n.number.clone());
                     }
@@ -106,6 +113,27 @@ pub fn resolve<'a>(doc: &'a CaptureDoc, inst: &SheetInstance, part: &'a PlacedPa
     let occ = occurrence_of(inst.scope.as_ref(), part.db_id);
     let symbol = doc.symbol_for(part);
     let package = doc.cache.package(&part.package);
+    // A cache name can store several revisions of a symbol (one drawn
+    // vertically, one horizontally), each numbering its pin slots its own
+    // way; the package's pin list follows the first. A part placing a later
+    // revision has its slots matched to the first's by pin name — measured on
+    // a resistor whose horizontal revision lists pin 2 first.
+    let package_slot = symbol.and_then(|used| {
+        let first = doc.cache.symbol(&part.cache_name)?;
+        if std::ptr::eq(first, used) {
+            return None;
+        }
+        let names: std::collections::BTreeSet<&str> = first.pins.iter().map(|p| p.name.as_str()).collect();
+        if names.len() != first.pins.len() {
+            return None;
+        }
+        let max = used.pins.iter().map(|p| p.slot).max().unwrap_or(0);
+        let mut map = vec![None; max + 1];
+        for p in &used.pins {
+            map[p.slot] = first.pins.iter().find(|q| q.name == p.name).map(|q| q.slot);
+        }
+        Some(map)
+    });
     let device = occ
         .and_then(|o| o.unit.as_deref())
         .and_then(|u| package.and_then(|p| p.devices.iter().position(|d| d.unit == u)))
@@ -170,6 +198,7 @@ pub fn resolve<'a>(doc: &'a CaptureDoc, inst: &SheetInstance, part: &'a PlacedPa
         section: if multi { section } else { String::new() },
         symbol,
         package,
+        package_slot,
         props,
     }
 }

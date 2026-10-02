@@ -147,10 +147,16 @@ fn index(db: Db) -> Board {
                 break;
             }
             if let Data::FootprintInst { bottom, rotation, at, inst_ref, first_pad, text, .. } = &i.data {
-                let refdes = match db.stream.get(*inst_ref).map(|x| &x.data) {
+                let mut refdes = match db.stream.get(*inst_ref).map(|x| &x.data) {
                     Some(Data::CompInst { refdes, .. }) => db.s(*refdes).to_string(),
                     _ => String::new(),
                 };
+                if refdes.is_empty() {
+                    // A footprint placed without a component (a mounting hole,
+                    // a mechanical part) is still named by the reference text
+                    // it draws.
+                    refdes = ref_text(&db, *text).unwrap_or_default();
+                }
                 let (device, value, description) = by_inst.get(inst_ref).cloned().unwrap_or_default();
                 footprints.push(Placed {
                     key: i.key,
@@ -180,6 +186,29 @@ fn index(db: Db) -> Board {
         }
     }
     Board { db, copper, footprints, net_names }
+}
+
+/// The reference designator text on a footprint's text chain.
+fn ref_text(db: &Db, head: u32) -> Option<String> {
+    let mut k = head;
+    let mut seen = HashSet::new();
+    while let Some(x) = db.stream.get(k) {
+        if x.kind != 0x30 || !seen.insert(k) {
+            break;
+        }
+        if let Data::Text { layer, sgraphic, .. } = &x.data {
+            if layer.class == class::REF_DES {
+                if let Some(Data::StrGraphic { text, .. }) = db.stream.get(*sgraphic).map(|g| &g.data) {
+                    let t = text.trim();
+                    if !t.is_empty() && !t.contains('*') {
+                        return Some(t.to_string());
+                    }
+                }
+            }
+        }
+        k = x.next;
+    }
+    None
 }
 
 /// Names of a class's custom subclasses (the low subclass codes), from the

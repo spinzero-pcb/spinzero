@@ -20,6 +20,8 @@ use super::symbol::{read_symbol, SymbolDef};
 #[derive(Debug, Clone, Default)]
 pub struct Folder {
     pub name: String,
+    /// The storage's own name under `Views/` (see [`storage_name`]).
+    pub storage: String,
     pub pages: Vec<Page>,
     /// Listed in the Views directory (a hidden folder exists but is not shown).
     pub visible: bool,
@@ -158,6 +160,15 @@ fn views_directory(cfb: &Cfb) -> Option<Vec<String>> {
     c.is_done().then_some(v)
 }
 
+/// A storage or stream name as Capture spelled it. A compound file cannot
+/// hold `/` or `:` in a name, so Capture writes them as 0x02 and 0x03 (a
+/// folder `Sch 5: CAN Controller 1` is stored `Sch 5\x03 CAN Controller 1`;
+/// a package `IMST400/FP` is stored with 0x02, and its record inside says
+/// `IMST400/FP`).
+pub fn storage_name(raw: &str) -> String {
+    raw.replace('\u{2}', "/").replace('\u{3}', ":")
+}
+
 pub fn parse(bytes: &[u8]) -> Result<CaptureDoc, String> {
     if !ole_cfb::is_cfb(bytes) {
         return Err(not_capture(bytes));
@@ -223,8 +234,9 @@ pub fn parse(bytes: &[u8]) -> Result<CaptureDoc, String> {
     }
 
     let mut folders = Vec::new();
-    for (name, visible) in order {
-        let streams = by_folder.get(&name).cloned().unwrap_or_default();
+    for (raw, visible) in order {
+        let name = &raw;
+        let streams = by_folder.get(name).cloned().unwrap_or_default();
         let mut ordered = if modern {
             stream_order(&cfb, &name)
         } else {
@@ -236,11 +248,12 @@ pub fn parse(bytes: &[u8]) -> Result<CaptureDoc, String> {
                 ordered.push(s.clone());
             }
         }
-        let mut folder = Folder { name: name.clone(), visible, ..Folder::default() };
+        let mut folder = Folder { name: storage_name(name), storage: raw.clone(), visible, ..Folder::default() };
         for s in ordered {
             let path = format!("Views/{name}/Pages/{s}");
             let Some(d) = cfb.stream(&path) else { continue };
-            let read = if modern { read_page(&s, d, &lib) } else { legacy::read_page(&s, d, &lib) };
+            let label = storage_name(&s);
+            let read = if modern { read_page(&label, d, &lib) } else { legacy::read_page(&label, d, &lib) };
             match read {
                 Ok(p) => {
                     if let Some(t) = &p.truncated {
@@ -270,7 +283,7 @@ pub fn parse(bytes: &[u8]) -> Result<CaptureDoc, String> {
     let mut tree = None;
     let mut tree_error = None;
     if let Some(r) = root {
-        let path = format!("Views/{}/Hierarchy/Hierarchy", folders[r].name);
+        let path = format!("Views/{}/Hierarchy/Hierarchy", folders[r].storage);
         if let Some(d) = cfb.stream(&path) {
             let read = if modern { read_tree(d, &lib) } else { legacy::read_tree(d, &lib) };
             match read {

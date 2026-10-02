@@ -300,7 +300,11 @@ pub fn walk(doc: &CaptureDoc, unresolved: &mut Unresolved) -> Vec<SheetInstance>
         unresolved.orphan_folders.push(f.name.clone());
         let human = format!("/{}/", seg(&f.name));
         let ids = format!("/f:{}/", seg(&f.name));
-        visit(doc, i, None, &human, &ids, &format!("orphan:{}", f.name), None, "", 0, &mut counter, &mut reached, &mut out, unresolved);
+        // Capture netlists only the root; a name an orphan folder shares with
+        // another top sheet is still another net, so it takes the folder's
+        // name as its suffix when the bare name would collide.
+        let suffix = format!("_{}", f.name);
+        visit(doc, i, None, &human, &ids, &format!("orphan:{}", f.name), None, &suffix, 0, &mut counter, &mut reached, &mut out, unresolved);
     }
     for f in &doc.folders {
         for p in &f.pages {

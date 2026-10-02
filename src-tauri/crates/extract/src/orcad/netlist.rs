@@ -474,6 +474,10 @@ pub fn fragments(
                 b.graphical.labels.push(u);
                 if !name.trim().is_empty() {
                     b.keys.insert(format!("off:{scope_key}:{}", up(&name)));
+                    // An off-page connector also meets a net alias of its name
+                    // in the same folder (measured: CutiePi's LOL / LOR, one net
+                    // on the board built from Capture's netlist).
+                    b.keys.insert(format!("name:{folder_scope}:{}", up(&name)));
                     b.names.push((rank_at(rank::OFFPAGE, inst.depth), local(&name), "global_label".into()));
                 }
             }
