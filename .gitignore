@@ -5,6 +5,7 @@ dist/
 # Rust / Tauri
 src-tauri/target/
 src-tauri/gen/
+src-tauri/binaries/
 
 # Python helper scripts
 __pycache__/
