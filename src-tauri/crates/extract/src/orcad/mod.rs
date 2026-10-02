@@ -42,14 +42,28 @@ pub fn mm(v: i32) -> f64 {
 /// True when a path names something this front-end handles: a Capture project,
 /// a Capture design, or an OrCAD/Allegro board.
 pub fn is_orcad_project(p: &Path) -> bool {
+    orcad_rank(p).is_some()
+}
+
+/// How strongly a file stands for an OrCAD design: the project (`.OPJ`) first,
+/// then a Capture design (`.DSN`), then a board (`.brd`). `None` for anything
+/// else. `.dsn` is also Specctra's text extension and `.brd` Eagle's, so both
+/// are confirmed by their content, not their name.
+pub fn orcad_rank(p: &Path) -> Option<u8> {
     let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
     match ext.as_str() {
-        "opj" | "brd" => true,
-        // `.dsn` is also Specctra's text extension; only a compound file is
-        // a Capture design.
-        "dsn" => std::fs::read(p).map(|b| ole_cfb_magic(&b)).unwrap_or(true),
-        _ => false,
+        "opj" => Some(0),
+        "dsn" => head(p).map(|b| ole_cfb_magic(&b)).unwrap_or(false).then_some(1),
+        "brd" => eda_parse_orcad::allegro::sniff_path(p).then_some(2),
+        _ => None,
     }
+}
+
+fn head(p: &Path) -> Option<Vec<u8>> {
+    use std::io::Read;
+    let mut b = vec![0u8; 8];
+    std::fs::File::open(p).ok()?.read_exact(&mut b).ok()?;
+    Some(b)
 }
 
 fn ole_cfb_magic(b: &[u8]) -> bool {

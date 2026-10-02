@@ -99,7 +99,7 @@ export function NewProjectWizard({
       setDetected(d);
       if (!d) {
         setDetectErr(
-          "No KiCad (.kicad_pro) or Altium (.PrjPcb) project file found in that folder.",
+          "No KiCad (.kicad_pro), Altium (.PrjPcb) or OrCAD (.opj / .DSN / .brd) design found in that folder.",
         );
       } else {
         if (!name) setName(d.name || basename(dir));
