@@ -1506,3 +1506,103 @@ pub fn board_design(b: &Board, name: &str, path: &str, filename: &str) -> Design
     let nets = crate::netlist::merge_frags(frags);
     crate::design::assemble(name, path, filename, Vec::new(), components, nets, Vec::new())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn close(a: (f64, f64), b: (f64, f64)) -> bool {
+        (a.0 - b.0).abs() < 1.0 && (a.1 - b.1).abs() < 1.0
+    }
+
+    #[test]
+    fn an_arc_midpoint_follows_its_sweep() {
+        let r = 1000.0;
+        let half = r / std::f64::consts::SQRT_2;
+        // Counter-clockwise (Y up) from +X to +Y passes through the first quadrant;
+        // clockwise between the same ends goes the long way round.
+        assert!(close(arc_mid((1000, 0), (0, 1000), (0.0, 0.0), r, false), (half, half)));
+        assert!(close(arc_mid((1000, 0), (0, 1000), (0.0, 0.0), r, true), (-half, -half)));
+        // Equal ends are a full circle: the midpoint is diametrically opposite.
+        assert!(close(arc_mid((1000, 0), (1000, 0), (0.0, 0.0), r, false), (-r, 0.0)));
+    }
+
+    #[test]
+    fn a_void_is_bridged_into_its_outline_against_its_winding() {
+        let outer = vec![(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)];
+        let hole = vec![(4.0, 4.0), (6.0, 4.0), (6.0, 6.0), (4.0, 6.0)];
+        let ring = bridge(outer.clone(), vec![hole.clone()]);
+        assert_eq!(ring.len(), outer.len() + hole.len() + 2);
+        for p in &hole {
+            assert!(ring.contains(p), "every void vertex is on the ring");
+        }
+        // The outline and the void wind opposite ways, so the void stays empty.
+        let at = ring.iter().position(|p| hole.contains(p)).unwrap();
+        let v: Vec<(f64, f64)> = ring[at..at + hole.len()].to_vec();
+        assert!(signed_area(&v) * signed_area(&outer) < 0.0);
+    }
+
+    #[test]
+    fn layers_take_the_roles_the_extract_reports_confirmed() {
+        let l = |class, sub| Layer { class, sub };
+        assert_eq!(slot_of(l(class::ETCH, 1), 4), Slot::Copper(1));
+        assert_eq!(slot_of(l(class::BOARD_GEOMETRY, 0xEA), 4), Slot::Edge);
+        assert_eq!(slot_of(l(class::BOARD_GEOMETRY, 0xFD), 4), Slot::Edge);
+        assert_eq!(slot_of(l(class::PACKAGE_GEOMETRY, 0xF7), 4), Slot::Silk(true));
+        assert_eq!(slot_of(l(class::PACKAGE_GEOMETRY, 0xF6), 4), Slot::Silk(false));
+        assert_eq!(slot_of(l(class::REF_DES, 0xFB), 4), Slot::Silk(true));
+        assert_eq!(slot_of(l(class::BOARD_GEOMETRY, 0xF1), 4), Slot::Silk(true));
+        // A device type on its silkscreen subclass is film configuration, not
+        // silkscreen by convention.
+        assert_eq!(slot_of(l(class::DEVICE_TYPE, 0xFB), 4), Slot::Other(class::DEVICE_TYPE, 0xFB));
+        // The drawing format's outline is the sheet's, not the board's.
+        assert_eq!(slot_of(l(class::DRAWING_FORMAT, 0xFD), 4), Slot::Other(class::DRAWING_FORMAT, 0xFD));
+        assert_eq!(fixed_subclass(class::PACKAGE_GEOMETRY, 0xF9), Some("PIN_NUMBER"));
+        assert_eq!(fixed_subclass(class::PACKAGE_GEOMETRY, 0xE5), None);
+    }
+
+    fn padstack(start: u8, count: u16) -> Padstack {
+        let pad = PadComp { kind: 0x06, w: 10, h: 20, ..Default::default() };
+        let mut comps = vec![PadComp::default(); 21];
+        for _ in 0..count {
+            comps.extend([PadComp::default(), PadComp::default(), pad, PadComp::default()]);
+        }
+        Padstack {
+            name: 0,
+            start_layer: start,
+            layer_count: count,
+            drill_w: 0,
+            drill_h: 0,
+            plated: false,
+            kind: Some(0),
+            comps,
+            fixed: 21,
+            per_layer: 4,
+        }
+    }
+
+    #[test]
+    fn a_bottom_footprint_puts_its_padstack_top_on_the_board_bottom() {
+        let smd = padstack(0, 1);
+        assert!(pad_on_board(&smd, 0, 4, false).is_some());
+        assert!(pad_on_board(&smd, 3, 4, false).is_none());
+        assert!(pad_on_board(&smd, 3, 4, true).is_some());
+        assert!(pad_on_board(&smd, 0, 4, true).is_none());
+        assert_eq!(span(&smd, 4, true), vec![3]);
+        assert_eq!(span(&padstack(1, 2), 4, false), vec![1, 2]);
+    }
+
+    #[test]
+    fn pad_shapes_map_to_the_ir_codes() {
+        let mut approx = 0;
+        let comp = |kind, w, h| PadComp { kind, w, h, corner: 5, ..Default::default() };
+        assert_eq!(pad_shape(&comp(0x02, 10, 10), &mut approx), (0, 0.0));
+        assert_eq!(pad_shape(&comp(0x02, 10, 20), &mut approx).0, 3);
+        assert_eq!(pad_shape(&comp(0x06, 10, 20), &mut approx), (1, 0.0));
+        assert_eq!(pad_shape(&comp(0x0B, 30, 10), &mut approx), (3, 0.0));
+        assert_eq!(pad_shape(&comp(0x1B, 20, 10), &mut approx), (2, 0.5));
+        assert_eq!(approx, 0);
+        let _ = pad_shape(&comp(0x03, 10, 10), &mut approx);
+        assert_eq!(approx, 1, "an octagon is drawn approximately and counted");
+    }
+}

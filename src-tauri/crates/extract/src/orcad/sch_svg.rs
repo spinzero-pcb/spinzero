@@ -838,3 +838,35 @@ pub fn render_sheet(doc: &CaptureDoc, inst: &SheetInstance, total: i64, _model: 
     s.push_str("</svg>");
     s
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_note_wraps_at_its_box_and_keeps_its_own_breaks() {
+        assert_eq!(wrap("one two three", 100.0, 1.0), vec!["one two three"]);
+        assert_eq!(wrap("one two three", 7.0, 1.0), vec!["one two", "three"]);
+        assert_eq!(wrap("a\r\nb", 100.0, 1.0), vec!["a", "b"]);
+        // A word wider than the box stays whole.
+        assert_eq!(wrap("unbreakable", 3.0, 1.0), vec!["unbreakable"]);
+        // No usable width: no wrapping at all.
+        assert_eq!(wrap("one two", 0.0, 1.0), vec!["one two"]);
+    }
+
+    #[test]
+    fn displayed_properties_follow_their_mode() {
+        let dp = |mode| DisplayProp { name: "Value".into(), x: 0, y: 0, font: 0, rotation: 0, color: 0, mode };
+        assert_eq!(display_text(&dp(0x100), "10k").as_deref(), Some("10k"));
+        assert_eq!(display_text(&dp(0x200), "10k").as_deref(), Some("Value = 10k"));
+        assert_eq!(display_text(&dp(0x300), "10k").as_deref(), Some("Value"));
+        assert_eq!(display_text(&dp(0x400), "").as_deref(), None);
+        assert_eq!(display_text(&dp(0), "10k"), None);
+        assert_eq!(display_text(&dp(0x100), "  "), None, "blank is not ink");
+    }
+
+    #[test]
+    fn markup_is_escaped_and_control_characters_dropped() {
+        assert_eq!(esc("<A&B>\"\u{1}"), "&lt;A&amp;B&gt;&quot;");
+    }
+}

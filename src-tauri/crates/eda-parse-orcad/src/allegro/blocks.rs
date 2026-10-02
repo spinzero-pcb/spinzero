@@ -1322,3 +1322,81 @@ pub fn read_stream(data: &[u8], start: usize, header: &Header) -> Stream {
     }
     s
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::allegro::header::{Chain, Units};
+
+    fn header(ver: Ver) -> Header {
+        Header {
+            magic: 0,
+            ver,
+            file_role: 1,
+            object_count: 0,
+            program: String::new(),
+            units: Units::Mils,
+            divisor: 1,
+            string_count: 0,
+            end_0x27: 0,
+            nets: Chain::default(),
+            footprints: Chain::default(),
+            shapes: Chain::default(),
+            zones_and_rects: Chain::default(),
+            graphics: Chain::default(),
+            padstacks: Chain::default(),
+            constraints: Chain::default(),
+            tables: Chain::default(),
+            fields_and_text: Chain::default(),
+            layer_lists: Vec::new(),
+        }
+    }
+
+    fn words(w: &[u32]) -> Vec<u8> {
+        w.iter().flat_map(|v| v.to_le_bytes()).collect()
+    }
+
+    /// A net assignment: type, three header bytes, key, next, net, item.
+    fn net_assign(key: u32, next: u32, net: u32, item: u32) -> Vec<u8> {
+        let mut b = vec![0x04, 0, 0, 0];
+        b.extend(words(&[key, next, net, item]));
+        b
+    }
+
+    #[test]
+    fn the_stream_reads_blocks_until_the_zero_type_and_indexes_them_by_key() {
+        let mut data = net_assign(0x10, 0x20, 0x99, 0x77);
+        data.extend(net_assign(0x20, 0, 0x99, 0x78));
+        data.extend([0u8; 8]);
+        let s = read_stream(&data, 0, &header(Ver::V172));
+        assert_eq!(s.blocks.len(), 2);
+        assert!(s.stopped.is_none());
+        assert_eq!(s.misaligned, 0);
+        assert_eq!(s.get(0x20).map(|b| &b.data), Some(&Data::NetAssign { net: 0x99, item: 0x78 }));
+        let keys: Vec<u32> = s.chain(0x10).iter().map(|b| b.key).collect();
+        assert_eq!(keys, vec![0x10, 0x20]);
+    }
+
+    #[test]
+    fn a_layout_grows_with_the_format_generation() {
+        // 17.4 added a trailing word to the net assignment: read as 17.2 the
+        // stream would desynchronise, read as 17.4 it is whole.
+        let mut data = net_assign(0x10, 0, 0x99, 0x77);
+        data.extend([0u8; 4]);
+        data.extend(net_assign(0x11, 0, 0x99, 0x78));
+        data.extend([0u8; 4]);
+        data.extend([0u8; 8]);
+        let s = read_stream(&data, 0, &header(Ver::V174));
+        assert_eq!(s.blocks.len(), 2);
+    }
+
+    #[test]
+    fn an_unknown_type_stops_the_walk_and_keeps_what_was_read() {
+        let mut data = net_assign(0x10, 0, 0x99, 0x77);
+        data.extend([0x7F, 0, 0, 0]);
+        data.extend([0u8; 16]);
+        let s = read_stream(&data, 0, &header(Ver::V172));
+        assert_eq!(s.blocks.len(), 1);
+        assert!(s.stopped.as_deref().unwrap_or("").contains("0x7f"));
+    }
+}

@@ -261,3 +261,58 @@ pub fn read_strings(data: &[u8], count: u32) -> Result<(std::collections::HashMa
     }
     Ok((out, r.pos))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_magic_names_the_generation_and_its_revision_byte_does_not() {
+        assert_eq!(Ver::from_magic(0x0014_0400).unwrap(), Ver::V172);
+        assert_eq!(Ver::from_magic(0x0014_04FF).unwrap(), Ver::V172);
+        assert_eq!(Ver::from_magic(0x0013_1500).unwrap(), Ver::V166);
+        assert_eq!(Ver::from_magic(0x0015_0200).unwrap(), Ver::V181);
+        assert!(Ver::from_magic(0x0012_0000).unwrap_err().contains("predates Allegro 16.0"));
+        assert!(Ver::from_magic(0x0014_9900).unwrap_err().contains("unknown"));
+    }
+
+    #[test]
+    fn units_scale_by_the_divisor() {
+        let h = |units, divisor| Header {
+            magic: 0,
+            ver: Ver::V172,
+            file_role: 1,
+            object_count: 0,
+            program: String::new(),
+            units,
+            divisor,
+            string_count: 0,
+            end_0x27: 0,
+            nets: Chain::default(),
+            footprints: Chain::default(),
+            shapes: Chain::default(),
+            zones_and_rects: Chain::default(),
+            graphics: Chain::default(),
+            padstacks: Chain::default(),
+            constraints: Chain::default(),
+            tables: Chain::default(),
+            fields_and_text: Chain::default(),
+            layer_lists: Vec::new(),
+        };
+        assert!((h(Units::Millimetres, 10000).scale() - 0.0001).abs() < 1e-12);
+        assert!((h(Units::Mils, 1000).scale() - 0.0000254).abs() < 1e-12);
+    }
+
+    #[test]
+    fn strings_are_word_aligned() {
+        let mut d = vec![0u8; STRING_TABLE];
+        d.extend(7u32.to_le_bytes());
+        d.extend(b"GND\0");
+        d.extend(8u32.to_le_bytes());
+        d.extend(b"+3V3\0\0\0\0");
+        let (s, end) = read_strings(&d, 2).unwrap();
+        assert_eq!(s[&7], "GND");
+        assert_eq!(s[&8], "+3V3");
+        assert_eq!(end % 4, 0);
+    }
+}

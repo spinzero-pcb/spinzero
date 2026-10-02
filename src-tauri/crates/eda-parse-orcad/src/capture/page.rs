@@ -602,3 +602,25 @@ fn read_page_lists(b: &mut Cur, lib: &LibraryInfo, page: &mut Page) -> Res<()> {
     page.graphics = graphic_list(b, lib, &st::GRAPHICS, 0)?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_placement_turns_the_body_and_lands_its_box_corner_on_the_origin() {
+        let body = (0, 0, 50, 20);
+        let none = Orient { turns: 0, mirror: false };
+        assert_eq!(none.place((10, 5), (100, 200), body), (110, 205));
+        // One counter-clockwise quarter turn: (x, y) -> (y, -x), then the turned
+        // box's minimum corner is moved onto the stored position.
+        let ccw = Orient { turns: 1, mirror: false };
+        assert_eq!(ccw.linear((10, 5)), (5, -10));
+        assert_eq!(ccw.place((0, 0), (100, 200), body), (100, 250));
+        assert_eq!(ccw.place((50, 20), (100, 200), body), (120, 200));
+        // Mirror is applied before the turn.
+        let m = Orient { turns: 0, mirror: true };
+        assert_eq!(m.place((0, 0), (100, 200), body), (150, 200));
+        assert_eq!(Orient::from_byte(0b101), Orient { turns: 1, mirror: true });
+    }
+}

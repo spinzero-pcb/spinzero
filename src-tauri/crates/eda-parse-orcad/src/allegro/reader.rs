@@ -130,3 +130,25 @@ impl<'a> R<'a> {
 pub fn latin1(b: &[u8]) -> String {
     b.iter().map(|&c| c as char).collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_double_is_stored_high_word_first() {
+        let bits = 1.5f64.to_bits();
+        let mut b = Vec::new();
+        b.extend(((bits >> 32) as u32).to_le_bytes());
+        b.extend((bits as u32).to_le_bytes());
+        assert_eq!(R::new(&b).f64().unwrap(), 1.5);
+    }
+
+    #[test]
+    fn reads_past_the_end_fail_with_their_offset() {
+        let mut r = R::new(&[1, 2, 3]);
+        let e = r.u32().unwrap_err();
+        assert_eq!(e.offset, 0);
+        assert!(e.to_string().contains("needs 4 bytes"));
+    }
+}
