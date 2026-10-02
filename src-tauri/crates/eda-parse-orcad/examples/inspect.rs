@@ -20,7 +20,7 @@ fn main() {
             for pt in &p.parts {
                 println!(" part db={} ref={:?} val={:?} cache={:?} pkg={:?} unit={} pos={:?} or={:?} props={:?}", pt.db_id, pt.reference, pt.value, pt.cache_name, pt.package, pt.unit_index, pt.pos, pt.orient, pt.props);
                 for pi in &pt.pins {
-                    println!("    pin idx={} pos={:?} props={:?}", pi.index, pi.pos, pi.props);
+                    println!("    pin idx={} pos={:?} a={:#x} b={:#x} rest={} props={:?}", pi.index, pi.pos, pi.word_a, pi.word_b, pi.display.len(), pi.props);
                 }
             }
             for b in &p.blocks {
@@ -45,12 +45,13 @@ fn main() {
         }
         walk(&t.root, 1);
     }
-    for (k, v) in d.cache.symbols.iter().take(40) {
+    for (k, v) in d.cache.symbols.iter().filter(|(k, _)| std::env::var("SYM").map(|f| k.contains(&f)).unwrap_or(true)).take(40) {
         let s = &v[0];
         println!("sym {k} kind={} bbox={:?} pins={:?} general={:?}", s.kind, s.bbox, s.pins.iter().map(|p| (p.slot, p.name.clone(), p.hot, p.etype, p.shape)).collect::<Vec<_>>(), s.general);
     }
     for (k, p) in d.cache.packages.iter().take(40) {
         println!("pkg {k} prefix={:?} fp={:?} devs={:?} props={:?}", p.ref_prefix, p.footprint, p.devices.iter().map(|d| (d.unit.clone(), d.pins.iter().map(|x| x.as_ref().map(|y| y.number.clone())).collect::<Vec<_>>())).collect::<Vec<_>>(), p.props);
     }
+    for (k, p) in &d.cache.packages { for dv in &p.devices { let ig: Vec<_> = dv.pins.iter().flatten().filter(|x| x.ignored).map(|x| x.number.clone()).collect(); if !ig.is_empty() { println!("ignored {k} {}: {:?}", dv.unit, ig); } } }
     for n in &d.notes { println!("note {n}"); }
 }

@@ -128,6 +128,9 @@ pub struct PinInst {
     pub index: i16,
     pub pos: (i32, i32),
     pub bus: bool,
+    /// Two undocumented words after the position.
+    pub word_a: u32,
+    pub word_b: u32,
     pub props: Vec<(String, String)>,
     pub display: Vec<DisplayProp>,
 }
@@ -229,6 +232,17 @@ pub struct Graphic {
 }
 
 impl Graphic {
+    /// The placement origin: the top-left corner of the stored box. The box
+    /// is the placed symbol body (widened by its text for ports and
+    /// connectors), and the symbol's pins land where [`Orient::place`] puts
+    /// them from this corner. The separately stored point is not the origin —
+    /// measured: a wire meets a port, an off-page connector or a power symbol
+    /// at the placed pin from this corner, in every orientation.
+    pub fn origin(&self) -> (i32, i32) {
+        let (x1, y1, x2, y2) = self.bbox;
+        (x1.min(x2), y1.min(y2))
+    }
+
     pub fn prop(&self, name: &str) -> Option<&str> {
         self.props.iter().find(|(k, _)| k.eq_ignore_ascii_case(name)).map(|(_, v)| v.as_str())
     }
@@ -323,10 +337,11 @@ fn read_pin_inst(c: &mut Cur, lib: &LibraryInfo) -> Res<PinInst> {
     let mut b = Cur::at(c.buf, f.body, f.end());
     let index = b.i16()?;
     let pos = (b.i16()? as i32, b.i16()? as i32);
-    b.skip(8)?;
+    let word_a = b.u32()?;
+    let word_b = b.u32()?;
     let display = if b.left() >= 2 { read_display_list(&mut b, lib)? } else { Vec::new() };
     c.seek(f.end())?;
-    Ok(PinInst { index, pos, bus: f.kind == st::PIN_INST_BUS, props: lib.props(&f.props), display })
+    Ok(PinInst { index, pos, bus: f.kind == st::PIN_INST_BUS, word_a, word_b, props: lib.props(&f.props), display })
 }
 
 fn read_placed(c: &mut Cur, f: &Frame, lib: &LibraryInfo) -> Res<PlacedPart> {

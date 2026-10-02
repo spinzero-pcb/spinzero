@@ -52,6 +52,46 @@ fn read_pstxnet(p: &Path) -> BTreeMap<String, Vec<Node>> {
     out
 }
 
+/// Hidden power pins: Capture's Allegro netlist leaves them off the nets and
+/// states them on the part (`POWER_PINS='(VCC:14)'` in pstchip.dat, the part
+/// named per designator in pstxprt.dat). Returns net -> nodes to add.
+fn power_pins(dir: &Path) -> BTreeMap<String, Vec<Node>> {
+    let read = |n: &str| std::fs::read(dir.join(n)).map(|b| String::from_utf8_lossy(&b).to_string()).unwrap_or_default();
+    let chip = read("pstchip.dat");
+    let prt = read("pstxprt.dat");
+    let mut prim_pins: BTreeMap<String, Vec<(String, Vec<String>)>> = BTreeMap::new();
+    let mut cur = String::new();
+    for l in chip.lines() {
+        let l = l.trim();
+        if let Some(r) = l.strip_prefix("primitive ") {
+            cur = r.trim_end_matches(';').trim_matches('\'').to_string();
+        } else if let Some(r) = l.strip_prefix("POWER_PINS='(") {
+            let inner = r.trim_end_matches(";").trim_end_matches('\'').trim_end_matches(')');
+            for grp in inner.split(");(") {
+                if let Some((net, pins)) = grp.split_once(':') {
+                    prim_pins.entry(cur.clone()).or_default().push((net.to_string(), pins.split(',').map(|x| x.trim().to_string()).collect()));
+                }
+            }
+        }
+    }
+    let mut out: BTreeMap<String, Vec<Node>> = BTreeMap::new();
+    let mut lines = prt.lines();
+    while let Some(l) = lines.next() {
+        if l.trim() == "PART_NAME" {
+            if let Some(n) = lines.next() {
+                let mut it = n.trim().splitn(2, ' ');
+                let (r, prim) = (it.next().unwrap_or(""), it.next().unwrap_or("").trim_end_matches(":;").trim_matches('\''));
+                for (net, pins) in prim_pins.get(prim).cloned().unwrap_or_default() {
+                    for pin in pins {
+                        out.entry(net.clone()).or_default().push(Node { r: r.to_string(), pin, name: String::new() });
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
 /// The design a netlist belongs to: a .DSN in the netlist folder's parent
 /// (or grandparent) whose netlist header names it.
 fn design_for(net: &Path) -> Option<PathBuf> {
@@ -76,12 +116,21 @@ fn main() {
     walk(Path::new(&args[1]), &mut nets);
     nets.sort();
     let (mut tot_nets, mut tot_part, mut tot_name, mut tot_pins, mut tot_pins_ok) = (0, 0, 0, 0, 0);
+    let (mut tot_parts, mut tot_parts_ok) = (0, 0);
     for netf in nets {
         let Some(dsn) = design_for(&netf) else { println!("no design for {}", netf.display()); continue };
         let mut sink = |_: extract::pipeline::Msg| {};
         let l = match extract::orcad::load(&dsn, &mut sink) { Ok(l) => l, Err(e) => { println!("FAIL {}: {e}", dsn.display()); continue } };
         let (model, src, _) = extract::orcad::build_design(&l, "", "", true);
-        let theirs = read_pstxnet(&netf);
+        let mut theirs = read_pstxnet(&netf);
+        for (net, nodes) in power_pins(netf.parent().unwrap()) {
+            let e = theirs.entry(net).or_default();
+            for n in nodes {
+                if !e.iter().any(|x| x.r == n.r && x.pin == n.pin) {
+                    e.push(n);
+                }
+            }
+        }
         // ours: (ref,pin) -> net name
         let mut pin_net: BTreeMap<(String, String), String> = BTreeMap::new();
         let mut pin_name: BTreeMap<(String, String), String> = BTreeMap::new();
@@ -102,7 +151,8 @@ fn main() {
         for (name, nodes) in &theirs {
             if nodes.is_empty() || name == "NC" { continue; }
             let consistent = nodes.iter().all(|n| {
-                pin_name.get(&(n.r.clone(), n.pin.clone())).map(|x| x.eq_ignore_ascii_case(&n.name)).unwrap_or(false)
+                n.name.is_empty() && pin_name.contains_key(&(n.r.clone(), n.pin.clone()))
+                    || pin_name.get(&(n.r.clone(), n.pin.clone())).map(|x| x.eq_ignore_ascii_case(&n.name)).unwrap_or(false)
             });
             if !consistent {
                 stale += 1;
@@ -128,11 +178,27 @@ fn main() {
             }
             if on.eq_ignore_ascii_case(name) { name_ok += 1; } else if verbose { bad.push(format!("  name {name} ours {on}")); }
         }
+        // Parts: Capture's part list (pstxprt.dat) against our components.
+        let prt = std::fs::read(netf.parent().unwrap().join("pstxprt.dat")).map(|b| String::from_utf8_lossy(&b).to_string()).unwrap_or_default();
+        let mut their_parts: BTreeSet<String> = BTreeSet::new();
+        let mut it = prt.lines();
+        while let Some(l) = it.next() {
+            if l.trim() == "PART_NAME" {
+                if let Some(n) = it.next() { if let Some(r) = n.split_whitespace().next() { their_parts.insert(r.to_string()); } }
+            }
+        }
+        let our_parts: BTreeSet<String> = model.components.iter().map(|c| c.designator.clone()).collect();
+        let parts_missing: Vec<_> = their_parts.difference(&our_parts).take(6).cloned().collect();
+        let parts_extra = our_parts.difference(&their_parts).count();
+        tot_parts += their_parts.len(); tot_parts_ok += their_parts.intersection(&our_parts).count();
+        if verbose && !parts_missing.is_empty() { bad.push(format!("  parts missing {parts_missing:?}")); }
+        println!("parts {}/{} (+{} ours) | ", their_parts.intersection(&our_parts).count(), their_parts.len(), parts_extra);
         println!("{:5}/{:5} nets same pins, {:5} same name, pins {}/{}, stale {} | {} (unconnected {})",
             part_ok, n_nets, name_ok, pins_ok, pins, stale, dsn.display(), src.unresolved.unconnected_pins);
-        if verbose { for b in bad.iter().take(25) { println!("{b}"); } }
+        if verbose { for b in bad.iter().take(400) { println!("{b}"); } }
         tot_nets += n_nets; tot_part += part_ok; tot_name += name_ok; tot_pins += pins; tot_pins_ok += pins_ok;
     }
+    println!("PARTS {tot_parts_ok}/{tot_parts}");
     println!("TOTAL {tot_part}/{tot_nets} nets same pins ({:.1}%), {tot_name} same name ({:.1}%), pins {tot_pins_ok}/{tot_pins}",
         100.0 * tot_part as f64 / tot_nets.max(1) as f64, 100.0 * tot_name as f64 / tot_nets.max(1) as f64);
 }

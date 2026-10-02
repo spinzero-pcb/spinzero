@@ -28,21 +28,24 @@ use super::design::{part_id, resolve};
 use super::{SheetInstance, Unresolved};
 use crate::netlist::{Frag, Graphical, Terminal};
 
-/// Naming precedence, strongest first, as Capture's netlister resolves it:
-/// a power symbol names its net everywhere; then an off-page connector, then a
-/// user net name (an alias), then the name Capture generated; a port names a
-/// net only when nothing else does, because a net crossing the hierarchy is
-/// named from the level above. Within one kind, the shallower level wins.
+/// Naming precedence, as Capture's netlister resolves it. The level comes
+/// first: a net crossing the hierarchy is named from the level above (a port's
+/// net takes the parent's name, even a generated one). Within one level: a
+/// power symbol, then an off-page connector, then a user net name, then a
+/// port, then the name Capture generated. Power names are global and rank as
+/// the top level wherever they are drawn.
 mod rank {
     pub const POWER: u8 = 6;
     pub const OFFPAGE: u8 = 5;
     pub const USER: u8 = 4;
+    pub const PORT: u8 = 3;
     pub const GENERATED: u8 = 2;
-    pub const PORT: u8 = 1;
 }
 
+/// `kind` ranked at hierarchy `depth`; the low bit is left free for a
+/// preferred name within the same kind.
 fn rank_at(kind: u8, depth: usize) -> u8 {
-    kind * 16 + (15 - depth.min(15) as u8)
+    (15 - depth.min(15) as u8) * 16 + kind * 2
 }
 
 /// Whether a user net name (an alias, or a named stored net) joins the nets of
@@ -130,7 +133,7 @@ pub fn hot_points(doc: &CaptureDoc, g: &Graphic) -> Vec<P> {
         .or_else(|| doc.cache.symbol(&g.cache_name))
         .map(|s| {
             let b = (s.bbox.0 as i32, s.bbox.1 as i32, s.bbox.2 as i32, s.bbox.3 as i32);
-            s.pins.iter().map(|p| g.orient.place(p.hot, g.pos, b)).collect::<Vec<_>>()
+            s.pins.iter().map(|p| g.orient.place(p.hot, g.origin(), b)).collect::<Vec<_>>()
         })
         .unwrap_or_default();
     if pins.is_empty() {
@@ -150,6 +153,11 @@ struct Bucket {
     names: Vec<(u8, String, String)>,
     has_wire: bool,
     no_connect_only: bool,
+    /// Names of visible power-type pins in the bucket.
+    power_pins: Vec<String>,
+    /// (part id, zero-based slot) of every pin, for Capture's name for a net
+    /// no wire carries.
+    pin_ids: Vec<(u32, usize)>,
 }
 
 /// Key a name for merging. Capture's netlist is case-insensitive.
@@ -190,12 +198,42 @@ pub fn finalize_names(nets: &mut Vec<crate::netlist::Net>) {
     nets.sort_by_cached_key(crate::netlist::net_order_key);
 }
 
+/// Every name the design uses as a global supply: power symbols and power
+/// pins. A stored net carrying one of these names joins that global net.
+pub fn power_names(doc: &CaptureDoc) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    for f in &doc.folders {
+        for p in &f.pages {
+            for g in &p.globals {
+                if !g.name.trim().is_empty() {
+                    out.insert(up(&g.name));
+                }
+            }
+        }
+    }
+    for revs in doc.cache.symbols.values() {
+        for s in revs {
+            for p in &s.pins {
+                if p.etype == PinType::Power && !p.name.trim().is_empty() && s.kind == 24 {
+                    out.insert(up(&p.name));
+                }
+            }
+        }
+    }
+    out
+}
+
 pub fn is_generated(name: &str) -> bool {
     generated_id(name).is_some()
 }
 
 /// Compile one sheet instance into fragments.
-pub fn fragments(doc: &CaptureDoc, inst: &SheetInstance, diag: &mut Unresolved) -> Vec<Frag> {
+pub fn fragments(
+    doc: &CaptureDoc,
+    inst: &SheetInstance,
+    power_names: &BTreeSet<String>,
+    diag: &mut Unresolved,
+) -> Vec<Frag> {
     let page: &Page = &doc.folders[inst.folder].pages[inst.page];
     let mut g = Graph::default();
     let scope_key = &inst.folder_key;
@@ -203,6 +241,8 @@ pub fn fragments(doc: &CaptureDoc, inst: &SheetInstance, diag: &mut Unresolved) 
     // Node attachments, resolved to buckets after the union.
     enum Att {
         Terminal(Terminal, String, bool),
+        PinId(u32, usize),
+        PowerPinName(String),
         Wire(String),
         Alias(String, String),
         Power(String, String),
@@ -233,6 +273,8 @@ pub fn fragments(doc: &CaptureDoc, inst: &SheetInstance, diag: &mut Unresolved) 
         }
     }
 
+    let page_net_ids: BTreeSet<u32> = page.nets.iter().map(|n| n.id).chain(page.net_names.iter().map(|n| n.id)).collect();
+
     // Parts.
     for part in &page.parts {
         let r = resolve(doc, inst, part);
@@ -249,8 +291,14 @@ pub fn fragments(doc: &CaptureDoc, inst: &SheetInstance, diag: &mut Unresolved) 
             let uuid = format!("{}:{slot}", part_id(part.db_id));
             let hidden_power = sp.map(|p| p.hidden() && p.etype == PinType::Power).unwrap_or(false);
             if hidden_power {
-                // Joins the global net its name names, wherever it is drawn.
-                let n = g.uf.add();
+                // Joins the global net its name names, wherever it is drawn —
+                // and the page net Capture stored for it, which is how a
+                // hidden VCC pin lands on a net Capture also calls +5V.
+                let n = if pin.word_b != 0 && page_net_ids.contains(&pin.word_b) {
+                    g.net(pin.word_b)
+                } else {
+                    g.uf.add()
+                };
                 diag.hidden_supply_pins += 1;
                 atts.push((n, Att::Terminal(t, uuid, false)));
                 let name = sp.map(|p| p.name.clone()).unwrap_or_default();
@@ -259,12 +307,13 @@ pub fn fragments(doc: &CaptureDoc, inst: &SheetInstance, diag: &mut Unresolved) 
             }
             if pin.no_connect() {
                 diag.pins_marked_no_connect += 1;
-                let n = g.uf.add();
-                atts.push((n, Att::Terminal(t, uuid, true)));
-                continue;
             }
             let n = g.node(pin.pos);
             atts.push((n, Att::Terminal(t, uuid, false)));
+            atts.push((n, Att::PinId(part.db_id, slot)));
+            if let Some(p) = sp.filter(|p| p.etype == PinType::Power && !p.name.trim().is_empty()) {
+                atts.push((n, Att::PowerPinName(p.name.clone())));
+            }
         }
     }
 
@@ -362,10 +411,12 @@ pub fn fragments(doc: &CaptureDoc, inst: &SheetInstance, diag: &mut Unresolved) 
             net_generated.entry(nid).or_insert_with(|| name.clone());
         }
     }
-    // The page's own name for each stored net (last listed wins).
-    let mut net_name: HashMap<u32, String> = HashMap::new();
+    // The page's own names for each stored net, in table order. Capture lists
+    // an id once per name it carries; the last is the net's name and the
+    // others name the same net (a VCC hidden pin and a +5V symbol shorted).
+    let mut net_names: HashMap<u32, Vec<String>> = HashMap::new();
     for n in &page.net_names {
-        net_name.insert(n.id, n.name.clone());
+        net_names.entry(n.id).or_default().push(n.name.clone());
     }
 
     // A name local to a child folder instance is tagged with that instance's
@@ -378,6 +429,9 @@ pub fn fragments(doc: &CaptureDoc, inst: &SheetInstance, diag: &mut Unresolved) 
             format!("{}{SUFFIX_MARK}{}", up(n), up(&inst.suffix))
         }
     };
+    let page_power: BTreeSet<String> = page.globals.iter().map(|g| up(&g.name)).collect();
+    let page_offpage: BTreeSet<String> = page.offpages.iter().map(|g| up(&g.name)).collect();
+    let page_ports: BTreeSet<String> = page.ports.iter().map(|g| up(&g.name)).collect();
     let mut buckets: BTreeMap<usize, Bucket> = BTreeMap::new();
     let folder_scope = if NAMES_SPAN_FOLDER { scope_key.clone() } else { inst.info.sheet_path_uuids.clone() };
     for (n, att) in atts {
@@ -391,6 +445,8 @@ pub fn fragments(doc: &CaptureDoc, inst: &SheetInstance, diag: &mut Unresolved) 
                     b.no_connect_only = true;
                 }
             }
+            Att::PowerPinName(n) => b.power_pins.push(n),
+            Att::PinId(id, slot) => b.pin_ids.push((id, slot)),
             Att::Wire(u) => {
                 b.has_wire = true;
                 b.graphical.wires.push(u);
@@ -439,12 +495,37 @@ pub fn fragments(doc: &CaptureDoc, inst: &SheetInstance, diag: &mut Unresolved) 
                 }
             }
             Att::NetName(id) => {
-                if let Some(name) = net_name.get(&id) {
-                    if !is_generated(name) {
-                        b.keys.insert(format!("name:{folder_scope}:{}", up(name)));
-                        b.names.push((rank_at(rank::USER, inst.depth), local(name), "local_label".into()));
-                    } else {
-                        b.names.push((rank_at(rank::GENERATED, inst.depth), local(name), "pin".into()));
+                if let Some(names) = net_names.get(&id) {
+                    for (i, name) in names.iter().enumerate() {
+                        // The first listed name is the net's own; the others
+                        // name the same net (measured: LSB0 over LSB1..LSB3).
+                        let pref = u8::from(i == 0);
+                        if is_generated(name) {
+                            b.names.push((rank_at(rank::GENERATED, inst.depth) + pref, local(name), "pin".into()));
+                            continue;
+                        }
+                        // The table also carries the names of the ports,
+                        // connectors and power symbols on the net; such a name
+                        // ranks as what it names, so a port's name does not
+                        // outrank the level above it.
+                        let u = up(name);
+                        let (kind, driver) = if page_power.contains(&u) {
+                            (rank::POWER, "global_power_pin")
+                        } else if page_offpage.contains(&u) {
+                            (rank::OFFPAGE, "global_label")
+                        } else if page_ports.contains(&u) {
+                            (rank::PORT, "hier_label")
+                        } else {
+                            (rank::USER, "local_label")
+                        };
+                        if power_names.contains(&u) {
+                            b.keys.insert(format!("pwr:{u}"));
+                        } else if kind != rank::PORT {
+                            b.keys.insert(format!("name:{folder_scope}:{u}"));
+                        }
+                        let depth = if kind == rank::POWER { 0 } else { inst.depth };
+                        let shown = if kind == rank::POWER { u } else { local(name) };
+                        b.names.push((rank_at(kind, depth) + pref, shown, driver.into()));
                     }
                 } else if let Some(name) = net_generated.get(&id) {
                     b.names.push((rank_at(rank::GENERATED, inst.depth), local(name), "pin".into()));
@@ -455,11 +536,31 @@ pub fn fragments(doc: &CaptureDoc, inst: &SheetInstance, diag: &mut Unresolved) 
 
     let mut out = Vec::new();
     for (_, mut b) in buckets {
+        // A visible power pin left otherwise unconnected joins the net its
+        // name names, as a hidden one always does (measured against Capture's
+        // netlist: unwired NC1/GND power pins land on the named net, wired
+        // ones keep the net they are wired to).
+        if b.terminals.len() == 1 && !b.has_wire && b.keys.is_empty() {
+            if let Some(name) = b.power_pins.first().cloned() {
+                diag.hidden_supply_pins += 1;
+                b.keys.insert(format!("pwr:{}", up(&name)));
+                b.names.push((rank_at(rank::POWER, 0), up(&name), "global_power_pin".into()));
+            }
+        }
         if b.terminals.is_empty() && b.keys.is_empty() {
             continue;
         }
         if b.terminals.len() == 1 && !b.has_wire && b.keys.is_empty() && !b.no_connect_only {
             diag.unconnected_pins += 1;
+        }
+        // A net no wire carries has no stored name; Capture names it after its
+        // lowest-numbered part: `N`, the part id padded to five digits, and the
+        // pin's zero-based slot.
+        if !b.has_wire {
+            if let Some(&(id, slot)) = b.pin_ids.iter().min() {
+                let name = format!("N{id:05}{slot}");
+                b.names.push((rank_at(rank::GENERATED, inst.depth), local(&name), "pin".into()));
+            }
         }
         // The strongest name; ties broken by the name itself for determinism.
         b.names.sort_by(|x, y| y.0.cmp(&x.0).then(x.1.cmp(&y.1)));

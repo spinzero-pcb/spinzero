@@ -474,9 +474,10 @@ pub fn build_design(
     unresolved.skipped = l.doc.notes.clone();
     let sheets = walk(&l.doc, &mut unresolved);
     let (components, extra_svg_ids) = design::build_components(&l.doc, &sheets, &mut unresolved);
+    let power_names = netlist::power_names(&l.doc);
     let mut frags = Vec::new();
     for s in &sheets {
-        frags.extend(netlist::fragments(&l.doc, s, &mut unresolved));
+        frags.extend(netlist::fragments(&l.doc, s, &power_names, &mut unresolved));
     }
     let mut nets = crate::netlist::merge_frags(frags);
     netlist::finalize_names(&mut nets);

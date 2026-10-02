@@ -1251,6 +1251,7 @@ version = "0.0.1"
 dependencies = [
  "eda-parse-altium",
  "eda-parse-kicad",
+ "eda-parse-orcad",
  "regex",
  "serde",
  "serde_json",

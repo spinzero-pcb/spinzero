@@ -134,6 +134,10 @@ pub fn resolve<'a>(doc: &'a CaptureDoc, inst: &SheetInstance, part: &'a PlacedPa
     } else {
         designator
     };
+    // Capture's netlister upper-cases every designator, and the board the
+    // netlist feeds carries that spelling; the bundle uses it so schematic and
+    // board name a part the same way. The sheet still draws it as typed.
+    let designator = designator.to_uppercase();
     Resolved {
         part,
         device,
