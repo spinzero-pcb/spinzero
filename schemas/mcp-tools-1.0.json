@@ -551,6 +551,168 @@
         ],
         "additionalProperties": false
       }
+    },
+    {
+      "name": "spinzero_component",
+      "description": "One component: its value, fitted state, sheet, part fields, and each pin with its net, the net voltage when known, and the other parts on that net. Also its stress-table row.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "review_id": {
+            "type": "string",
+            "description": "The id returned by spinzero_start_review."
+          },
+          "step": {
+            "type": "string",
+            "description": "The step id you were given (from spinzero_status `open_steps`). Several steps are open at once, so name yours. Without it you get the oldest step nobody has fetched."
+          },
+          "refdes": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "review_id",
+          "refdes"
+        ]
+      }
+    },
+    {
+      "name": "spinzero_net",
+      "description": "One net: its terminals with values and fitted state, its known voltage, and the rule candidates on it.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "review_id": {
+            "type": "string",
+            "description": "The id returned by spinzero_start_review."
+          },
+          "step": {
+            "type": "string",
+            "description": "The step id you were given (from spinzero_status `open_steps`). Several steps are open at once, so name yours. Without it you get the oldest step nobody has fetched."
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "review_id",
+          "name"
+        ]
+      }
+    },
+    {
+      "name": "spinzero_calc",
+      "description": "Run a calc from the calc library. Give every input with value (or min and max for a bracket), source (datasheet, netlist, intent, bom, kb, policy, web, assumed, model, sim) and ref (a datasheet ref needs a page, table or figure; a web ref needs the URL). The server computes every output, the worst-case margin, and the boundary where a margin is zero. The result has a calc id: cite it in your submission. Call with list: true for the calc table.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "review_id": {
+            "type": "string",
+            "description": "The id returned by spinzero_start_review."
+          },
+          "step": {
+            "type": "string",
+            "description": "The step id you were given (from spinzero_status `open_steps`). Several steps are open at once, so name yours. Without it you get the oldest step nobody has fetched."
+          },
+          "list": {
+            "type": "boolean"
+          },
+          "calc": {
+            "type": "string"
+          },
+          "inputs": {
+            "type": "object"
+          },
+          "solve_for": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "review_id"
+        ]
+      }
+    },
+    {
+      "name": "spinzero_pattern",
+      "description": "A pattern card from the knowledge base: how the circuit works, its checks, pitfalls and false positives. Call with no id for the list of cards.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "review_id": {
+            "type": "string",
+            "description": "The id returned by spinzero_start_review."
+          },
+          "step": {
+            "type": "string",
+            "description": "The step id you were given (from spinzero_status `open_steps`). Several steps are open at once, so name yours. Without it you get the oldest step nobody has fetched."
+          },
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "review_id"
+        ]
+      }
+    },
+    {
+      "name": "spinzero_sheet_tile",
+      "description": "Render a crop of a schematic sheet to PNG, with the named parts boxed. Returns the file path; open it and look at it. Read the designer notes on the sheet before you file a finding.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "review_id": {
+            "type": "string",
+            "description": "The id returned by spinzero_start_review."
+          },
+          "step": {
+            "type": "string",
+            "description": "The step id you were given (from spinzero_status `open_steps`). Several steps are open at once, so name yours. Without it you get the oldest step nobody has fetched."
+          },
+          "refdes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "margin_mm": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "review_id",
+          "refdes"
+        ]
+      }
+    },
+    {
+      "name": "spinzero_simulate",
+      "description": "Run a QSPICE testbench template with parameters, to validate a calc where no closed form exists. Call with no template for the list. The result gives each .meas value and the netlist path.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "review_id": {
+            "type": "string",
+            "description": "The id returned by spinzero_start_review."
+          },
+          "step": {
+            "type": "string",
+            "description": "The step id you were given (from spinzero_status `open_steps`). Several steps are open at once, so name yours. Without it you get the oldest step nobody has fetched."
+          },
+          "template": {
+            "type": "string"
+          },
+          "params": {
+            "type": "object"
+          }
+        },
+        "required": [
+          "review_id"
+        ]
+      }
     }
   ]
 }
