@@ -42,9 +42,10 @@
           "pipeline": {
             "type": "string",
             "enum": [
-              "bom-detailed"
+              "bom-detailed",
+              "schematic-detailed"
             ],
-            "description": "Which review to run. Only bom-detailed is available over MCP today."
+            "description": "Which review to run. bom-detailed reviews the BOM. schematic-detailed reviews the schematic: every part gets a design record backed by a calc or a datasheet page."
           },
           "model": {
             "type": "string",
@@ -97,6 +98,47 @@
               "type": "string"
             }
           },
+          "intent": {
+            "type": "object",
+            "description": "schematic-detailed only: the design intent from the user, answering preflight.schematic.questions. Keys: net_voltages ({net: {value} or {min, max}}, e.g. the bus voltage range), facts ({name: text}, e.g. ambient, rated current, PWM frequency, ADC sample time, option bytes), variant (one of preflight.schematic.variants), scope ({sheets: [...]} or {parts: [...]} to review part of the design), ground_nets. Leave an answer out when the user does not know it: the review then brackets it and reports the limit.",
+            "properties": {
+              "net_voltages": {
+                "type": "object"
+              },
+              "facts": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string"
+                }
+              },
+              "variant": {
+                "type": "string"
+              },
+              "scope": {
+                "type": "object",
+                "properties": {
+                  "sheets": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "parts": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                }
+              },
+              "ground_nets": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          },
           "answered_in_chat": {
             "type": "boolean",
             "description": "Only when start_review opened a setup window (`setup_window: \"open\"`) and the user says it never appeared, so you asked both questions in chat instead. Without it, this call reads the answer from the window and ignores profile and mapping_overrides."
@@ -120,7 +162,7 @@
           },
           "step": {
             "type": "string",
-            "description": "The step id you were given (from spinzero_status `open_steps`). Up to three steps are open at once, so name yours. Without it you get the oldest step nobody has fetched."
+            "description": "The step id you were given (from spinzero_status `open_steps`). Several steps are open at once, so name yours. Without it you get the oldest step nobody has fetched."
           },
           "full_guidance": {
             "type": "boolean",
@@ -145,7 +187,7 @@
           },
           "step": {
             "type": "string",
-            "description": "The step id you were given (from spinzero_status `open_steps`). Up to three steps are open at once, so name yours. Without it you get the oldest step nobody has fetched."
+            "description": "The step id you were given (from spinzero_status `open_steps`). Several steps are open at once, so name yours. Without it you get the oldest step nobody has fetched."
           }
         },
         "required": [
@@ -322,7 +364,7 @@
           },
           "step": {
             "type": "string",
-            "description": "The step id you were given (from spinzero_status `open_steps`). Up to three steps are open at once, so name yours. Without it you get the oldest step nobody has fetched."
+            "description": "The step id you were given (from spinzero_status `open_steps`). Several steps are open at once, so name yours. Without it you get the oldest step nobody has fetched."
           }
         },
         "additionalProperties": false,
@@ -343,7 +385,7 @@
           },
           "step": {
             "type": "string",
-            "description": "The step id you were given (from spinzero_status `open_steps`). Up to three steps are open at once, so name yours. Without it you get the oldest step nobody has fetched."
+            "description": "The step id you were given (from spinzero_status `open_steps`). Several steps are open at once, so name yours. Without it you get the oldest step nobody has fetched."
           },
           "path": {
             "type": "string",
@@ -373,7 +415,7 @@
           },
           "step": {
             "type": "string",
-            "description": "The step id you were given (from spinzero_status `open_steps`). Up to three steps are open at once, so name yours. Without it you get the oldest step nobody has fetched."
+            "description": "The step id you were given (from spinzero_status `open_steps`). Several steps are open at once, so name yours. Without it you get the oldest step nobody has fetched."
           },
           "mpn": {
             "type": "string",
@@ -399,7 +441,7 @@
           },
           "step": {
             "type": "string",
-            "description": "The step id you were given (from spinzero_status `open_steps`). Up to three steps are open at once, so name yours. Without it you get the oldest step nobody has fetched."
+            "description": "The step id you were given (from spinzero_status `open_steps`). Several steps are open at once, so name yours. Without it you get the oldest step nobody has fetched."
           },
           "mpn": {
             "type": "string",
@@ -434,7 +476,7 @@
           },
           "step": {
             "type": "string",
-            "description": "The step id you were given (from spinzero_status `open_steps`). Up to three steps are open at once, so name yours. Without it you get the oldest step nobody has fetched."
+            "description": "The step id you were given (from spinzero_status `open_steps`). Several steps are open at once, so name yours. Without it you get the oldest step nobody has fetched."
           },
           "mpn": {
             "type": "string",
@@ -459,7 +501,7 @@
           },
           "step": {
             "type": "string",
-            "description": "The step id you were given (from spinzero_status `open_steps`). Up to three steps are open at once, so name yours. Without it you get the oldest step nobody has fetched."
+            "description": "The step id you were given (from spinzero_status `open_steps`). Several steps are open at once, so name yours. Without it you get the oldest step nobody has fetched."
           },
           "mpn": {
             "type": "string",
@@ -492,7 +534,7 @@
           },
           "step": {
             "type": "string",
-            "description": "The step id you were given (from spinzero_status `open_steps`). Up to three steps are open at once, so name yours. Without it you get the oldest step nobody has fetched."
+            "description": "The step id you were given (from spinzero_status `open_steps`). Several steps are open at once, so name yours. Without it you get the oldest step nobody has fetched."
           },
           "query": {
             "type": "string",
