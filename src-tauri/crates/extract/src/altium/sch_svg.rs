@@ -28,16 +28,20 @@ use eda_parse_altium::units;
 
 use super::oid;
 
+/// How far a pin's name and number sit from the body end when the pin record
+/// states no margin (`Name_CustomPosition_Margin`). The file holds a value only
+/// for an override, so these are Altium's own defaults, measured on its viewer.
+/// A number that shares the pin with a visible name stands further out than one
+/// that is alone on it.
+const PIN_TEXT_MARGIN_MM: f64 = 7.5 * 0.254;
+const PIN_NUMBER_ALONE_MARGIN_MM: f64 = 4.0 * 0.254;
+
 /// Padding around the drawn extent, in mm — matches the KiCad renderer so the
 /// two look the same when a report puts them side by side.
 const PAD: f64 = 2.54;
 
 /// Radius of a junction dot, in mm. Altium's dot is about 4 units across.
 const JUNCTION_R: f64 = 2.0 * 0.254;
-
-/// Descent of Times New Roman, as a fraction of the em (443/2048). Altium puts
-/// the bottom of a text's glyph cell, descender included, on its anchor.
-const DESCENT_EM: f64 = 443.0 / 2048.0;
 
 /// Fallback face for a font the sheet's table does not name. Altium's own
 /// default is Times New Roman, which is what the whole corpus uses.
@@ -192,6 +196,9 @@ impl Specials {
             .or_else(|| self.document.get(&key))
             .or_else(|| self.project.get(&key))
             .cloned()
+            // A design with no variants has no name to give; Altium prints that
+            // fact rather than the special string.
+            .or_else(|| (key == "VARIANTNAME").then(|| "[No Variations]".to_string()))
             .unwrap_or_else(|| text.to_string())
     }
 }
@@ -307,6 +314,8 @@ struct Ctx<'a> {
     fonts: &'a sch::SheetProps,
     palette: &'a BTreeMap<String, String>,
     specials: Specials,
+    /// The sheet's paper colour, for shapes that must hide what is under them.
+    paper: &'a str,
 }
 
 impl Ctx<'_> {
@@ -323,7 +332,8 @@ impl Ctx<'_> {
             Some(n) if !n.is_empty() => format!("'{}',{FONT_FALLBACK}", n.replace('\'', "")),
             _ => FONT_FALLBACK.to_string(),
         };
-        let size = units::sch_font_mm(self.fonts.font_sizes.get(i).copied().unwrap_or(10));
+        let face = self.fonts.fonts.get(i).map(String::as_str).unwrap_or("");
+        let size = units::sch_font_mm_for(face, self.fonts.font_sizes.get(i).copied().unwrap_or(10));
         (
             family,
             size,
@@ -334,6 +344,18 @@ impl Ctx<'_> {
 
     fn class(&self, key: &str) -> Option<&String> {
         self.palette.get(key)
+    }
+
+    /// Ascent and descent (ems) of the face a `FontID` names.
+    fn face(&self, id: i64) -> (f64, f64) {
+        let i = (id - 1).max(0) as usize;
+        units::face_metrics(self.fonts.fonts.get(i).map(String::as_str).unwrap_or(""))
+    }
+
+    /// Cell height (mm) of a `FontID`: the line pitch of a text frame.
+    fn cell(&self, id: i64) -> f64 {
+        let i = (id - 1).max(0) as usize;
+        units::sch_font_cell_mm(self.fonts.font_sizes.get(i).copied().unwrap_or(10))
     }
 }
 
@@ -405,7 +427,7 @@ fn emit_text(
     // Bottom-justified text: the anchor is the bottom of the glyph cell, so the
     // baseline sits one descent above it. `y` moves here, before the rotation,
     // so a turned text is raised along its own up.
-    let ty = if justify.clamp(0, 8) / 3 == 0 { y - size * DESCENT_EM } else { y };
+    let ty = if justify.clamp(0, 8) / 3 == 0 { y - size * ctx.face(font).1 } else { y };
     let (body, bar) = markup(text);
     let weight = if bold { r#" font-weight="bold""# } else { "" };
     let style = if italic { r#" font-style="italic""# } else { "" };
@@ -414,7 +436,7 @@ fn emit_text(
     let over = override_attr(color, class_default);
     let _ = write!(
         s,
-        r#"<text x="{}" y="{}" font-family="{}" font-size="{}" text-anchor="{h}" dominant-baseline="{v}" fill="{fill}" stroke="none"{weight}{style}{bar_attr}{over}{}>{body}</text>"#,
+        r#"<text x="{}" y="{}" font-family="{}" font-size="{}" text-anchor="{h}" dominant-baseline="{v}" fill="{fill}" stroke="none" xml:space="preserve"{weight}{style}{bar_attr}{over}{}>{body}</text>"#,
         c(x),
         c(ty),
         esc(&family),
@@ -537,9 +559,9 @@ fn emit_arc(
         );
         return;
     }
-    // Y-down flips the sense of the angle, which is also why the sweep flag is
-    // 1: an Altium arc runs counter-clockwise in its own space, and that reads
-    // clockwise once the page is the other way up.
+    // `ctx.xy` flips the page, not the picture: above stays above. An Altium arc
+    // runs counter-clockwise as the designer sees it, and SVG's sweep flag 0 is
+    // counter-clockwise on screen, so the flag is 0.
     let at = |deg: f64| {
         let r = deg.to_radians();
         (cx + rx * r.cos(), cy - ry * r.sin())
@@ -549,7 +571,7 @@ fn emit_arc(
     let large = if sweep > 180.0 { 1 } else { 0 };
     let _ = write!(
         s,
-        r#"<path d="M {} {} A {} {} 0 {large} 1 {} {}" fill="none" stroke="{stroke}" stroke-width="{}"{dash}/>"#,
+        r#"<path d="M {} {} A {} {} 0 {large} 0 {} {}" fill="none" stroke="{stroke}" stroke-width="{}"{dash}/>"#,
         c(sx), c(sy), c(rx), c(ry), c(ex), c(ey), c(w)
     );
 }
@@ -609,6 +631,54 @@ fn emit_line_end(s: &mut String, kind: i64, tip: (f64, f64), from: (f64, f64), s
     }
 }
 
+/// The colour of a wire that passes through `at`, if one does.
+fn wire_color_at(doc: &SchDoc, at: Pt) -> Option<&str> {
+    doc.wires.iter().find_map(|w| {
+        let on = |a: &Pt, b: &Pt| {
+            let cross = (b.x - a.x) as i128 * (at.y - a.y) as i128 - (b.y - a.y) as i128 * (at.x - a.x) as i128;
+            cross == 0
+                && at.x >= a.x.min(b.x)
+                && at.x <= a.x.max(b.x)
+                && at.y >= a.y.min(b.y)
+                && at.y <= a.y.max(b.y)
+        };
+        (!w.color.is_empty() && w.pts.windows(2).any(|p| on(&p[0], &p[1]))).then_some(w.color.as_str())
+    })
+}
+
+/// A No-ERC marker. The file names its style; each style has its own shape, and
+/// the size is the style's, in sheet units (the record stores none).
+fn emit_no_erc(s: &mut String, style: &str, (x, y): (f64, f64), stroke: &str) {
+    let style = style.to_ascii_lowercase();
+    let u = mm(sch::UNIT);
+    let half = if style.contains("small") { 2.0 } else { 4.0 } * u;
+    let pen = units::sch_line_width_mm(if style.contains("thick") { 3 } else { 1 });
+    let cross = |s: &mut String| {
+        let _ = write!(
+            s,
+            r#"<polyline points="{},{} {},{}" stroke="{stroke}" stroke-width="{}"/><polyline points="{},{} {},{}" stroke="{stroke}" stroke-width="{}"/>"#,
+            c(x - half), c(y - half), c(x + half), c(y + half), c(pen),
+            c(x - half), c(y + half), c(x + half), c(y - half), c(pen)
+        );
+    };
+    if style.contains("checkbox") {
+        let _ = write!(
+            s,
+            r#"<rect x="{}" y="{}" width="{}" height="{}" fill="none" stroke="{stroke}" stroke-width="{}"/>"#,
+            c(x - half), c(y - half), c(half * 2.0), c(half * 2.0), c(pen)
+        );
+        cross(s);
+    } else if style.contains("triangle") {
+        let _ = write!(
+            s,
+            r#"<polygon points="{},{} {},{} {},{}" fill="none" stroke="{stroke}" stroke-width="{}"/>"#,
+            c(x - half), c(y + half), c(x + half), c(y + half), c(x), c(y - half), c(pen)
+        );
+    } else {
+        cross(s);
+    }
+}
+
 /// Render one sheet.
 pub fn render_sheet(doc: &SchDoc, ctx: &SheetCtx, palette: &BTreeMap<String, String>) -> String {
     let height = mm(doc.sheet.height).max(1.0);
@@ -618,6 +688,7 @@ pub fn render_sheet(doc: &SchDoc, ctx: &SheetCtx, palette: &BTreeMap<String, Str
         fonts: &doc.sheet,
         palette,
         specials: Specials::new(doc, ctx),
+        paper: &doc.sheet.area_color,
     };
 
     // The viewBox is the sheet. Altium crops to the page, so an object parked
@@ -678,11 +749,15 @@ pub fn render_sheet(doc: &SchDoc, ctx: &SheetCtx, palette: &BTreeMap<String, Str
 
     for j in &doc.junctions {
         let (x, y) = ctxt.xy(j.at);
-        let fill = if j.color.is_empty() { "#000000" } else { &j.color };
+        // A dot Altium added itself takes the colour of the wire it sits on; a
+        // dot the designer placed by hand keeps its own.
+        let color = if j.locked { None } else { wire_color_at(doc, j.at) }
+            .unwrap_or(j.color.as_str());
+        let fill = if color.is_empty() { "#000000" } else { color };
         let _ = write!(
             s,
             r#"<g data-primitive="junction"{}{}><circle cx="{}" cy="{}" r="{}" fill="{fill}" stroke="none"/></g>"#,
-            uuid_attr(&oid(&j.uuid, "j", j.at)), override_attr(&j.color, ctxt.class("junction")), c(x), c(y), c(JUNCTION_R)
+            uuid_attr(&oid(&j.uuid, "j", j.at)), override_attr(color, ctxt.class("junction")), c(x), c(y), c(JUNCTION_R)
         );
     }
     // The dots Altium adds on its own. They are drawing only: no uuid, so no
@@ -699,15 +774,14 @@ pub fn render_sheet(doc: &SchDoc, ctx: &SheetCtx, palette: &BTreeMap<String, Str
 
     for n in &doc.no_ercs {
         let (x, y) = ctxt.xy(n.at);
-        let r = mm(sch::UNIT) * 0.6;
         let stroke = if n.color.is_empty() { "#FF0000" } else { &n.color };
         let _ = write!(
             s,
-            r#"<g data-primitive="no-connect"{}{}><polyline points="{},{} {},{}" stroke="{stroke}"/><polyline points="{},{} {},{}" stroke="{stroke}"/></g>"#,
+            r#"<g data-primitive="no-connect"{}{}>"#,
             uuid_attr(&oid(&n.uuid, "nc", n.at)), override_attr(&n.color, ctxt.class("no_connect")),
-            c(x - r), c(y - r), c(x + r), c(y + r),
-            c(x - r), c(y + r), c(x + r), c(y - r)
         );
+        emit_no_erc(&mut s, &n.symbol, (x, y), stroke);
+        s.push_str("</g>");
     }
 
     for sym in &doc.sheet_symbols {
@@ -799,7 +873,7 @@ pub fn render_sheet(doc: &SchDoc, ctx: &SheetCtx, palette: &BTreeMap<String, Str
     }
 
     // Free text last so an annotation is never buried under the artwork.
-    for t in doc.texts.iter().filter(|t| !t.template) {
+    for t in doc.texts.iter().filter(|t| !t.template && !text_off_sheet(t, &doc.sheet)) {
         emit_free_text(&mut s, &ctxt, t);
     }
 
@@ -817,7 +891,10 @@ fn render_worksheet(s: &mut String, doc: &SchDoc, ctx: &Ctx) {
         return;
     }
     let _ = write!(s, r#"<g data-primitive="worksheet">"#);
-    if doc.sheet.border_on {
+    // A sheet that shows its template's graphics has the template's own frame
+    // and title block; Altium adds no border or zone ruler of its own on top.
+    let templated = doc.sheet.show_template_graphics && !doc.sheet.template_file.is_empty();
+    if doc.sheet.border_on && !templated {
         emit_page_border(s, doc, ctx);
     }
     for img in doc.images.iter().filter(|i| i.template) {
@@ -1099,24 +1176,27 @@ fn emit_pin(s: &mut String, ctx: &Ctx, comp: &sch::Component, p: &Pin) {
     let (ex, ey) = ctx.xy(p.connection()); // free end, where a wire lands
     let stroke = if p.color.is_empty() { "#000000" } else { &p.color };
     let w = units::sch_line_width_mm(1);
-    let dot = mm(sch::UNIT) * 0.6;
-    // The active-low dot sits at the free end, so the stub stops short of it.
+    let dot = mm(sch::UNIT) * 2.0;
+    // The outer-edge dot (an inverted pin) is a hollow circle against the body,
+    // so the stub starts at its far edge.
     let (sx, sy) = if p.outer_edge == 1 {
         let len = ((ex - bx).powi(2) + (ey - by).powi(2)).sqrt().max(1e-9);
-        (ex - (ex - bx) / len * dot * 2.0, ey - (ey - by) / len * dot * 2.0)
+        (bx + (ex - bx) / len * dot * 2.0, by + (ey - by) / len * dot * 2.0)
     } else {
-        (ex, ey)
+        (bx, by)
     };
     let _ = write!(
         s,
         r#"<polyline points="{},{} {},{}" fill="none" stroke="{stroke}" stroke-width="{}"/>"#,
-        c(bx), c(by), c(sx), c(sy), c(w)
+        c(sx), c(sy), c(ex), c(ey), c(w)
     );
     if p.outer_edge == 1 {
         let _ = write!(
             s,
-            r#"<circle cx="{}" cy="{}" r="{}" fill="none" stroke="{stroke}" stroke-width="{}"/>"#,
-            c((sx + ex) / 2.0), c((sy + ey) / 2.0), c(dot), c(w)
+            r#"<circle cx="{}" cy="{}" r="{}" fill="{}" stroke="{stroke}" stroke-width="{}"/>"#,
+            c((sx + bx) / 2.0), c((sy + by) / 2.0), c(dot),
+            if ctx.paper.is_empty() { "none" } else { ctx.paper },
+            c(w)
         );
     }
     if p.inner == 9 {
@@ -1135,8 +1215,10 @@ fn emit_pin(s: &mut String, ctx: &Ctx, comp: &sch::Component, p: &Pin) {
         );
     }
 
-    // Name and number sit in Altium's own places: the name just inside the body
-    // past the stub's body end, the number over the middle of the stub.
+    // Name and number sit where the pin record puts them; with no value in the
+    // file, Altium's own margin applies. The name starts inside the body and
+    // reads away from the pin; the number ends at its margin outside the body
+    // and reads on towards the free end.
     let len = ((ex - bx).powi(2) + (ey - by).powi(2)).sqrt();
     let (ux, uy) = if len > 1e-9 { ((ex - bx) / len, (ey - by) / len) } else { (1.0, 0.0) };
     let gap = mm(sch::UNIT) * 0.5;
@@ -1144,27 +1226,90 @@ fn emit_pin(s: &mut String, ctx: &Ctx, comp: &sch::Component, p: &Pin) {
     // number read bottom to top. Rotated by 90°, the text's "up" is the
     // sheet's left, so the number sits left of the stub.
     let vertical = ux.abs() < 0.5;
-    let (rot, name_start) = if vertical { (1, uy > 0.0) } else { (0, ux < 0.0) };
+    let rot = if vertical { 1 } else { 0 };
+    // The way the text reads, in page space.
+    let (dx, dy) = if vertical { (0.0, -1.0) } else { (1.0, 0.0) };
+    let along_pin = dx * ux + dy * uy > 0.0;
     if p.show_name() && !p.name.is_empty() && p.name != "~" {
-        let at = px_to_pt(ctx, bx - ux * gap, by - uy * gap);
+        let off = p.name_margin.map(mm).unwrap_or(PIN_TEXT_MARGIN_MM);
+        let at = px_to_pt(ctx, bx - ux * off, by - uy * off);
         emit_text(
             s,
             ctx,
             &p.name,
             at,
             pin_font(p.name_font),
-            if name_start { 3 } else { 5 },
+            if along_pin { 5 } else { 3 },
             rot,
             &p.color,
             ctx.class("pin_name"),
         );
     }
     if p.show_designator() && !p.number.is_empty() {
-        let (mx, my) = ((bx + sx) / 2.0, (by + sy) / 2.0);
-        let at = if vertical { px_to_pt(ctx, mx - gap, my) } else { px_to_pt(ctx, mx, my - gap) };
-        emit_text(s, ctx, &p.number, at, pin_font(p.number_font), 1, rot, &p.color, ctx.class("pin_number"));
+        let off = p.number_margin.map(mm).unwrap_or(if p.show_name() {
+            PIN_TEXT_MARGIN_MM
+        } else {
+            PIN_NUMBER_ALONE_MARGIN_MM
+        });
+        let (mx, my) = (bx + ux * off, by + uy * off);
+        let at = if vertical { px_to_pt(ctx, bx - gap, my) } else { px_to_pt(ctx, mx, by - gap) };
+        emit_text(
+            s,
+            ctx,
+            &p.number,
+            at,
+            pin_font(p.number_font),
+            if along_pin { 0 } else { 2 },
+            rot,
+            &p.color,
+            ctx.class("pin_number"),
+        );
+    }
+    if matches!(p.electrical, 0 | 1 | 2) {
+        emit_pin_type_mark(s, ctx, p.electrical, (bx, by), (ux, uy), len / 2.0, stroke, w);
     }
     s.push_str("</g>");
+}
+
+/// The small open triangle Altium draws on the middle of an input, output or
+/// bidirectional pin, centred `mid` mm from the body end. An input points into
+/// the body, an output away from it.
+fn emit_pin_type_mark(
+    s: &mut String,
+    ctx: &Ctx,
+    electrical: i64,
+    body: (f64, f64),
+    (ux, uy): (f64, f64),
+    mid: f64,
+    stroke: &str,
+    w: f64,
+) {
+    let u = mm(sch::UNIT);
+    let (len, half) = (2.5 * u, 1.0 * u);
+    let (px, py) = (-uy, ux);
+    let tri = |s: &mut String, centre: f64, into_body: bool| {
+        let dir = if into_body { -1.0 } else { 1.0 };
+        let (cx, cy) = (body.0 + ux * centre, body.1 + uy * centre);
+        let tip = (cx + ux * dir * len / 2.0, cy + uy * dir * len / 2.0);
+        let base = (cx - ux * dir * len / 2.0, cy - uy * dir * len / 2.0);
+        let _ = write!(
+            s,
+            r#"<polygon points="{},{} {},{} {},{}" fill="{}" stroke="{stroke}" stroke-width="{}"/>"#,
+            c(tip.0), c(tip.1),
+            c(base.0 + px * half), c(base.1 + py * half),
+            c(base.0 - px * half), c(base.1 - py * half),
+            if ctx.paper.is_empty() { "none" } else { ctx.paper },
+            c(w)
+        );
+    };
+    match electrical {
+        0 => tri(s, mid, true),
+        2 => tri(s, mid, false),
+        _ => {
+            tri(s, mid - len / 2.0, true);
+            tri(s, mid + len / 2.0, false);
+        }
+    }
 }
 
 /// A pin's own font when the designer overrode it, else the sheet's first —
@@ -1313,16 +1458,21 @@ fn emit_off_sheet(s: &mut String, ctx: &Ctx, p: &PowerPort, stroke: &str, w: f64
     let (nx, ny) = (-dy, dx);
     let at = |along: f64, side: f64| (x + (dx * along + nx * side) * u, y + (dy * along + ny * side) * u);
     let back = p.style != 1;
-    for start in [0.0, 4.0] {
-        let (tip, arms) = if back { (start, start + 4.0) } else { (start + 4.0, start) };
-        let (a, t, b) = (at(arms, 3.0), at(tip, 0.0), at(arms, -3.0));
+    // The record stores no size for an off-sheet connector, so the glyph is
+    // Altium's own: two chevrons, each `CHEVRON_DEPTH` deep and `CHEVRON_HALF`
+    // either side of the axis, in sheet units.
+    const CHEVRON_DEPTH: f64 = 5.5;
+    const CHEVRON_HALF: f64 = 4.2;
+    for start in [0.0, CHEVRON_DEPTH] {
+        let (tip, arms) = if back { (start, start + CHEVRON_DEPTH) } else { (start + CHEVRON_DEPTH, start) };
+        let (a, t, b) = (at(arms, CHEVRON_HALF), at(tip, 0.0), at(arms, -CHEVRON_HALF));
         let _ = write!(
             s,
             r#"<polyline points="{},{} {},{} {},{}" fill="none" stroke="{stroke}" stroke-width="{}"/>"#,
             c(a.0), c(a.1), c(t.0), c(t.1), c(b.0), c(b.1), c(w)
         );
     }
-    let gap = sch::UNIT * 10;
+    let gap = sch::UNIT * 14;
     let (justify, at) = match p.orientation.rem_euclid(4) {
         1 => (1, Pt { x: p.at.x, y: p.at.y + gap }),
         2 => (5, Pt { x: p.at.x - gap, y: p.at.y }),
@@ -1385,6 +1535,16 @@ fn emit_port(s: &mut String, ctx: &Ctx, p: &Port) {
     s.push_str("</g>");
 }
 
+/// True when a text lies wholly off the page. Altium crops to the sheet, so a
+/// frame a designer left parked beside it is not on the drawing, and it gets
+/// neither a group here nor a geometry row.
+pub fn text_off_sheet(t: &SchText, sheet: &sch::SheetProps) -> bool {
+    let corner = t.corner.unwrap_or(t.at);
+    let (x0, x1) = (t.at.x.min(corner.x), t.at.x.max(corner.x));
+    let (y0, y1) = (t.at.y.min(corner.y), t.at.y.max(corner.y));
+    x1 < 0 || y1 < 0 || x0 > sheet.width || y0 > sheet.height
+}
+
 /// A label, text frame or note the designer placed on the sheet.
 fn emit_free_text(s: &mut String, ctx: &Ctx, t: &SchText) {
     let text = ctx.specials.expand(&t.text);
@@ -1402,13 +1562,19 @@ fn emit_free_text(s: &mut String, ctx: &Ctx, t: &SchText) {
             let stroke = if t.show_border { "#000000" } else { "none" };
             let lw = c(units::sch_line_width_mm(1));
             if t.kind == TextKind::Note && bw > 0.0 && bh > 0.0 {
-                // A note has a folded (dog-ear) top-right corner.
+                // A note is a sticky: the page curls up at the bottom right, and
+                // a small triangle at the top left folds it shut. Its edge is a
+                // shade of its own fill, not black ink.
                 let f = (mm(10 * sch::UNIT)).min(bw / 2.0).min(bh / 2.0);
+                let edge = if fill == "none" { "none".to_string() } else { shade(&fill, 0.75) };
+                let tri = mm(3 * sch::UNIT).min(bw / 4.0).min(bh / 4.0);
+                let (tx, ty) = (x + tri / 2.0, y + tri / 2.0);
                 let _ = write!(
                     s,
-                    r#"<polygon points="{},{} {},{} {},{} {},{} {},{}" fill="{fill}" stroke="{stroke}" stroke-width="{lw}" stroke-linejoin="round"/><polyline points="{},{} {},{} {},{}" fill="none" stroke="{stroke}" stroke-width="{lw}" stroke-linejoin="round"/>"#,
-                    c(x), c(y), c(x + bw - f), c(y), c(x + bw), c(y + f), c(x + bw), c(y + bh), c(x), c(y + bh),
-                    c(x + bw - f), c(y), c(x + bw - f), c(y + f), c(x + bw), c(y + f)
+                    r#"<polygon points="{},{} {},{} {},{} {},{} {},{}" fill="{fill}" stroke="{edge}" stroke-width="{lw}" stroke-linejoin="round"/><polygon points="{},{} {},{} {},{}" fill="{edge}" stroke="{edge}" stroke-width="{lw}" stroke-linejoin="round"/><polygon points="{},{} {},{} {},{}" fill="{edge}" stroke="none"/>"#,
+                    c(x), c(y), c(x + bw), c(y), c(x + bw), c(y + bh - f), c(x + bw - f), c(y + bh), c(x), c(y + bh),
+                    c(x + bw - f), c(y + bh), c(x + bw - f), c(y + bh - f), c(x + bw), c(y + bh - f),
+                    c(tx), c(ty), c(tx + tri), c(ty), c(tx), c(ty + tri)
                 );
             } else {
                 let _ = write!(
@@ -1425,6 +1591,8 @@ fn emit_free_text(s: &mut String, ctx: &Ctx, t: &SchText) {
         // land a word out; the alternative was a 3468-character disclaimer on
         // one line running off the page.
         let (_, size, _, _) = ctx.font(t.font);
+        // Lines are one font CELL apart (ascender to descender), not one em.
+        let cell = ctx.cell(t.font);
         // A note insets its text by `TextMargin` on every side.
         let margin = mm(t.margin * sch::UNIT);
         let (bw_in, y_in) = ((bw - 2.0 * margin).max(0.0), y + margin);
@@ -1444,13 +1612,21 @@ fn emit_free_text(s: &mut String, ctx: &Ctx, t: &SchText) {
             source.lines().map(str::to_string).collect()
         };
         for (i, line) in lines.iter().enumerate() {
-            let at = px_to_pt(ctx, inner_x, y_in + size * (i as f64 + 0.9));
+            // Bottom-justified text takes the bottom of its cell as the anchor.
+            let at = px_to_pt(ctx, inner_x, y_in + cell * (i as f64 + 1.0));
             emit_text(s, ctx, line, at, t.font, t.justify % 3, t.orientation, &t.color, ctx.class("note"));
         }
     } else {
         emit_text(s, ctx, &text, t.at, t.font, t.justify, t.orientation, &t.color, ctx.class("note"));
     }
     s.push_str("</g>");
+}
+
+/// `#RRGGBB` darkened to `k` of its brightness.
+fn shade(hex: &str, k: f64) -> String {
+    let v = u32::from_str_radix(hex.trim_start_matches('#'), 16).unwrap_or(0);
+    let ch = |shift: u32| (((v >> shift) & 0xFF) as f64 * k).round() as u32;
+    format!("#{:02X}{:02X}{:02X}", ch(16), ch(8), ch(0))
 }
 
 /// Break one line to a box `ems` wide, on spaces.
@@ -1994,6 +2170,58 @@ mod tests {
         assert!(sheet(doc).contains(r#"data-primitive="auto-junction""#));
         let corner = SchDoc { wires: vec![wire(&[(0, 0), (10, 0), (10, 10)])], ..Default::default() };
         assert!(auto_junctions(&corner).is_empty());
+    }
+
+    /// An Altium arc runs counter-clockwise as drawn, which is SVG sweep flag 0.
+    /// The right half of a circle (270° to 90°) must bulge to the right.
+    #[test]
+    fn an_arc_sweeps_the_way_altium_draws_it() {
+        let mut s = String::new();
+        let palette = BTreeMap::new();
+        let doc = SchDoc { sheet: a4(), ..Default::default() };
+        let ctx = Ctx {
+            height: 100.0,
+            fonts: &doc.sheet,
+            palette: &palette,
+            specials: Specials::new(&doc, &SheetCtx {
+                number: 1,
+                total: 1,
+                sheet_path: "/",
+                file_name: "",
+                full_path: "",
+                project_name: "",
+                project_params: &BTreeMap::new(),
+            }),
+            paper: "",
+        };
+        emit_arc(&mut s, &ctx, Pt { x: 50 * U, y: 50 * U }, 8 * U, 8 * U, 270.0, 90.0, "#000", 0.1, "");
+        assert!(s.contains(" 0 0 0 "), "{s}");
+    }
+
+    /// A No-ERC marker is a cross of the style the file names, a couple of
+    /// millimetres across, not a dot.
+    #[test]
+    fn a_no_erc_marker_is_a_cross_two_millimetres_wide() {
+        let mut s = String::new();
+        emit_no_erc(&mut s, "Thin Cross", (10.0, 10.0), "#FF0000");
+        assert_eq!(s.matches("<polyline").count(), 2, "{s}");
+        assert!(s.contains(r#"points="8.984,8.984 11.016,11.016""#), "{s}");
+    }
+
+    /// A dot Altium added itself takes its wire's colour; a locked dot keeps its own.
+    #[test]
+    fn an_unlocked_junction_takes_the_wire_colour() {
+        let mut w = wire(&[(0, 0), (20, 0)]);
+        w.color = "#000080".into();
+        let at = Pt { x: 10 * U, y: 0 };
+        let doc = |locked| SchDoc {
+            sheet: a4(),
+            wires: vec![w.clone()],
+            junctions: vec![Junction { at, color: "#800000".into(), locked, ..Default::default() }],
+            ..Default::default()
+        };
+        assert!(sheet(doc(false)).contains(r##"fill="#000080" stroke="none""##));
+        assert!(sheet(doc(true)).contains(r##"fill="#800000" stroke="none""##));
     }
 
     /// A wire end on the inside of another wire is a T and gets a dot.

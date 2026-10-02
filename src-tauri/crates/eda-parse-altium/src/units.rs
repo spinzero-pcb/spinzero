@@ -60,6 +60,32 @@ pub fn sch_font_mm(size: i64) -> f64 {
     size as f64 * SCH_UNIT_MM / FONT_CELL_PER_EM
 }
 
+/// Ascent and descent of a face, in ems (from its `hhea` table). The cell is
+/// their sum, so the em that fits an Altium cell depends on the face: Courier
+/// New's cell is 2% taller than Times'. An unknown face gets Times' numbers.
+pub fn face_metrics(face: &str) -> (f64, f64) {
+    let f = face.to_ascii_lowercase();
+    if f.contains("courier") {
+        (1705.0 / 2048.0, 615.0 / 2048.0)
+    } else if f.contains("arial") || f.contains("helvetica") {
+        (1854.0 / 2048.0, 434.0 / 2048.0)
+    } else {
+        (1825.0 / 2048.0, 443.0 / 2048.0)
+    }
+}
+
+/// As [`sch_font_mm`], for the face the font table names.
+pub fn sch_font_mm_for(face: &str, size: i64) -> f64 {
+    let (a, d) = face_metrics(face);
+    size as f64 * SCH_UNIT_MM / (a + d)
+}
+
+/// An Altium font's cell height in millimetres: the pitch between two lines of a
+/// text frame, whatever the face.
+pub fn sch_font_cell_mm(size: i64) -> f64 {
+    size as f64 * SCH_UNIT_MM
+}
+
 /// The zone ruler for a `SheetStyle`: columns, rows, and the margin band's
 /// width in sheet units.
 ///

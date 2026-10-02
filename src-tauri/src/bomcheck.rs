@@ -219,7 +219,20 @@ pub fn mapping_view(
 /// detailed review add?" unanswerable in the rail — and because a run finds its
 /// session by this prefix.
 fn session_label(pipeline: &str) -> &'static str {
-    if pipeline == "bom-rules" { "BOM check" } else { "Detailed BOM review" }
+    match pipeline {
+        "bom-rules" => "BOM check",
+        SCHEMATIC_PIPELINE => "Schematic review",
+        _ => "Detailed BOM review",
+    }
+}
+
+/// The schematic review's pipeline name. Its findings anchor to a component on the
+/// schematic canvas, not to a BOM row, so a click opens the sheet at the part.
+const SCHEMATIC_PIPELINE: &str = "schematic-detailed";
+
+/// Which canvas a pipeline's comments belong to.
+fn view_for(pipeline: &str) -> &'static str {
+    if pipeline == SCHEMATIC_PIPELINE { "schematic" } else { "bom" }
 }
 
 /// Title for a newly created session: the tier plus the day it started. A detailed
@@ -556,7 +569,7 @@ pub fn ingest(
             None => {
                 let mut action = blank_action("create");
                 action.anchor = Some(anchor_for(finding));
-                action.view = Some("bom".into());
+                action.view = Some(view_for(&doc.pipeline).into());
                 action.session_id = Some(session_id.clone());
                 action.base_revision = base_revision.clone();
                 action.source = Some(source.into());
@@ -643,6 +656,19 @@ fn anchor_for(finding: &Finding) -> reviews::Anchor {
             rect: None,
             at: None,
         },
+    }
+}
+
+#[cfg(test)]
+mod schematic_view_tests {
+    use super::{session_label, view_for};
+
+    #[test]
+    fn schematic_findings_open_on_the_schematic_canvas() {
+        assert_eq!(view_for("schematic-detailed"), "schematic");
+        assert_eq!(view_for("bom-detailed"), "bom");
+        assert_eq!(session_label("schematic-detailed"), "Schematic review");
+        assert_eq!(session_label("bom-detailed"), "Detailed BOM review");
     }
 }
 
