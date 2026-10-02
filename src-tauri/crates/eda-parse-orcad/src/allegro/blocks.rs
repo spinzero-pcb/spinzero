@@ -136,6 +136,9 @@ pub enum Data {
     PlacedPad { layer: Layer, net: u32, next_in_fp: u32, parent_fp: u32, pad: u32, pin_number: u32, coords: [i32; 4] },
     Via { layer: Layer, net: u32, at: (i32, i32), padstack: u32 },
     Keepout { layer: Layer, first_seg: u32 },
+    /// A drill-chart figure: the symbol a drill drawing places on each hole
+    /// (shape in the pad shape codes, the chart character, centre, size).
+    DrillMark { layer: Layer, shape: u8, mark: u8, at: (i32, i32), size: (i32, i32) },
     Fonts(Vec<Font>),
     PtrArray { count: u32, ptrs: Vec<u32> },
     Other,
@@ -380,20 +383,34 @@ fn read_block(r: &mut R, v: Ver, end_0x27: usize) -> Res<Option<Block>> {
         }
         0x0C => {
             r.skip(1)?;
-            let _l = layer(r)?;
+            let layer = layer(r)?;
             key = r.u32()?;
             next = r.u32()?;
             r.skip(8)?;
-            r.skip(if ge(Ver::V172) { 12 } else { 4 })?;
+            // The figure's shape (the pad shape codes) and its drill-chart
+            // character; 17.2 widened each to a word.
+            let (shape, mark) = if ge(Ver::V172) {
+                let s = r.u32()? as u8;
+                let c = r.u32()? as u8;
+                r.skip(4)?;
+                (s, c)
+            } else {
+                let s = r.u8()?;
+                let c = r.u8()?;
+                r.skip(2)?;
+                (s, c)
+            };
             r.skip(4)?;
             if ge(Ver::V180) {
                 r.skip(4)?;
             }
-            r.skip(16 + 12)?;
+            let at = pt(r)?;
+            let size = pt(r)?;
+            r.skip(12)?;
             if ge(Ver::V174) && !ge(Ver::V180) {
                 r.skip(4)?;
             }
-            Data::Other
+            Data::DrillMark { layer, shape, mark, at, size }
         }
         0x0D => {
             r.skip(3)?;

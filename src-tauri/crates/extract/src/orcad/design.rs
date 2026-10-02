@@ -267,3 +267,8 @@ pub fn build_components(
     unresolved.unannotated_parts.dedup();
     group_parts(placements)
 }
+
+/// Variants the design defines (CIS). None are read yet.
+pub fn variants(_doc: &CaptureDoc, _components: &[Component]) -> Vec<VariantInfo> {
+    Vec::new()
+}

@@ -12,6 +12,10 @@
 
 pub mod design;
 pub mod netlist;
+pub mod pcb;
+pub mod pipeline;
+pub mod sch_geom;
+pub mod sch_svg;
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
