@@ -5,6 +5,9 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let d = eda_parse_orcad::capture::open(std::path::Path::new(&args[1])).unwrap();
     let filt = args.get(2).cloned().unwrap_or_default();
+    for (i, f) in d.lib.fonts.iter().enumerate() {
+        println!("font {} h={} w={} w8={} esc={} it={} {:?}", i + 1, f.height, f.width, f.weight, f.escapement, f.italic, f.face);
+    }
     println!("version {:?} root={:?} folders={:?}", d.lib.version, d.lib.root_name,
         d.folders.iter().map(|f| (f.name.clone(), f.pages.len(), f.visible)).collect::<Vec<_>>());
     for f in &d.folders {
@@ -19,6 +22,9 @@ fn main() {
             }
             for pt in &p.parts {
                 println!(" part db={} ref={:?} val={:?} cache={:?} pkg={:?} unit={} pos={:?} or={:?} props={:?}", pt.db_id, pt.reference, pt.value, pt.cache_name, pt.package, pt.unit_index, pt.pos, pt.orient, pt.props);
+                for dp in &pt.display {
+                    println!("    disp {:?} at ({}, {}) font {} rot {} mode {}", dp.name, dp.x, dp.y, dp.font, dp.rotation, dp.mode);
+                }
                 for pi in &pt.pins {
                     println!("    pin idx={} pos={:?} a={:#x} b={:#x} rest={} props={:?}", pi.index, pi.pos, pi.word_a, pi.word_b, pi.display.len(), pi.props);
                 }
@@ -29,9 +35,19 @@ fn main() {
             for (k, l) in [("port", &p.ports), ("global", &p.globals), ("offpage", &p.offpages)] {
                 for g in l.iter() {
                     println!(" {k} db={} name={:?} cache={:?} pos={:?} or={:?} bbox={:?}", g.db_id, g.name, g.cache_name, g.pos, g.orient, g.bbox);
+                    for dp in &g.display {
+                        println!("    disp {:?} at ({}, {}) font {} rot {} mode {:#x}", dp.name, dp.x, dp.y, dp.font, dp.rotation, dp.mode);
+                    }
                 }
             }
             println!(" erc={} busentries={} graphics={} titleblocks={}", p.erc.len(), p.bus_entries.len(), p.graphics.len(), p.title_blocks.len());
+            for g in p.graphics.iter().chain(&p.title_blocks) {
+                println!(" graphic kind={} db={} name={:?} cache={:?} pos={:?} or={:?} bbox={:?} body={:?}", g.kind, g.db_id, g.name, g.cache_name, g.pos, g.orient, g.bbox,
+                    g.body.as_ref().map(|b| (b.bbox, b.prims.len(), b.prims.first().cloned())));
+                for dp in &g.display {
+                    println!("    disp {:?} at ({}, {}) font {} rot {} mode {:#x}", dp.name, dp.x, dp.y, dp.font, dp.rotation, dp.mode);
+                }
+            }
         }
     }
     if let Some(t) = &d.tree {

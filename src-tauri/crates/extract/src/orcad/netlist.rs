@@ -288,7 +288,9 @@ pub fn fragments(
                 pin_name: sp.map(|p| p.name.clone()).unwrap_or_default(),
                 pin_type: sp.map(|p| p.etype.token()).unwrap_or("PASSIVE").to_string(),
             };
-            let uuid = format!("{}:{slot}", part_id(part.db_id));
+            // A hidden pin is connected but not drawn, so it has no handle on
+            // the sheet for the net to point at.
+            let uuid = if sp.map(|p| p.hidden()).unwrap_or(false) { String::new() } else { format!("{}:{slot}", part_id(part.db_id)) };
             let hidden_power = sp.map(|p| p.hidden() && p.etype == PinType::Power).unwrap_or(false);
             if hidden_power {
                 // Joins the global net its name names, wherever it is drawn —
@@ -440,7 +442,9 @@ pub fn fragments(
         match att {
             Att::Terminal(t, uuid, nc) => {
                 b.terminals.push(t);
-                b.graphical.pins.push(uuid);
+                if !uuid.is_empty() {
+                    b.graphical.pins.push(uuid);
+                }
                 if nc {
                     b.no_connect_only = true;
                 }
