@@ -187,8 +187,35 @@ fn emit_text(s: &mut String, ctx: &Ctx, text: &str, at: (f64, f64), font: u16, t
         c(x),
         c(y + size * 0.8),
         c(size),
-        esc(text)
+        overbar(text)
     );
+}
+
+/// Capture marks an active-low name by following each overbarred character
+/// with a backslash (`R\E\S\E\T\`). Those runs are drawn overlined and the
+/// backslashes dropped; text with no backslash is just escaped.
+fn overbar(text: &str) -> String {
+    if !text.contains('\\') {
+        return esc(text);
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let mut runs: Vec<(bool, String)> = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '\\' {
+            i += 1;
+            continue;
+        }
+        let over = chars.get(i + 1) == Some(&'\\');
+        match runs.last_mut() {
+            Some((o, r)) if *o == over => r.push(chars[i]),
+            _ => runs.push((over, chars[i].to_string())),
+        }
+        i += if over { 2 } else { 1 };
+    }
+    runs.into_iter()
+        .map(|(over, r)| if over { format!(r#"<tspan text-decoration="overline">{}</tspan>"#, esc(&r)) } else { esc(&r) })
+        .collect()
 }
 
 /// Break a note into lines: at its own line breaks, then greedily at word
@@ -863,6 +890,14 @@ mod tests {
         assert_eq!(display_text(&dp(0x400), "").as_deref(), None);
         assert_eq!(display_text(&dp(0), "10k"), None);
         assert_eq!(display_text(&dp(0x100), "  "), None, "blank is not ink");
+    }
+
+    #[test]
+    fn backslashed_characters_are_overlined() {
+        assert_eq!(overbar("RESET"), "RESET");
+        assert_eq!(overbar("R\\E\\S\\E\\T\\"), r#"<tspan text-decoration="overline">RESET</tspan>"#);
+        assert_eq!(overbar("CS\\B\\x"), r#"C<tspan text-decoration="overline">SB</tspan>x"#);
+        assert_eq!(overbar("A<B"), "A&lt;B");
     }
 
     #[test]

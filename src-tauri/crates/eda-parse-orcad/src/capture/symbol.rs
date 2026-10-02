@@ -313,7 +313,7 @@ fn skip_marker_separators(c: &mut Cur) {
 }
 
 /// Decode one primitive body of type `t`. Returns the primitive.
-fn prim_body(t: u8, c: &mut Cur) -> Res<Prim> {
+pub(crate) fn prim_body(t: u8, c: &mut Cur) -> Res<Prim> {
     Ok(match t {
         40 | 43 => {
             let a = pt(c)?;

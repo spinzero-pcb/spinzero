@@ -165,13 +165,13 @@ pub fn parse(bytes: &[u8]) -> Result<CaptureDoc, String> {
     let cfb = Cfb::parse(bytes)?;
     let lib_data = cfb.stream("Library").ok_or("no Library stream: not an OrCAD Capture file")?;
     let lib = LibraryInfo::read(lib_data).map_err(|e| format!("Library stream: {e}"))?;
-    if lib.version.0 < 3 {
-        return legacy::parse(&cfb, lib);
-    }
+    // Below version 3 every stream uses the legacy grammar; the document is
+    // assembled the same way from either.
+    let modern = lib.modern();
     let mut notes = Vec::new();
 
     let mut cache = match cfb.stream("Cache") {
-        Some(d) => read_cache(d, &lib).unwrap_or_else(|e| {
+        Some(d) => if modern { read_cache(d, &lib) } else { legacy::read_cache(d, &lib) }.unwrap_or_else(|e| {
             notes.push(format!("Cache stream: {e}"));
             Cache::default()
         }),
@@ -179,7 +179,15 @@ pub fn parse(bytes: &[u8]) -> Result<CaptureDoc, String> {
     };
     for path in cfb.paths().filter(|p| p.starts_with("Packages/")).map(str::to_string).collect::<Vec<_>>() {
         if let Some(d) = cfb.stream(&path) {
-            if let Err(e) = read_package_stream(d, &lib, &mut cache) {
+            // A modern design can still hold a legacy-framed package: its
+            // first record then has no long prefix (no zero pad at 5..9).
+            let long = d.len() >= 11 && d[7..11] == [0, 0, 0, 0];
+            let r = if modern && long {
+                read_package_stream(d, &lib, &mut cache)
+            } else {
+                legacy::read_package_stream(d, &lib, &mut cache)
+            };
+            if let Err(e) = r {
                 notes.push(format!("{path}: {e}"));
             }
         }
@@ -217,7 +225,11 @@ pub fn parse(bytes: &[u8]) -> Result<CaptureDoc, String> {
     let mut folders = Vec::new();
     for (name, visible) in order {
         let streams = by_folder.get(&name).cloned().unwrap_or_default();
-        let mut ordered = stream_order(&cfb, &name);
+        let mut ordered = if modern {
+            stream_order(&cfb, &name)
+        } else {
+            cfb.stream(&format!("Views/{name}/Schematic")).and_then(legacy::page_order).unwrap_or_default()
+        };
         ordered.retain(|p| streams.contains(p));
         for s in &streams {
             if !ordered.contains(s) {
@@ -228,7 +240,8 @@ pub fn parse(bytes: &[u8]) -> Result<CaptureDoc, String> {
         for s in ordered {
             let path = format!("Views/{name}/Pages/{s}");
             let Some(d) = cfb.stream(&path) else { continue };
-            match read_page(&s, d, &lib) {
+            let read = if modern { read_page(&s, d, &lib) } else { legacy::read_page(&s, d, &lib) };
+            match read {
                 Ok(p) => {
                     if let Some(t) = &p.truncated {
                         notes.push(format!("{path}: page read stopped early: {t}"));
@@ -259,7 +272,8 @@ pub fn parse(bytes: &[u8]) -> Result<CaptureDoc, String> {
     if let Some(r) = root {
         let path = format!("Views/{}/Hierarchy/Hierarchy", folders[r].name);
         if let Some(d) = cfb.stream(&path) {
-            match read_tree(d, &lib) {
+            let read = if modern { read_tree(d, &lib) } else { legacy::read_tree(d, &lib) };
+            match read {
                 Ok(t) => tree = t,
                 Err(e) => {
                     notes.push(format!("{path}: {e}"));
@@ -277,7 +291,8 @@ pub fn parse(bytes: &[u8]) -> Result<CaptureDoc, String> {
                 continue;
             }
             if let Some(d) = cfb.stream(&path) {
-                match read_symbol(&mut Cur::new(d), &lib) {
+                let read = if modern { read_symbol(&mut Cur::new(d), &lib) } else { legacy::symbol_stream(d, &lib) };
+                match read {
                     Ok(s) => library_symbols.push(s),
                     Err(e) => notes.push(format!("{path}: {e}")),
                 }

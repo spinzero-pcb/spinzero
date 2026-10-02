@@ -119,3 +119,19 @@ fn board_pads_carry_the_nets_of_the_allegro_netlist() {
     assert!(seen >= 160, "pins found on the board: {seen}");
     assert_eq!(same, seen, "every pin on its netlist net");
 }
+
+/// A Capture 9.x (Library 2.0) design reads through the legacy grammar.
+#[test]
+fn a_legacy_design_extracts_whole() {
+    let Some(dsn) = corpus("jmerdich_allegro-library/Orcad PCB/_archive/EVK NCV70501.DSN") else { return };
+    let doc = eda_parse_orcad::capture::open(&dsn).unwrap();
+    assert_eq!(doc.lib.version.0, 2);
+    assert!(doc.notes.is_empty(), "{:?}", doc.notes);
+    let out = out_dir("legacy");
+    run_design(&dsn, &out, &mut |_: Msg| {}).expect("extracts");
+    let d = design_json(&out);
+    assert_eq!(d["components"].as_array().unwrap().len(), 199);
+    let refs: BTreeSet<&str> = d["components"].as_array().unwrap().iter().map(|c| c["designator"].as_str().unwrap()).collect();
+    assert!(refs.contains("U1") && refs.contains("R104") && refs.contains("U301"));
+    let _ = std::fs::remove_dir_all(&out);
+}
