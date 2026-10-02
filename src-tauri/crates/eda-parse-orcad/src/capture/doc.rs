@@ -13,7 +13,7 @@ use super::framing::read_frame;
 use super::hierarchy::{read_tree, OccTree};
 use super::legacy;
 use super::library::{sniff, FileRole, LibraryInfo};
-use super::page::{read_page, Page};
+use super::page::{read_page, Page, PlacedPart};
 use super::symbol::{read_symbol, SymbolDef};
 
 /// One schematic folder: an ordered set of pages.
@@ -58,6 +58,38 @@ impl CaptureDoc {
     pub fn root_folder(&self) -> Option<&Folder> {
         self.root.and_then(|i| self.folders.get(i))
     }
+
+    /// The cached symbol a placed part draws. A cache name can hold several
+    /// stored revisions; a placement uses the one whose pins land on its own
+    /// stored pin positions, and the first revision when none or all do.
+    pub fn symbol_for(&self, part: &PlacedPart) -> Option<&SymbolDef> {
+        let revs = self.cache.symbols.get(&part.cache_name).or_else(|| {
+            self.cache
+                .symbols
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case(&part.cache_name))
+                .map(|(_, v)| v)
+        })?;
+        if revs.len() > 1 {
+            if let Some(s) = revs.iter().find(|s| fits(part, s)) {
+                return Some(s);
+            }
+        }
+        revs.first()
+    }
+}
+
+/// True when every placed pin sits where the symbol puts that slot.
+pub fn fits(part: &PlacedPart, s: &SymbolDef) -> bool {
+    let b = (s.bbox.0 as i32, s.bbox.1 as i32, s.bbox.2 as i32, s.bbox.3 as i32);
+    !part.pins.is_empty()
+        && part.pins.iter().all(|pi| {
+            s.pins
+                .iter()
+                .find(|x| x.slot == pi.slot())
+                .map(|sp| part.orient.place(sp.hot, part.pos, b) == pi.pos)
+                .unwrap_or(false)
+        })
 }
 
 /// True when the bytes are a compound file whose `Library` stream says it is

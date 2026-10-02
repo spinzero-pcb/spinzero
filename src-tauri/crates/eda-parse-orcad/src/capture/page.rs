@@ -49,11 +49,10 @@ impl Orient {
         Orient { turns: b & 3, mirror: b & 4 != 0 }
     }
 
-    /// Map a symbol-space point into page space around `origin`.
-    ///
-    /// Capture's turns run counter-clockwise as drawn, which with Y down is
-    /// (x, y) → (y, −x) per quarter turn.
-    pub fn apply(&self, p: (i32, i32), origin: (i32, i32)) -> (i32, i32) {
+    /// The linear part of the placement: mirror X first, then `turns`
+    /// counter-clockwise quarter turns, each (x, y) → (y, −x) in Capture's
+    /// Y-down space.
+    pub fn linear(&self, p: (i32, i32)) -> (i32, i32) {
         let (mut x, mut y) = p;
         if self.mirror {
             x = -x;
@@ -63,7 +62,23 @@ impl Orient {
             x = nx;
             y = ny;
         }
-        (origin.0 + x, origin.1 + y)
+        (x, y)
+    }
+
+    /// Map a symbol-space point onto the page.
+    ///
+    /// The stored position is the top-left corner of the TRANSFORMED body box,
+    /// not the transformed symbol origin: after the turn and the mirror the
+    /// box is shifted back so its minimum corner lands on `origin`. Fitted on
+    /// every placed part in the corpus, whose pins are stored both in symbol
+    /// space and at their absolute page positions.
+    pub fn place(&self, p: (i32, i32), origin: (i32, i32), body: (i32, i32, i32, i32)) -> (i32, i32) {
+        let (x1, y1, x2, y2) = body;
+        let corners = [(x1, y1), (x2, y1), (x2, y2), (x1, y2)].map(|c| self.linear(c));
+        let mx = corners.iter().map(|c| c.0).min().unwrap_or(0);
+        let my = corners.iter().map(|c| c.1).min().unwrap_or(0);
+        let t = self.linear(p);
+        (origin.0 + t.0 - mx, origin.1 + t.1 - my)
     }
 }
 
@@ -108,7 +123,8 @@ pub struct Wire {
 /// A pin of a placed part, at its absolute page position.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PinInst {
-    /// Pin slot in the symbol; negative marks an explicit no-connect.
+    /// One-based pin slot in the symbol; negative marks an explicit
+    /// no-connect on that slot.
     pub index: i16,
     pub pos: (i32, i32),
     pub bus: bool,
@@ -121,13 +137,9 @@ impl PinInst {
         self.index < 0
     }
 
-    /// The symbol pin slot this instance pin stands for.
+    /// The zero-based symbol pin slot this instance pin stands for.
     pub fn slot(&self) -> usize {
-        if self.index < 0 {
-            (-(self.index as i32) - 1) as usize
-        } else {
-            self.index as usize
-        }
+        ((self.index as i32).abs() - 1).max(0) as usize
     }
 }
 

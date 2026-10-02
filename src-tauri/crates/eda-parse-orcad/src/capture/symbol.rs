@@ -100,6 +100,12 @@ pub struct SymPin {
 }
 
 impl SymPin {
+    /// Bit 7 hides the pin. A hidden pin of power type is Capture's implicit
+    /// supply connection: it joins the global net its NAME names, with no wire.
+    pub fn hidden(&self) -> bool {
+        self.shape & 0x80 != 0
+    }
+
     pub fn clock(&self) -> bool {
         self.shape & 0x02 != 0
     }
@@ -137,6 +143,22 @@ impl PinType {
             6 => PinType::OpenEmitter,
             7 => PinType::Power,
             n => PinType::Unknown(n),
+        }
+    }
+
+    /// The bundle's upper-case electrical token, shared with the other
+    /// front-ends.
+    pub fn token(&self) -> &'static str {
+        match self {
+            PinType::Input => "INPUT",
+            PinType::Bidirectional => "BIDIRECTIONAL",
+            PinType::Output => "OUTPUT",
+            PinType::OpenCollector => "OPEN_COLLECTOR",
+            PinType::Passive => "PASSIVE",
+            PinType::TriState => "TRI_STATE",
+            PinType::OpenEmitter => "OPEN_EMITTER",
+            PinType::Power => "POWER_IN",
+            PinType::Unknown(_) => "PASSIVE",
         }
     }
 

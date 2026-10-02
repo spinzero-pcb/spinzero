@@ -1,0 +1,56 @@
+//! Print one Capture design's pages in a readable form (development aid).
+//! `cargo run -p eda-parse-orcad --example inspect -- <file.DSN> [page-filter]`
+
+fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    let d = eda_parse_orcad::capture::open(std::path::Path::new(&args[1])).unwrap();
+    let filt = args.get(2).cloned().unwrap_or_default();
+    println!("version {:?} root={:?} folders={:?}", d.lib.version, d.lib.root_name,
+        d.folders.iter().map(|f| (f.name.clone(), f.pages.len(), f.visible)).collect::<Vec<_>>());
+    for f in &d.folders {
+        for p in &f.pages {
+            if !filt.is_empty() && !p.name.contains(&filt) { continue; }
+            println!("== {}/{} size={} w={} h={} metric={}", f.name, p.name, p.size_name, p.settings.width, p.settings.height, p.settings.metric);
+            println!(" nets: {:?}", p.nets.iter().map(|n| (n.id, n.name.clone())).collect::<Vec<_>>());
+            println!(" net_names: {:?}", p.net_names.iter().map(|n| (n.id, n.name.clone())).collect::<Vec<_>>());
+            println!(" groups: {:?}", p.groups);
+            for w in &p.wires {
+                println!(" wire db={} net={} {:?}-{:?} bus={} aliases={:?}", w.db_id, w.net_id, w.a, w.b, w.bus, w.aliases.iter().map(|a| (&a.name, a.pos)).collect::<Vec<_>>());
+            }
+            for pt in &p.parts {
+                println!(" part db={} ref={:?} val={:?} cache={:?} pkg={:?} unit={} pos={:?} or={:?} props={:?}", pt.db_id, pt.reference, pt.value, pt.cache_name, pt.package, pt.unit_index, pt.pos, pt.orient, pt.props);
+                for pi in &pt.pins {
+                    println!("    pin idx={} pos={:?} props={:?}", pi.index, pi.pos, pi.props);
+                }
+            }
+            for b in &p.blocks {
+                println!(" block db={} name={:?} ref={:?} impl={:?} rect={:?} pins={:?}", b.db_id, b.name, b.reference, b.implementation, b.rect, b.pins.iter().map(|x| (&x.name, x.pos)).collect::<Vec<_>>());
+            }
+            for (k, l) in [("port", &p.ports), ("global", &p.globals), ("offpage", &p.offpages)] {
+                for g in l.iter() {
+                    println!(" {k} db={} name={:?} cache={:?} pos={:?} or={:?} bbox={:?}", g.db_id, g.name, g.cache_name, g.pos, g.orient, g.bbox);
+                }
+            }
+            println!(" erc={} busentries={} graphics={} titleblocks={}", p.erc.len(), p.bus_entries.len(), p.graphics.len(), p.title_blocks.len());
+        }
+    }
+    if let Some(t) = &d.tree {
+        println!("== tree view={} power={:?}", t.view, t.power);
+        fn walk(s: &eda_parse_orcad::capture::hierarchy::Scope, ind: usize) {
+            println!("{:ind$}nets {:?}", "", s.nets.iter().map(|n| (n.db_id, n.name.clone())).collect::<Vec<_>>(), ind = ind);
+            for o in &s.occurrences {
+                println!("{:ind$}occ own={} target={} folder={:?} ref={:?} unit={:?} props={:?} pins={}", "", o.own_db_id, o.target_db_id, o.child_folder, o.reference, o.unit, o.props, o.pins.len(), ind = ind);
+                walk(&o.nested, ind + 2);
+            }
+        }
+        walk(&t.root, 1);
+    }
+    for (k, v) in d.cache.symbols.iter().take(40) {
+        let s = &v[0];
+        println!("sym {k} kind={} bbox={:?} pins={:?} general={:?}", s.kind, s.bbox, s.pins.iter().map(|p| (p.slot, p.name.clone(), p.hot, p.etype, p.shape)).collect::<Vec<_>>(), s.general);
+    }
+    for (k, p) in d.cache.packages.iter().take(40) {
+        println!("pkg {k} prefix={:?} fp={:?} devs={:?} props={:?}", p.ref_prefix, p.footprint, p.devices.iter().map(|d| (d.unit.clone(), d.pins.iter().map(|x| x.as_ref().map(|y| y.number.clone())).collect::<Vec<_>>())).collect::<Vec<_>>(), p.props);
+    }
+    for n in &d.notes { println!("note {n}"); }
+}

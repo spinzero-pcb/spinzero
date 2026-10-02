@@ -8,6 +8,7 @@ pub mod framing;
 pub mod hierarchy;
 pub mod legacy;
 pub mod library;
+pub mod opj;
 pub mod page;
 pub mod symbol;
 

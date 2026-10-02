@@ -13,6 +13,7 @@ pub mod geom;
 pub mod ir;
 pub mod netclass;
 pub mod netlist;
+pub mod orcad;
 pub mod pcb;
 pub mod pipeline;
 pub mod sch_geom;
