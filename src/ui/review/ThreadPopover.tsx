@@ -4,9 +4,9 @@ import { useViewStore } from "../../stores/viewStore";
 import { displayInfo, numberMap, refLabel, useReviewStore } from "../../stores/reviewStore";
 import { formatLocalTime, formatRelative } from "../../lib/time";
 import type { CommentSeverity } from "../../lib/types";
+import { SEVERITIES, SEVERITY_LABEL } from "../../lib/severity";
 import { IconCheck } from "../icons";
 
-const SEVERITIES: CommentSeverity[] = ["info", "minor", "major", "critical"];
 const POP_W = 320;
 const POP_H = 380;
 
@@ -75,7 +75,7 @@ function initials(name: string): string {
 }
 
 /** Renders the new-comment composer (when `compose` is set) or the thread popover
- *  for the open comment — both float over the canvas (docs/phase2-ui-plan.md §4). */
+ *  for the open comment — both float over the canvas (docs/archive/phase2-ui-plan.md §4). */
 export function ThreadPopover() {
   const compose = useReviewStore((s) => s.compose);
   const openThreadId = useReviewStore((s) => s.openThreadId);
@@ -141,7 +141,7 @@ function Composer() {
         >
           {SEVERITIES.map((s) => (
             <option key={s} value={s}>
-              {s}
+              {SEVERITY_LABEL[s]}
             </option>
           ))}
         </select>
@@ -211,7 +211,7 @@ function Thread({ id }: { id: string }) {
         >
           {SEVERITIES.map((s) => (
             <option key={s} value={s}>
-              {s}
+              {SEVERITY_LABEL[s]}
             </option>
           ))}
         </select>

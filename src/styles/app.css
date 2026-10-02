@@ -974,8 +974,14 @@ button {
   transition: filter var(--dur-1) var(--ease-out);
 }
 
-.btn-primary:hover {
+.btn-primary:hover:not(:disabled) {
   filter: brightness(1.1);
+}
+
+/* A disabled primary button must look disabled; its tooltip says why. */
+.btn-primary:disabled {
+  opacity: 0.45;
+  cursor: default;
 }
 
 .btn-ghost {
@@ -1892,6 +1898,7 @@ button {
 /* Colour carries the severity — the same vocabulary as the review rail's rows. */
 .bom-cmt-badge.sev-critical { background: var(--err); }
 .bom-cmt-badge.sev-major { background: var(--warn); }
+.bom-cmt-badge.sev-unverified { background: var(--unverified); }
 .bom-cmt-badge.sev-minor { background: var(--accent); }
 .bom-cmt-badge.sev-info { background: var(--fg-2); }
 /* Status stays readable without stealing the colour: a ring for "needs a re-check",
@@ -1949,6 +1956,25 @@ button {
   100% { background: transparent; }
 }
 .bom-table tbody tr.bom-flash { animation: bom-row-flash 1.5s ease-out; }
+
+/* The row whose comment thread is open (a review card landed here). It stays marked
+   until the thread closes: a tinted row, a solid accent bar on the left, and an accent
+   rule above and below. Listed after the diff tints so it wins over them, and the
+   flash still pulses on top of it. */
+.bom-table tbody tr.bom-target {
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  box-shadow:
+    inset 4px 0 0 var(--accent),
+    inset 0 1px 0 var(--accent),
+    inset 0 -1px 0 var(--accent);
+}
+.bom-table tbody tr.bom-target td { color: var(--fg-0); font-weight: 600; }
+.bom-table tbody tr.bom-target.bom-flash { animation: bom-target-flash 1.5s ease-out; }
+@keyframes bom-target-flash {
+  0%, 20%, 45% { background: color-mix(in srgb, var(--accent) 45%, transparent); }
+  10%, 35% { background: color-mix(in srgb, var(--accent) 22%, transparent); }
+  100% { background: color-mix(in srgb, var(--accent) 22%, transparent); }
+}
 .dim { color: var(--fg-2); }
 
 /* ---------- PCB view (WS8 / items 4,7,8,13) ---------- */
@@ -2478,7 +2504,7 @@ button {
 .crunch-retry { margin-top: var(--sp-2); }
 
 /* ============================================================
-   Phase 2 — review surface (docs/phase2-ui-plan.md)
+   Phase 2 — review surface (docs/archive/phase2-ui-plan.md)
    ============================================================ */
 
 /* ---------- right per-view panel (last grid column) ---------- */
@@ -2704,6 +2730,7 @@ textarea.wizard-input {
 }
 .run-review-open.sev-critical { background: var(--err-dim); color: var(--err); }
 .run-review-open.sev-major { background: var(--warn-dim); color: var(--warn); }
+.run-review-open.sev-unverified { background: var(--unverified-dim); color: var(--unverified); }
 .run-review-open.sev-minor { background: var(--accent-dim); color: var(--accent); }
 .run-review-open.sev-info { background: var(--bg-3); color: var(--fg-1); }
 .run-review-stale { color: var(--warn); }
@@ -2770,7 +2797,7 @@ textarea.wizard-input {
   flex: none;
   min-width: 3.2em;
   font-variant-numeric: tabular-nums;
-  color: var(--fg-3, var(--fg-2));
+  color: var(--fg-0);
 }
 .review-progress:hover .review-progress-label { color: var(--fg-0); }
 /* --- last review's failure -----------------------------------------------------
@@ -2839,6 +2866,9 @@ textarea.wizard-input {
   line-height: 1.5;
   overflow-wrap: anywhere;
 }
+/* The agent's own words under a failure: evidence, so small and quiet. */
+.review-outcome-detail.said { font-family: var(--font-mono); font-size: var(--fs-0); color: var(--fg-2); }
+
 .review-outcome-acts {
   display: flex;
   justify-content: flex-end;
@@ -2853,7 +2883,7 @@ textarea.wizard-input {
   min-width: 2.6em;
   font-variant-numeric: tabular-nums;
   text-align: right;
-  color: var(--fg-2);
+  color: var(--fg-0);
 }
 
 /* The activity feed. Opens UPWARD: its anchor lives in the footer, and a panel that
@@ -2888,6 +2918,7 @@ textarea.wizard-input {
   line-height: 1;
 }
 .review-activity-step { color: var(--fg-0); }
+.review-activity-onstep { color: var(--fg-2); font-variant-numeric: tabular-nums; }
 .review-activity-sub { color: var(--fg-2); }
 .review-activity-foot {
   display: flex;
@@ -2948,11 +2979,12 @@ textarea.wizard-input {
   color: var(--err);
 }
 
-/* The gap is the point of the whole panel: it is what names the six minutes nothing
-   happened, so it is the one thing in a row that is allowed to shout. */
-.review-activity-gap {
+/* A step open now: a live row at the foot of the feed. Only a working step has a clock. */
+.review-activity-row.open-step.working .review-activity-text { color: var(--fg-0); }
+.review-activity-row.open-step.waiting .review-activity-text { color: var(--fg-2); }
+.review-activity-clock {
   flex: none;
-  color: var(--warn);
+  color: var(--accent);
   font-variant-numeric: tabular-nums;
 }
 
@@ -2993,6 +3025,8 @@ textarea.wizard-input {
   gap: var(--sp-3);
 }
 .rs-row-sub { margin-top: calc(-1 * var(--sp-2)); }
+/* A depth hint is two short lines on purpose: what it does, then how it compares. */
+.rs-row-sub .rs-hint { white-space: pre-line; }
 .rs-label { color: var(--fg-1); font-size: var(--fs-1); }
 .rs-hint { color: var(--fg-2); font-size: var(--fs-0); line-height: 1.45; }
 
@@ -3023,6 +3057,13 @@ textarea.wizard-input {
 .rs-seg-btn:hover:not(:disabled) { color: var(--fg-0); }
 .rs-seg-btn.on { background: var(--accent-dim); color: var(--fg-0); box-shadow: inset 0 0 0 1px var(--accent); }
 .rs-seg-btn:disabled { cursor: default; opacity: 0.6; }
+
+/* "Runs on": a tick on a connected agent, and the Connect door when the chosen one is
+   not. */
+.rs-ok { display: inline-grid; color: var(--ok); }
+.rs-agent { min-width: 160px; }
+.rs-connect { color: var(--accent); font-size: var(--fs-0); }
+.rs-meta { color: var(--fg-2); }
 
 /* Column mapping: a summary row that unfolds into the editable table in place. */
 .rs-map { display: flex; flex-direction: column; gap: var(--sp-2); }
@@ -3246,6 +3287,7 @@ textarea.wizard-input {
 .rv-row.sel { background: var(--accent-dim); }
 .rv-row.sev-critical { border-left-color: var(--err); }
 .rv-row.sev-major { border-left-color: var(--warn); }
+.rv-row.sev-unverified { border-left-color: var(--unverified); border-left-style: dashed; }
 .rv-row.sev-minor { border-left-color: var(--accent); }
 .rv-row.sev-info { border-left-color: var(--fg-2); }
 .rv-row.st-resolved, .rv-row.st-dismissed { opacity: 0.6; }
@@ -3365,6 +3407,7 @@ textarea.wizard-input {
 }
 .rv-sev.sev-critical { background: var(--err-dim); color: var(--err); }
 .rv-sev.sev-major { background: var(--warn-dim); color: var(--warn); }
+.rv-sev.sev-unverified { background: var(--unverified-dim); color: var(--unverified); }
 .rv-sev.sev-minor { background: var(--accent-dim); color: var(--accent); }
 .rv-sev.sev-info { background: var(--bg-3); color: var(--fg-1); }
 
@@ -3583,6 +3626,7 @@ textarea.wizard-input {
 /* Severity color (item 17) for open chips; status rules below override re-check. */
 .cmt-chip.sev-critical { background: var(--err); color: #fff; }
 .cmt-chip.sev-major { background: var(--warn); color: #000; }
+.cmt-chip.sev-unverified { background: var(--unverified); color: #000; }
 .cmt-chip.sev-minor { background: var(--accent); color: #fff; }
 .cmt-chip.sev-info { background: var(--fg-2); color: #000; }
 .cmt-chip.st-recheck { background: var(--warn); color: #000; }
@@ -3606,6 +3650,7 @@ textarea.wizard-input {
 .cmt-rubber { stroke-dasharray: 5 3; }
 .cmt-region.sev-critical { fill: var(--err); stroke: var(--err); }
 .cmt-region.sev-major { fill: var(--warn); stroke: var(--warn); }
+.cmt-region.sev-unverified { fill: var(--unverified); stroke: var(--unverified); }
 .cmt-region.sev-minor { fill: var(--accent); stroke: var(--accent); }
 .cmt-region.sev-info { fill: var(--fg-2); stroke: var(--fg-2); }
 .cmt-region.st-recheck { fill: var(--warn); stroke: var(--warn); }
@@ -4384,6 +4429,7 @@ textarea.wizard-input {
 }
 .bom-check-sev.sev-critical { background: var(--err-dim); color: var(--err); }
 .bom-check-sev.sev-major { background: var(--warn-dim); color: var(--warn); }
+.bom-check-sev.sev-unverified { background: var(--unverified-dim); color: var(--unverified); }
 .bom-check-sev.sev-minor { background: var(--accent-dim); color: var(--accent); }
 .bom-check-sev.sev-info { background: var(--bg-3); color: var(--fg-1); }
 .bom-check-sev:hover { border-color: currentColor; }
@@ -4423,6 +4469,87 @@ button.bom-check-warn { padding: 1px var(--sp-2); font-size: var(--fs-0); }
   font-size: var(--fs-0);
   color: var(--fg-2);
 }
+
+/* The review setup window (`SpinZero --setup`): one wizard card filling its own
+   small window, with no overlay behind it. */
+/* The app shell sets the body to overflow: hidden, so this window scrolls itself. */
+.setup-window {
+  height: 100vh;
+  overflow-y: auto;
+  display: flex;
+  justify-content: center;
+  padding: var(--sp-3) var(--sp-3) 0;
+  background: var(--bg-1);
+  box-sizing: border-box;
+}
+.setup-window-card { width: 100%; max-width: 720px; box-shadow: none; align-self: flex-start; }
+/* End application: one line of small chips, every option visible. */
+.sw-app { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.sw-app-label { color: var(--fg-1); font-size: var(--fs-1); margin-right: var(--sp-1); }
+.sw-chip {
+  padding: 3px 10px;
+  border: 1px solid var(--border-1);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--fg-1);
+  font-size: var(--fs-0);
+  cursor: pointer;
+}
+.sw-chip:hover { border-color: var(--fg-2); color: var(--fg-0); }
+.sw-chip.on { border-color: var(--accent); background: var(--accent-dim); color: var(--fg-0); }
+
+/* The mapping. Headed like the report's mapping section, grouped so what needs a look
+   comes first, and each row's dot says what it reads now. */
+.sw-map { width: 100%; border-collapse: collapse; font-size: var(--fs-0); margin-top: var(--sp-2); }
+.sw-map th {
+  text-align: left;
+  padding: 4px 8px;
+  color: var(--fg-2);
+  font-weight: 600;
+  border-bottom: 1px solid var(--border-1);
+}
+.sw-map td { padding: 3px 8px; vertical-align: middle; }
+.sw-map .sw-num { text-align: right; white-space: nowrap; }
+.sw-map td.sw-num { font-family: var(--font-mono); color: var(--fg-2); }
+.sw-dotcol { width: 14px; padding-right: 0 !important; }
+.sw-grouphead td {
+  padding: 12px 8px 4px;
+  color: var(--fg-2);
+  font-size: var(--fs-0);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.sw-group-check .sw-grouphead td { color: var(--warn); }
+.sw-count { color: var(--fg-3); letter-spacing: 0; margin-left: 4px; }
+.sw-row:hover { background: var(--bg-3); }
+.sw-row.edited { background: var(--accent-dim); }
+.sw-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--fg-3); }
+.sw-ok .sw-dot { background: var(--ok); }
+.sw-low .sw-dot { background: var(--warn); }
+.sw-missing .sw-dot { background: var(--err); }
+.sw-absent .sw-field { color: var(--fg-3); }
+.sw-field { display: block; color: var(--fg-0); }
+.sw-pick { width: 100%; max-width: 230px; }
+.sw-sample {
+  max-width: 180px;
+  font-family: var(--font-mono);
+  color: var(--fg-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* Confirm stays on screen however long the field list is. The card must not clip, or
+   the sticky footer would stick to the card instead of the window. */
+.setup-window-card { overflow: visible; }
+.setup-window-card .wizard-actions {
+  position: sticky;
+  bottom: 0;
+  margin: 0 calc(-1 * var(--sp-3)) calc(-1 * var(--sp-3));
+  padding: var(--sp-2) var(--sp-3);
+  background: var(--bg-2);
+  border-top: 1px solid var(--border-1);
+}
+.setup-window-done { color: var(--fg-1); font-size: var(--fs-1); }
 
 /* Reviews rail — where checks are launched. Sized for the 280px side panel: every
    row stacks, and the premium case is a couple of lines rather than a table, because
@@ -4562,7 +4689,7 @@ button.bom-check-warn { padding: 1px var(--sp-2); font-size: var(--fs-0); }
 /* The strip's link into the Reviews rail — a launcher, not a run button. */
 .bom-check-reviews { color: var(--accent); }
 
-/* Connect your AI assistant — the MCP setup screen (docs/mcp-server.md).
+/* Connect your AI agent — the MCP setup screen (docs/mcp-server.md).
    Wider than the default wizard card because a config block that wraps is a config
    block somebody pastes with a line missing. */
 .connect-card { width: 620px; }
@@ -4572,9 +4699,9 @@ button.bom-check-warn { padding: 1px var(--sp-2); font-size: var(--fs-0); }
    the card, which is where the acre of empty space between the inputs came from. */
 .connect-card .review-field { flex: none; }
 
-/* The screen is long by nature — two setup sections, a config block and the privacy
-   disclosure — and it must not push its own header off the top of a laptop screen.
-   Scroll the body, keep the title and the buttons where they can be found. */
+/* With a config block open the screen can get long, and it must not push its own
+   header off the top of a laptop screen. Scroll the body, keep the title and the
+   buttons where they can be found. */
 .connect-card .wizard-body {
   max-height: min(62vh, 560px);
   overflow-y: auto;
@@ -4584,6 +4711,50 @@ button.bom-check-warn { padding: 1px var(--sp-2); font-size: var(--fs-0); }
   display: flex;
   gap: var(--sp-1);
 }
+
+/* One row per assistant: its name, whether we found it here, and the one action it
+   supports. A client we could not find is still listed, greyed rather than hidden —
+   somebody about to install Cursor needs to see that SpinZero works with it. */
+.connect-clients {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.connect-client {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  padding: 4px var(--sp-2);
+  background: var(--bg-3);
+  border: 1px solid var(--border-1);
+  border-radius: var(--radius-1);
+}
+
+.connect-client-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+}
+
+.connect-client-name {
+  color: var(--fg-1);
+  font-size: var(--fs-0);
+}
+
+.connect-absent { color: var(--fg-3); }
+
+.connect-actions {
+  display: flex;
+  gap: var(--sp-1);
+}
+
+/* A sentence the user has to act on, not decoration. */
+.wizard-hint.err { color: var(--err); }
 
 .connect-tab {
   flex: 1;
@@ -4613,7 +4784,9 @@ button.bom-check-warn { padding: 1px var(--sp-2); font-size: var(--fs-0); }
   color: var(--fg-1);
   font-family: var(--font-mono);
   font-size: var(--fs-0);
-  line-height: 1.5;
+  /* Whole pixels. At 1.5 the box came out 0.1px taller than its content and WebView2
+     drew a scrollbar on a one-line block. */
+  line-height: 18px;
   /* Wrap rather than scroll: a horizontally scrolled block hides the half of the
      command a reader most needs to sanity-check before pasting it into a shell. */
   white-space: pre-wrap;
@@ -4623,7 +4796,163 @@ button.bom-check-warn { padding: 1px var(--sp-2); font-size: var(--fs-0); }
      shrunk to nothing when the card is tight — which it always is here. The whole
      point of the screen is that this text is readable before it is pasted. */
   flex: none;
-  min-height: 5.5em;
   max-height: 180px;
   overflow-y: auto;
+  /* Room for the copy button in the top-right corner. */
+  padding-right: calc(var(--sp-2) + 24px);
 }
+
+/* A numbered step heading: number, name, status tick, info icon — one line. */
+.connect-step {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+}
+
+.connect-num {
+  display: inline-grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--bg-3);
+  border: 1px solid var(--border-1);
+  color: var(--fg-2);
+  font-size: var(--fs-0);
+  font-weight: 600;
+}
+
+.connect-ok {
+  display: inline-grid;
+  place-items: center;
+  color: var(--ok);
+}
+
+/* Connect shows a spinner while the client's own `mcp add` runs, which can take a
+   few seconds. Without it the screen looks hung. */
+.connect-go {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+}
+.connect-spin {
+  width: 11px;
+  height: 11px;
+  border: 2px solid var(--border-1);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: connect-spin 0.8s linear infinite;
+}
+@keyframes connect-spin { to { transform: rotate(360deg); } }
+
+.connect-client-name {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+}
+
+/* The key field and its Save button share a row. */
+.connect-row {
+  display: flex;
+  gap: var(--sp-1);
+}
+.connect-row .wizard-input { flex: 1; min-width: 0; }
+
+/* A client we could not find is greyed, not hidden. Hover says why. */
+.connect-client-name.absent { color: var(--fg-3); }
+
+.connect-toggle,
+.connect-go { padding-top: 2px; padding-bottom: 2px; }
+.connect-toggle {
+  font-family: var(--font-mono);
+  font-size: var(--fs-0);
+}
+.connect-toggle.on {
+  color: var(--fg-0);
+  border-color: var(--accent);
+}
+
+.connect-block-wrap {
+  position: relative;
+  flex: none;
+}
+
+.connect-copy {
+  position: absolute;
+  top: var(--sp-1);
+  right: var(--sp-1);
+  display: inline-grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  color: var(--fg-2);
+  background: var(--bg-2);
+  border: 1px solid var(--border-1);
+  border-radius: var(--radius-1);
+  cursor: pointer;
+}
+.connect-copy:hover { color: var(--fg-0); }
+
+.connect-path {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+  color: var(--fg-2);
+  font-size: var(--fs-0);
+  word-break: break-all;
+}
+
+/* The launcher's "Connect your AI agent" row, once an agent lists SpinZero. */
+.run-review-connected {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  color: var(--ok);
+}
+.run-review-connected .status-dot { margin-right: 0; }
+
+/* ---- the detailed review's own surfaces ---------------------------------- */
+/* Added when the app became a frontend for an agent-run review: three tallies rather
+   than one count, a list of what nobody checked, and the columns the review read.
+   Every colour is a token, so both themes follow without a second rule. */
+
+/* A run that stopped reporting. The bar keeps its fill — it is still true — but the
+   number is replaced by the word, because a percentage on a dead run is a lie. */
+.review-progress.stalled .review-progress-fill { background: var(--warn); }
+.review-progress.stalled .review-progress-pct { color: var(--warn); }
+
+.review-activity-row.tone-agent .review-activity-text {
+  font-family: var(--font-mono);
+  color: var(--fg-2);
+}
+.review-activity-row.tone-step .review-activity-text { color: var(--fg-1); }
+
+/* "78 of 88 part numbers were accounted for" — the sentence, above the list of what
+   was not. It answers the question the list only implies. */
+.review-outcome-coverage {
+  margin: 0 0 var(--sp-2);
+  color: var(--fg-1);
+}
+
+.review-outcome-gaps {
+  max-height: 12rem;
+  overflow-y: auto;
+  margin: var(--sp-2) 0 0;
+  padding-left: 1.1rem;
+  font-size: var(--fs-0);
+  color: var(--fg-2);
+}
+.review-outcome-gaps li { margin-bottom: 3px; }
+.review-outcome-gaps b { color: var(--fg-1); font-weight: 600; }
+
+/* The third tally. Zero is news too — it is the only place that says the review made
+   every check it set out to — so it is always shown, and only shouts when non-zero. */
+.bom-check-gaps {
+  flex: none;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+  cursor: help;
+}
+.bom-check-gaps.some { color: var(--warn); }
+
+

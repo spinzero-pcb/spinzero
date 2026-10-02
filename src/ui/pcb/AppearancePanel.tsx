@@ -15,7 +15,7 @@ import {
 // KiCad-style Appearance controls for the PCB view: layer visibility + an active
 // layer painted on top (others translucent), object-class toggles + per-class
 // opacity. Pure store consumer — the canvas reacts to the same store. Lives in the
-// per-view RIGHT panel (docs/phase2-ui-plan.md §1); it used to be an <aside> inside
+// per-view RIGHT panel (docs/archive/phase2-ui-plan.md §1); it used to be an <aside> inside
 // PcbView.
 // Stable empty array so the selector never returns a fresh `[]` (which would defeat
 // zustand's Object.is bail-out and re-render the panel on every unrelated store change).

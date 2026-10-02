@@ -1,0 +1,226 @@
+import { describe, expect, it } from "vitest";
+
+import { isOlderRun, isStalled, ownFindings, percentOf, progressLabel, PROGRESS_SPANS, STALL_MS } from "./agentReviewStore";
+import type { RunStatus } from "../lib/ipc";
+
+// The bar's arithmetic, and the one thing it must never do: report progress on a run
+// that has stopped reporting. A watcher is not a subscription — `status.jsonl` stops
+// moving when the run dies, and a bar still reading "68%" over a dead agent is worse
+// than no bar at all.
+
+function status(patch: Partial<RunStatus> = {}): RunStatus {
+  return {
+    status_version: 1,
+    review_id: "r1",
+    pipeline: "bom-detailed",
+    profile: "commercial",
+    project_dir: "C:/b",
+    phase: "preparing",
+    stage: "fetch_datasheets",
+    steps_done: 0,
+    steps_total: 0,
+    parts_done: 0,
+    parts_total: 0,
+    datasheets_read: 0,
+    datasheets_total: 0,
+    started_ts: "2026-09-14T10:00:00.000Z",
+    updated_ts: "2026-09-14T10:00:00.000Z",
+    findings_path: null,
+    report_path: null,
+    error: null,
+    ...patch,
+  };
+}
+
+describe("percentOf", () => {
+  it("shows nothing before a run exists, and a sliver while the preflight is open", () => {
+    expect(percentOf(null)).toBe(0);
+    expect(percentOf(status({ phase: "preflight" }))).toBe(2);
+  });
+
+  it("fills the first span on datasheets, which is where that time actually goes", () => {
+    // The deterministic layer used to sit at a fixed number for two minutes, which
+    // reads as a hang rather than as slow.
+    expect(percentOf(status({ datasheets_read: 0, datasheets_total: 88 }))).toBe(4);
+    expect(percentOf(status({ datasheets_read: 44, datasheets_total: 88 }))).toBe(9.5);
+    expect(percentOf(status({ datasheets_read: 88, datasheets_total: 88 }))).toBe(15);
+  });
+
+  it("fills the batch span on parts accounted for, which IS the job", () => {
+    const s = (done: number) => percentOf(status({ phase: "step_open", parts_done: done, parts_total: 88 }));
+    expect(s(0)).toBe(15);
+    expect(s(44)).toBe(51.5);
+    expect(s(87)).toBeLessThan(88);
+  });
+
+  it("holds the board step at 90, and puts assembly after it", () => {
+    // Every part accounted for, and the one open step is the board step.
+    expect(percentOf(status({ phase: "step_open", parts_done: 88, parts_total: 88 }))).toBe(90);
+    expect(
+      percentOf(
+        status({
+          phase: "step_open",
+          parts_done: 88,
+          parts_total: 88,
+          open_steps: [{ step: "board_review", index: 9, opened_ts: "x", handed_out_ts: null }],
+        }),
+      ),
+    ).toBe(90);
+    expect(percentOf(status({ phase: "assembling", parts_done: 88, parts_total: 88 }))).toBe(97);
+  });
+
+  it("does not jump to assembly in the wait between two batches", () => {
+    // An older server says "assembling" whenever no step is open.
+    expect(Math.round(percentOf(status({ phase: "assembling", parts_done: 30, parts_total: 88 })))).toBe(40);
+    expect(progressLabel(status({ phase: "assembling", parts_done: 30, parts_total: 88 }))).toBe(
+      "Waiting for the next batch · 30 of 88 parts",
+    );
+  });
+
+  it("never runs past its span, whatever the counts say", () => {
+    // A drain batch can report more parts than the plan first estimated. With a batch
+    // still open, that is not the board step.
+    expect(
+      percentOf(
+        status({
+          phase: "step_open",
+          parts_done: 200,
+          parts_total: 88,
+          open_steps: [{ step: "verify_parts#7", index: 7, opened_ts: "x", handed_out_ts: null }],
+        }),
+      ),
+    ).toBe(88);
+    expect(percentOf(status({ phase: "done" }))).toBe(100);
+  });
+
+  it("is split into spans that meet end to end", () => {
+    const spans = Object.values(PROGRESS_SPANS);
+    expect(spans[0]?.[0]).toBe(0);
+    expect(spans[spans.length - 1]?.[1]).toBe(100);
+    for (const [from, to] of spans) expect(to).toBeGreaterThan(from);
+  });
+});
+
+describe("isStalled", () => {
+  const now = Date.parse("2026-09-14T10:00:00.000Z");
+
+  it("is false while the run is reporting", () => {
+    expect(isStalled(status({ updated_ts: "2026-09-14T09:59:00.000Z" }), now)).toBe(false);
+  });
+
+  it("is true once nothing has been written for long enough", () => {
+    const old = new Date(now - STALL_MS - 1_000).toISOString();
+    expect(isStalled(status({ updated_ts: old }), now)).toBe(true);
+  });
+
+  it("is never true of a run that has ended — that is not a stall, it is over", () => {
+    const old = new Date(now - STALL_MS - 1_000).toISOString();
+    expect(isStalled(status({ phase: "done", updated_ts: old }), now)).toBe(false);
+    expect(isStalled(status({ phase: "failed", updated_ts: old }), now)).toBe(false);
+    expect(isStalled(null, now)).toBe(false);
+  });
+});
+
+describe("progressLabel", () => {
+  it("counts in the terms of whatever the run is actually doing", () => {
+    expect(progressLabel(status({ datasheets_read: 30, datasheets_total: 88 }))).toBe(
+      "Collecting datasheets · 30 of 88",
+    );
+    expect(progressLabel(status({ phase: "step_open", parts_done: 12, parts_total: 88 }))).toBe(
+      "Reviewing parts · 12 of 88",
+    );
+  });
+
+  it("names no step numbers, however many steps run at once", () => {
+    const open = (step: string, index: number, handed = true) => ({
+      step,
+      index,
+      opened_ts: "2026-09-14T10:00:00.000Z",
+      handed_out_ts: handed ? "2026-09-14T10:00:05.000Z" : null,
+    });
+    expect(
+      progressLabel(
+        status({
+          phase: "step_open",
+          steps_done: 3,
+          steps_total: 9,
+          parts_done: 36,
+          parts_total: 88,
+          open_steps: [open("verify_parts#4", 4), open("verify_parts#5", 5), open("verify_parts#6", 6, false)],
+        }),
+      ),
+    ).toBe("Reviewing parts · 36 of 88");
+  });
+
+  it("names the board step once it is open", () => {
+    expect(
+      progressLabel(
+        status({
+          phase: "step_open",
+          steps_done: 8,
+          steps_total: 9,
+          parts_done: 88,
+          parts_total: 88,
+          open_steps: [{ step: "board_review", index: 9, opened_ts: "2026-09-14T10:00:00.000Z", handed_out_ts: null }],
+        }),
+      ),
+    ).toBe("Checking the whole board");
+    // A server too old to list its steps: the last step with every part accounted for.
+    expect(
+      progressLabel(status({ phase: "step_open", steps_done: 8, steps_total: 9, parts_done: 88, parts_total: 88 })),
+    ).toBe("Checking the whole board");
+    expect(
+      progressLabel(status({ phase: "step_open", steps_done: 3, steps_total: 4, parts_done: 80, parts_total: 88 })),
+    ).toBe("Reviewing parts · 80 of 88");
+  });
+
+  it("says what a run parked on the preflight is waiting for", () => {
+    // The one state a user cannot diagnose on their own: the agent was started and
+    // has not answered the setup question yet.
+    expect(progressLabel(status({ phase: "preflight" }))).toContain("confirm the setup");
+  });
+
+  it("carries the failure sentence rather than a phase name", () => {
+    expect(progressLabel(status({ phase: "failed", error: "the agent exited" }))).toBe("the agent exited");
+  });
+});
+
+describe("isOlderRun", () => {
+  const now = Date.parse("2026-09-14T10:01:00.000Z");
+  const live = status({ review_id: "new", phase: "step_open", updated_ts: "2026-09-14T10:00:30.000Z" });
+
+  it("drops an older run's finished status while the current run is live", () => {
+    // The feed said "Report written" halfway through a run when the watcher did this.
+    const old = status({ review_id: "old", phase: "done", updated_ts: "2026-09-14T08:00:00.000Z" });
+    expect(isOlderRun(live, old, now)).toBe(true);
+  });
+
+  it("takes a newer run, the same run, and anything after a finished one", () => {
+    expect(isOlderRun(live, status({ review_id: "newer", updated_ts: "2026-09-14T10:00:50.000Z" }), now)).toBe(false);
+    expect(isOlderRun(live, { ...live, phase: "done" }, now)).toBe(false);
+    const finished = { ...live, phase: "done" as const };
+    expect(isOlderRun(finished, status({ review_id: "old", updated_ts: "2026-09-14T08:00:00.000Z" }), now)).toBe(false);
+    expect(isOlderRun(null, live, now)).toBe(false);
+  });
+});
+
+describe("ownFindings", () => {
+  const entry = (name: string, error: string | null = null) => ({
+    name,
+    pipeline: "bom-detailed",
+    engine_version: "1",
+    finding_count: 3,
+    error,
+  });
+
+  it("names this run's own file, from a Windows path", async () => {
+    const s = status({ phase: "done", findings_path: "C:\\b\\reviews\\inbox\\bom-detailed-x.json" });
+    expect(await ownFindings(s, [entry("other.json"), entry("bom-detailed-x.json")])).toBe("bom-detailed-x.json");
+  });
+
+  it("leaves any other file, and a file that cannot be imported, for a click", async () => {
+    const s = status({ phase: "done", findings_path: "/b/reviews/inbox/mine.json" });
+    expect(await ownFindings(s, [entry("other.json")])).toBeNull();
+    expect(await ownFindings(s, [entry("mine.json", "not a findings document")])).toBeNull();
+  });
+});

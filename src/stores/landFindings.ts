@@ -1,5 +1,5 @@
 import type { CheckOutcome, FindingsDoc } from "../lib/findings";
-import { runHealthSummary } from "../lib/reviewService";
+import { runHealthSummary } from "../lib/findings";
 import { useBomCheckStore } from "./bomCheckStore";
 import { useReviewRunsStore } from "./reviewRunsStore";
 import { useReviewStore } from "./reviewStore";

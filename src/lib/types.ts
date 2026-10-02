@@ -5,7 +5,8 @@ export type ProjectKind = "kicad" | "altium";
 /** Functional safety / market class of the board (drives review rigor + specs). */
 export type ProjectClass =
   | "general"
-  | "automotive"
+  | "automotive-comfort"
+  | "automotive-safety"
   | "commercial"
   | "medical"
   | "industrial"
@@ -230,20 +231,40 @@ export interface UiSettings {
   /** Where the paid review service lives, and the token for it. Phase 1 is a static
    *  dev token (plan §5); Phase 2 replaces it with a Clerk session whose refresh
    *  token belongs in the OS keychain, not here. */
-  review_service?: ReviewServiceSettings | null;
-  /** How to start a review through the user's own AI assistant, over MCP. Null =
-   *  never set up, and the option says so rather than failing on click. */
+  /** How to start SpinZero's own review server, for the block the user pastes into
+   *  their agent. Null = never set up. */
   agent_review?: AgentReviewSettings | null;
-  /** Which surface the detailed BOM review runs on. Absent keeps the hosted service. */
-  review_driver?: "service" | "agent" | null;
+  /** Which agent runs the review, and how to start it. Null = the shipped default. */
+  agent_profile?: AgentProfile | null;
 }
 
 /**
- * What the app needs to spawn the user's assistant against SpinZero's own MCP server.
+ * How to start one AI agent.
  *
- * The app writes the MCP config itself and passes `--strict-mcp-config`, so the
- * assistant sees exactly one server and a user who has never run `claude mcp add`
- * still gets a working review. Mirrors `agent::AgentConfig`.
+ * An agent is a command line program that drives a model and speaks MCP. SpinZero
+ * works with any of them, so this is a profile rather than a hard-coded command.
+ * `{prompt}` and `{project_dir}` are the only placeholders, and the backend does the
+ * quoting. Mirrors `agent::AgentProfile`.
+ */
+export interface AgentProfile {
+  id: string;
+  label: string;
+  /** The executable. Empty means this profile cannot run yet. */
+  bin: string;
+  /** `arg` puts the prompt in `{prompt}`; `stdin` writes it to the program's input. */
+  prompt_via: "arg" | "stdin";
+  args: string[];
+  /** Has SpinZero run this profile end to end? A profile we have not is still
+   *  offered, and the screen says so rather than presenting a guess as a fact. */
+  verified: boolean;
+}
+
+/**
+ * Where SpinZero's own review server lives, and what it needs in its environment.
+ *
+ * The app no longer forces this on an agent — MCP registration belongs to the user,
+ * and `ConnectAssistant` generates the block they paste into their own agent. This is
+ * the one saved source that block is rendered from.
  */
 export interface AgentReviewSettings {
   /** Path to the `claude` executable; empty means "whatever is on PATH". */
@@ -254,12 +275,6 @@ export interface AgentReviewSettings {
   server_args: string[];
   /** Environment for the server: credentials, binary paths. */
   server_env: Record<string, string>;
-}
-
-export interface ReviewServiceSettings {
-  base_url: string;
-  /** Static bearer token. Local-dev only — see the note on `review_service`. */
-  token: string;
 }
 
 /** Machine-local, per-project review UI state remembered across sessions. */
@@ -321,7 +336,8 @@ export type CommentSource = "human" | "rule" | "agent";
 /** Persisted lifecycle. ⟳ re-check is DERIVED on the frontend (object_hash vs the
  *  live design) and never stored — see deriveDisplayStatus in reviewStore. */
 export type CommentStatus = "open" | "addressed" | "resolved" | "dismissed";
-export type CommentSeverity = "info" | "minor" | "major" | "critical";
+/** `unverified` is a detailed review's coverage gap: see `lib/severity.ts`. */
+export type CommentSeverity = "info" | "minor" | "unverified" | "major" | "critical";
 /** Which canvas a comment is scoped to (item 15): the same object can carry
  *  distinct schematic vs PCB vs BOM comments, and clicking one navigates there. */
 export type CommentView = "schematic" | "pcb" | "bom";
@@ -425,4 +441,50 @@ export interface SessionActionInput {
   session_id?: string;
   title?: string;
   status?: string;
+}
+
+// ------------------------------------------------ connecting an AI assistant
+// Mirrors `assistant.rs`. SpinZero never edits another product's config file: where a
+// client has its own `mcp add` we run that, and where it does not we show a block and
+// the path to paste it into.
+
+/** How a client is told about an MCP server. */
+export type HowToAdd = "command" | "config_file";
+
+export interface AssistantClient {
+  id: string;
+  label: string;
+  how: HowToAdd;
+  /** Found on this machine. A client we cannot see is still listed — somebody about to
+   *  install Cursor should not have to wonder whether SpinZero works with it. */
+  installed: boolean;
+  /** `how: "command"` — the line we would run, ready to show. */
+  command: string;
+  /** `how: "config_file"` — where that client keeps its MCP servers. */
+  config_path: string;
+  /** `mcpServers` for almost everyone, `servers` for VS Code. Getting this wrong makes
+   *  the client ignore the block without an error. */
+  config_key: string;
+  /** Its own config already lists SpinZero. Read, never written; a hint, not a check
+   *  that the server starts. */
+  connected: boolean;
+}
+
+export interface AssistantSetup {
+  /** The review server beside this app, resolved rather than typed. */
+  server_command: string;
+  /** Empty when it was found; otherwise why not, in a sentence. */
+  server_problem: string;
+  licence_file: string;
+  /** Is there a key in that file? Never the key itself. */
+  licence_present: boolean;
+  clients: AssistantClient[];
+}
+
+export interface RegisterOutcome {
+  ok: boolean;
+  /** What we ran, so the user can run it themselves if it failed. */
+  command: string;
+  /** The client's own words about its own config. */
+  detail: string;
 }

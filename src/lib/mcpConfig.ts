@@ -58,11 +58,6 @@ export const KNOWN_ENV: { key: string; label: string; hint: string }[] = [
     label: "Improvement telemetry",
     hint: "On by default. Set to 0 to switch it off.",
   },
-  {
-    key: "SPINZERO_MCP_DEV",
-    label: "Development build",
-    hint: "Set to 1 to run an unlicensed build from source. missingFrom accepts it in place of a licence key, and without a field for it that escape hatch was unreachable from the one screen that depends on it.",
-  },
 ];
 
 /**
@@ -158,6 +153,22 @@ export function claudeCodeBlock(config: AgentReviewSettings): string {
   return parts.join(" \\\n  ");
 }
 
+/**
+ * The block a client without a CLI wants, for a server that needs no arguments and
+ * carries no secret.
+ *
+ * `key` because VS Code calls the object `servers` and everyone else calls it
+ * `mcpServers`. A block using the wrong one is ignored with no error at all, which is
+ * the failure this whole screen exists to prevent.
+ *
+ * No `env`. The licence key lives in one file the server reads for itself, which is
+ * what makes this block safe to show on screen and paste into a project.
+ */
+export function jsonBlockFor(key: string, serverCommand: string): string {
+  return `${JSON.stringify({ [key]: { [SERVER_NAME]: { command: serverCommand, args: [] } } }, null, 2)}
+`;
+}
+
 /** The `mcpServers` object Cursor and friends expect. */
 export function jsonBlock(config: AgentReviewSettings): string {
   const env = Object.fromEntries(definedEnv(config.server_env));
@@ -188,17 +199,16 @@ export function configBlock(client: McpClient, config: AgentReviewSettings): str
  * user concludes the feature is broken.
  */
 export function missingFrom(config: AgentReviewSettings | null): string[] {
-  if (!config) return ["the server command", "the licence key"];
+  if (!config) return ["the server command"];
   const missing: string[] = [];
   if (!config.server_command.trim()) missing.push("the server command");
   // Arguments are deliberately NOT required. The shipped build is a single executable
   // that takes none; only a source checkout needs `node …/server.ts`. Demanding a path
   // here would reject the setup every customer actually has.
-  const licence = config.server_env.SPINZERO_LICENCE_KEY?.trim();
-  const dev = config.server_env.SPINZERO_MCP_DEV?.trim();
-  // A development build is a legitimate way to run this and needs no key; saying
-  // otherwise would nag the one person who definitely knows what they are doing.
-  if (!licence && dev !== "1") missing.push("the licence key");
+  // The licence key is NOT required here any more. It lives in one file on the
+  // machine (`~/.spinzero/licence.key`) which the server reads for itself, so a setup
+  // without one in its environment is complete rather than broken — and demanding it
+  // would block the in-app run for every customer who did the normal thing.
   return missing;
 }
 

@@ -14,7 +14,7 @@ interface RunLauncherState {
   menuOpen: boolean;
   /** Which review's setup sheet is up; null = none. */
   setupFor: ReviewKindId | null;
-  /** The "Connect your AI assistant" screen. Lives here rather than in component
+  /** The "Connect your AI agent" screen. Lives here rather than in component
    *  state because it is reachable from the launcher popover and from the BOM
    *  review's own setup sheet, and two copies would drift. */
   connectOpen: boolean;
@@ -52,6 +52,7 @@ export const useRunLauncherStore = create<RunLauncherState>((set, get) => ({
 
   // Closes the popover and any open setup sheet: this screen is a full dialog, and
   // leaving a sheet behind it means dismissing one reveals the other.
-  openConnect: () => set({ menuOpen: false, setupFor: null, connectOpen: true }),
+  // The BOM Review window stays open underneath: its Connect… button comes back to it.
+  openConnect: () => set({ menuOpen: false, connectOpen: true }),
   closeConnect: () => set({ connectOpen: false }),
 }));

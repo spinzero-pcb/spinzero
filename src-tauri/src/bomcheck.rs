@@ -1,18 +1,23 @@
-//! BOM check (free tier): run the deterministic `bom-rules` crate over the crunched
+//! BOM check (free tier): run the deterministic `bom-rules` PROGRAM over the crunched
 //! BOM, then ingest its `findings.json` as review comments.
 //!
-//! Ingestion is the part that matters long-term: the paid detailed review (plan §10)
-//! emits the *same* findings document and lands through this same path — see
-//! `ingest_findings` in lib.rs, which feeds it the service's document. Reconciliation
-//! is per-producer (`source_for`), and the identity key is the finding
-//! `fingerprint`:
+//! A program, not a crate. `bomrules` spawns it and says why; the short version is
+//! that the MCP server runs the same rules over the same BOM, and a free finding must
+//! carry the same fingerprint as the paid finding that refines it.
 //!
-//! - fingerprint already on a comment → leave the thread alone (only the severity is
-//!   refreshed), so replies/assignments survive a re-run;
-//! - fingerprint gone → auto-resolve with `AUTO_RESOLVED_REASON`;
-//! - previously auto-resolved fingerprint returns → re-open it. A comment a *human*
-//!   resolved or dismissed stays that way — re-running a check must never overrule a
-//!   person's judgment.
+//! Ingestion is the part that matters long-term: the detailed review emits the *same*
+//! findings document and lands through this same path — see `ingest_findings` in
+//! lib.rs. The two producers file differently:
+//!
+//! - **The BOM check** keeps one session and reconciles against its own comments, keyed
+//!   by the finding `fingerprint`. A fingerprint already on a comment leaves the thread
+//!   alone (only the severity is refreshed), so replies survive a re-run. A fingerprint
+//!   gone is auto-resolved with `AUTO_RESOLVED_REASON`. An auto-resolved fingerprint
+//!   that returns is re-opened. A comment a *human* resolved or dismissed stays that
+//!   way: re-running a check must never overrule a person's judgment.
+//! - **A detailed review** is a snapshot. Each import gets a session of its own and
+//!   files every finding into it, so the session holds exactly what the report says.
+//!   It touches no other comment: not an earlier review's, and not the BOM check's.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -21,9 +26,9 @@ use serde::Serialize;
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 
-use bom_rules::{config, load, FindingsDoc};
-
+use crate::bomrules;
 use crate::design::BomLine;
+use crate::findings::{Finding, FindingsDoc, MappingPreview, MappingReport};
 use crate::reviews;
 
 /// Reason stamped on comments the checker closed itself — and the marker that lets a
@@ -31,10 +36,8 @@ use crate::reviews;
 pub const AUTO_RESOLVED_REASON: &str = "no longer detected by the BOM check";
 
 /// Which producer filed a comment. Reconciliation is scoped to ONE producer: a
-/// re-run of the free check never auto-resolves a paid finding, and vice versa,
-/// while a finding both tiers detect shares a fingerprint and so shares a comment —
-/// which is how the paid review *refines* the free result instead of duplicating it
-/// (plan §10.4).
+/// re-run of the free check never auto-resolves a detailed-review comment, and a
+/// detailed review touches nothing outside its own session.
 ///
 /// The review comment's `source` follows the pipeline: deterministic rules file as
 /// "rule", the LLM pipeline as "agent". The rail already renders those two
@@ -67,18 +70,23 @@ pub struct CheckOutcome {
 
 /// Findings-schema severity → the review comment vocabulary (four levels).
 ///
-/// The findings contract carries two levels; the comment rail carries four, and its
+/// The findings contract carries three levels; the comment rail carries five, and its
 /// values are persisted on disk, so the two ends stay separate and meet here. The
 /// retired five-level words are still matched so a v1.0 document in a project's
 /// review inbox lands on the colour it was written for instead of on "info".
 fn comment_severity(severity: &str) -> &'static str {
     match severity {
-        // findings v1.2.
+        // findings v1.3.
         "Critical" => "critical",
         "Non-critical" => "info",
+        // A coverage gap: the review could not check this part, so it claims nothing
+        // about the board. It has a level of its own, because filed as "info" it read
+        // as a remark about a part nobody had looked at.
+        "Not verified" => "unverified",
         // v1.1's two words for the same two levels. Named rather than left to the
         // fallback: `Non-critical` and an unrecognised value both landing on "info" by
-        // accident is how a future third level would silently render as a remark.
+        // accident is how a third level silently renders as a remark -- which is why
+        // `Not verified` above is named too, rather than left to fall through.
         "Important" => "critical",
         "Observation" => "info",
         // Legacy (findings v1.0), whose scale had five levels.
@@ -88,48 +96,80 @@ fn comment_severity(severity: &str) -> &'static str {
     }
 }
 
-/// The BOM rows as the rules want them: raw (header, cell) pairs. The crunched BOM
-/// carries every symbol field verbatim in `fields`, which is exactly the shape a real
-/// BOM CSV has — so the same alias mapping works on both.
+/// The crunched BOM as CSV, which is what the rule pack reads.
 ///
-/// Designators, quantity and DNP come from the extractor's own columns rather than
-/// the field map (KiCad's virtual fields are authoritative there), so any raw field
-/// that would map to the same logical field is dropped first to avoid a double map.
-fn rows_from_bom_lines(lines: &[BomLine], profile: &str) -> Vec<load::Row> {
-    let cfg = config::config_for(profile);
-    let shadowed: BTreeSet<String> = ["reference", "quantity", "dnp"]
-        .iter()
-        .flat_map(|logical| load::alias_canon_set(&cfg, logical))
-        .collect();
-
-    // One header set for every row: rules read columns, and a column that exists on
-    // only some rows would make fill rates and "is this column present" meaningless.
+/// A CSV rather than a struct, because the pack is a separate program and a real BOM
+/// is a CSV anyway: the crunched BOM carries every symbol field verbatim in `fields`,
+/// so the same alias mapping serves a file the user exported and a board we crunched.
+///
+/// Designators, quantity and DNP are written from the extractor's own columns rather
+/// than from a symbol field, because KiCad's virtual fields are authoritative there:
+/// a symbol field literally named "Reference" must not shadow the designator list, or
+/// a grouped line would be checked as only its first part. Telling the pack WHICH
+/// columns we own is `--authoritative`; working out which other columns alias to the
+/// same logical field is the alias table's job, and the alias table is inside the pack.
+///
+/// One header set for every row: rules read columns, and a column that exists on only
+/// some rows would make fill rates and "is this column present" meaningless.
+fn csv_from_bom_lines(lines: &[BomLine]) -> String {
     let mut headers: BTreeSet<String> = BTreeSet::new();
     for line in lines {
         for key in line.fields.keys() {
-            if !shadowed.contains(&load::canon_header(key)) {
+            if !OWNED.iter().any(|o| o.eq_ignore_ascii_case(key.trim())) {
                 headers.insert(key.clone());
             }
         }
     }
 
-    lines
+    let mut out = String::new();
+    let columns: Vec<String> = OWNED
         .iter()
-        .map(|line| {
-            let mut row: load::Row = vec![
-                ("Reference".to_string(), line.designators.join(", ")),
-                ("Quantity".to_string(), line.qty.to_string()),
-                ("DNP".to_string(), if line.dnp { "DNP".into() } else { String::new() }),
-            ];
-            for h in &headers {
-                row.push((h.clone(), line.fields.get(h).cloned().unwrap_or_default()));
-            }
-            row
-        })
-        .collect()
+        .map(|s| s.to_string())
+        .chain(headers.iter().cloned())
+        .collect();
+    out.push_str(&csv_row(columns.iter().map(String::as_str)));
+    for line in lines {
+        let dnp = if line.dnp { "DNP" } else { "" };
+        let qty = line.qty.to_string();
+        let refs = line.designators.join(", ");
+        let owned = [refs.as_str(), qty.as_str(), dnp];
+        let cells = owned.into_iter().chain(
+            headers
+                .iter()
+                .map(|h| line.fields.get(h).map(String::as_str).unwrap_or("")),
+        );
+        out.push_str(&csv_row(cells));
+    }
+    out
 }
 
-/// Run the deterministic checks over the crunched BOM. Pure: no project writes.
+/// The columns the app fills itself. Order matters only for readability; the pack
+/// matches on the names, which `bomrules::AUTHORITATIVE` repeats.
+const OWNED: [&str; 3] = ["Reference", "Quantity", "DNP"];
+
+/// One CSV line, RFC 4180: a cell is quoted when it holds a comma, a quote, or a line
+/// break, and an inner quote is doubled. A BOM description is free text and reaches
+/// here verbatim, so this is the difference between a review of the board and a review
+/// of a column that shifted one to the left.
+fn csv_row<'a>(cells: impl Iterator<Item = &'a str>) -> String {
+    let mut line = String::new();
+    for (i, cell) in cells.enumerate() {
+        if i > 0 {
+            line.push(',');
+        }
+        if cell.contains([',', '"', '\n', '\r']) {
+            line.push('"');
+            line.push_str(&cell.replace('"', "\"\""));
+            line.push('"');
+        } else {
+            line.push_str(cell);
+        }
+    }
+    line.push('\n');
+    line
+}
+
+/// Run the deterministic checks over the crunched BOM. No project writes.
 ///
 /// `overrides` is the user's approved column mapping (see `project::BomMapping`).
 /// It is applied here rather than left to the aliases because a mis-mapped column is
@@ -138,17 +178,17 @@ pub fn run_rules(
     lines: &[BomLine],
     profile: &str,
     overrides: &BTreeMap<String, String>,
-) -> (FindingsDoc, load::MappingReport) {
+) -> Result<(FindingsDoc, MappingReport), String> {
     let started = std::time::Instant::now();
-    let rows = rows_from_bom_lines(lines, profile);
-    let (items, mapping) =
-        load::items_from_rows_mapped(&rows, &config::config_for(profile), overrides);
-    let mut doc = bom_rules::run(&items, profile, &mapping);
+    let (mut doc, mapping) = bomrules::run(&csv_from_bom_lines(lines), profile, overrides)?;
+    // Stamped here, not in the pack: the pack has no clock, so that its fixture output
+    // is byte-stable. The duration is the WHOLE check, spawn included, because that is
+    // what the user waited for.
     doc.generated_ts = OffsetDateTime::now_utc()
         .format(&Rfc3339)
         .unwrap_or_default();
     doc.stats.duration_ms = started.elapsed().as_millis() as u64;
-    (doc, mapping)
+    Ok((doc, mapping))
 }
 
 /// The column mapping as the approval dialog shows it, plus whether the user has
@@ -157,26 +197,21 @@ pub fn run_rules(
 #[derive(Serialize)]
 pub struct MappingView {
     #[serde(flatten)]
-    pub preview: load::MappingPreview,
+    pub preview: MappingPreview,
     pub approved: bool,
 }
 
-/// Build the approval dialog's view of the mapping for the crunched BOM. Pure.
+/// Build the approval dialog's view of the mapping for the crunched BOM.
 pub fn mapping_view(
     lines: &[BomLine],
     profile: &str,
     saved: Option<&BTreeMap<String, String>>,
-) -> MappingView {
-    let rows = rows_from_bom_lines(lines, profile);
+) -> Result<MappingView, String> {
     let empty = BTreeMap::new();
-    MappingView {
-        preview: load::mapping_preview(
-            &rows,
-            &config::config_for(profile),
-            saved.unwrap_or(&empty),
-        ),
+    Ok(MappingView {
+        preview: bomrules::mapping(&csv_from_bom_lines(lines), profile, saved.unwrap_or(&empty))?,
         approved: saved.is_some(),
-    }
+    })
 }
 
 /// Which tier a session belongs to. It leads the title because the two producers
@@ -187,15 +222,16 @@ fn session_label(pipeline: &str) -> &'static str {
     if pipeline == "bom-rules" { "BOM check" } else { "Detailed BOM review" }
 }
 
-/// Title for a newly created session: the tier plus the day it started.
+/// Title for a newly created session: the tier plus the day it started. A detailed
+/// review also carries the time, because each one is a session of its own and two can
+/// land on one day.
 fn session_title(now: OffsetDateTime, pipeline: &str) -> String {
-    format!(
-        "{} {:04}-{:02}-{:02}",
-        session_label(pipeline),
-        now.year(),
-        now.month() as u8,
-        now.day()
-    )
+    let day = format!("{:04}-{:02}-{:02}", now.year(), now.month() as u8, now.day());
+    if pipeline == "bom-rules" {
+        format!("{} {day}", session_label(pipeline))
+    } else {
+        format!("{} {day} {:02}:{:02}", session_label(pipeline), now.hour(), now.minute())
+    }
 }
 
 /// Find (or create) the session findings are filed into: the newest still-active
@@ -216,6 +252,12 @@ fn ensure_session(pcbreview: &Path, user: &str, label: &str, title: &str) -> Res
     {
         return Ok(existing.id.clone());
     }
+    create_session(pcbreview, user, title)
+}
+
+/// Create a session and return its id.
+fn create_session(pcbreview: &Path, user: &str, title: &str) -> Result<String, String> {
+    let before = reviews::list_sessions(pcbreview);
     let known: BTreeSet<&str> = before.iter().map(|s| s.id.as_str()).collect();
     let sessions = reviews::apply_session_action(
         pcbreview,
@@ -232,13 +274,13 @@ fn ensure_session(pcbreview: &Path, user: &str, label: &str, title: &str) -> Res
         .iter()
         .find(|s| !known.contains(s.id.as_str()))
         .map(|s| s.id.clone())
-        .ok_or_else(|| "could not create the BOM check session".to_string())
+        .ok_or_else(|| "could not create the review session".to_string())
 }
 
 /// The comment body a finding becomes: the description on its own. The rule title
 /// and the suggested fix are deliberately left out — the detail already says what is
 /// wrong, and a reviewer reads a comment, not a rule report.
-fn body_of(finding: &bom_rules::Finding) -> String {
+fn body_of(finding: &Finding) -> String {
     if finding.detail.is_empty() {
         finding.title.clone()
     } else {
@@ -399,8 +441,9 @@ pub fn validated_doc(value: serde_json::Value) -> Result<FindingsDoc, String> {
     // Every version we have ever written, because these documents live in the user's
     // project folder and a review from six months ago must still open. 1.2 renamed the
     // severity words; `Severity::parse` still accepts the 1.0/1.1 spellings, so an old
-    // document renders rather than failing to load.
-    const SUPPORTED: &[&str] = &["1.0", "1.1", "1.2"];
+    // document renders rather than failing to load. 1.3 adds the `Not verified`
+    // severity, and it is the version the MCP harness writes into the inbox.
+    const SUPPORTED: &[&str] = &["1.0", "1.1", "1.2", "1.3"];
     if !SUPPORTED.contains(&doc.schema_version.as_str()) {
         return Err(format!(
             "findings schema_version {} is not supported by this app (expected one of {})",
@@ -427,45 +470,43 @@ pub fn ingest(
     user: &str,
     base_revision: Option<String>,
     doc: FindingsDoc,
-    mapping: &load::MappingReport,
+    mapping: &MappingReport,
 ) -> Result<CheckOutcome, String> {
-    let now = OffsetDateTime::now_utc();
-    let session_id = ensure_session(
-        pcbreview,
-        user,
-        session_label(&doc.pipeline),
-        &session_title(now, &doc.pipeline),
-    )?;
+    let now = OffsetDateTime::now_local().unwrap_or_else(|_| OffsetDateTime::now_utc());
+    // A detailed review is a snapshot of one run, so it gets a session of its own. When
+    // it joined the last one, MC-02's session read "109" beside a report of 91: the
+    // earlier review's 20 comments, auto-resolved, plus this one's.
+    let snapshot = doc.pipeline != "bom-rules";
+    let title = session_title(now, &doc.pipeline);
+    let session_id = if snapshot {
+        create_session(pcbreview, user, &title)?
+    } else {
+        ensure_session(pcbreview, user, session_label(&doc.pipeline), &title)?
+    };
 
     let source = source_for(&doc.pipeline);
     let existing = reviews::list_comments(pcbreview);
 
-    // Two different scopes, for two different questions.
-    //
-    // `filed_by_a_checker` — every machine-filed comment, whichever tier filed it.
-    // A finding whose fingerprint is already here is the SAME defect, so it updates
-    // that comment instead of filing a second one: this is what makes the paid review
-    // visibly *refine* the free result rather than double it (plan §10.4).
-    let filed_by_a_checker: BTreeMap<String, &reviews::Comment> = existing
-        .iter()
-        .filter(|c| c.source == "rule" || c.source == "agent")
-        .filter_map(|c| c.fingerprint.clone().map(|f| (f, c)))
-        .collect();
-
-    // `mine` — comments THIS producer filed. Only these may be auto-resolved: a tier
-    // must never close a comment it could not have produced (the free rules cannot
-    // re-derive a judgment finding, so a free re-run must not "no longer detect" it).
-    let mine: BTreeMap<String, &reviews::Comment> = existing
-        .iter()
-        .filter(|c| {
-            c.predicate
-                .as_ref()
-                .and_then(|p| p.get("pipeline"))
-                .and_then(|v| v.as_str())
-                == Some(doc.pipeline.as_str())
-        })
-        .filter_map(|c| c.fingerprint.clone().map(|f| (f, c)))
-        .collect();
+    // `mine` — the comments this run reconciles against. For the BOM check, every
+    // comment it filed before. For a detailed review, none: its session is new, and it
+    // must not update a BOM-check comment or close an earlier review's. Only these may
+    // be updated or auto-resolved: a tier never closes a comment it could not have
+    // produced.
+    let mine: BTreeMap<String, &reviews::Comment> = if snapshot {
+        BTreeMap::new()
+    } else {
+        existing
+            .iter()
+            .filter(|c| {
+                c.predicate
+                    .as_ref()
+                    .and_then(|p| p.get("pipeline"))
+                    .and_then(|v| v.as_str())
+                    == Some(doc.pipeline.as_str())
+            })
+            .filter_map(|c| c.fingerprint.clone().map(|f| (f, c)))
+            .collect()
+    };
 
     // Every action this run takes, applied as one log write and one fold at the end.
     // Filing them one at a time rewrote the whole event log and re-folded every log per
@@ -488,7 +529,7 @@ pub fn ingest(
             "confidence": finding.confidence,
         });
 
-        match filed_by_a_checker.get(&finding.fingerprint) {
+        match mine.get(&finding.fingerprint) {
             Some(comment) => {
                 let id = comment.id.clone();
                 // A person's resolve/dismiss stands; only our own auto-resolve reopens.
@@ -579,7 +620,7 @@ pub fn ingest(
 
 /// Where a finding hangs in the review UI: on its first BOM row, or on the BOM as a
 /// whole for a document-level finding ("this BOM has no lifecycle column").
-fn anchor_for(finding: &bom_rules::Finding) -> reviews::Anchor {
+fn anchor_for(finding: &Finding) -> reviews::Anchor {
     let refdes = finding
         .anchors
         .iter()
@@ -642,13 +683,13 @@ mod tests {
         // designator list, or a grouped line would check only its first part.
         let mut l = line(1, &["R1", "R2"], "10k", "RC0402FR-0710KL");
         l.fields.insert("Reference".into(), "WRONG".into());
-        let rows = rows_from_bom_lines(&[l], "default");
-        let reference: Vec<&String> = rows[0]
-            .iter()
-            .filter(|(h, _)| h == "Reference")
-            .map(|(_, v)| v)
-            .collect();
-        assert_eq!(reference, vec![&"R1, R2".to_string()]);
+        let csv = csv_from_bom_lines(&[l]);
+        let mut lines = csv.lines();
+        let header = lines.next().expect("a header row");
+        let row = lines.next().expect("a data row");
+        assert!(header.starts_with("Reference,Quantity,DNP"), "{header}");
+        assert!(row.starts_with("\"R1, R2\",2,"), "{row}");
+        assert_eq!(header.matches("Reference").count(), 1, "no second Reference column");
     }
 
     #[test]
@@ -661,11 +702,20 @@ mod tests {
             line(1, &["R1"], "10k", "RC0402FR-0710KL"),
             line(2, &["R1"], "4k7", "RC0402FR-074K7L"),
         ];
-        let (doc, mapping) = run_rules(&broken, "default", &BTreeMap::new());
+        let (doc, mapping) = run_rules(&broken, "default", &BTreeMap::new()).expect("the rule pack ran");
         assert!(doc
             .findings
             .iter()
             .any(|f| f.rule_id.as_deref() == Some("bom.duplicate_refdes")));
+        // By fingerprint, not by "the first critical comment". Several rules fire on
+        // this BOM and the store does not promise an order, so picking by position
+        // tested the order rather than the finding.
+        let dup_fp = doc
+            .findings
+            .iter()
+            .find(|f| f.rule_id.as_deref() == Some("bom.duplicate_refdes"))
+            .map(|f| f.fingerprint.clone())
+            .expect("the duplicate is in the document");
         let out = ingest(&pcb, "alice", Some("r1".into()), doc, &mapping).expect("ingest");
         assert!(out.filed > 0);
         let filed_first = out.filed;
@@ -676,11 +726,8 @@ mod tests {
         let dup = out
             .comments
             .iter()
-            .find(|c| {
-                c.predicate.as_ref().and_then(|p| p.get("rule_id")).and_then(|v| v.as_str())
-                    == Some("bom.duplicate_refdes")
-            })
-            .expect("the duplicate-designator comment is filed");
+            .find(|c| c.fingerprint.as_deref() == Some(dup_fp.as_str()))
+            .expect("the duplicate was filed as a comment");
         assert_eq!(dup.severity.as_deref(), Some("critical"));
         assert_eq!(dup.source, "rule");
         assert_eq!(dup.view, "bom");
@@ -688,7 +735,7 @@ mod tests {
         assert!(dup.fingerprint.is_some());
 
         // Re-running an unchanged BOM must not duplicate anything.
-        let (doc, mapping) = run_rules(&broken, "default", &BTreeMap::new());
+        let (doc, mapping) = run_rules(&broken, "default", &BTreeMap::new()).expect("the rule pack ran");
         let again = ingest(&pcb, "alice", Some("r1".into()), doc, &mapping).expect("re-ingest");
         assert_eq!(again.filed, 0, "a re-run must not re-file findings");
         assert_eq!(again.unchanged, filed_first);
@@ -698,7 +745,7 @@ mod tests {
             line(1, &["R1"], "10k", "RC0402FR-0710KL"),
             line(2, &["R2"], "4k7", "RC0402FR-074K7L"),
         ];
-        let (doc, mapping) = run_rules(&fixed, "default", &BTreeMap::new());
+        let (doc, mapping) = run_rules(&fixed, "default", &BTreeMap::new()).expect("the rule pack ran");
         let out = ingest(&pcb, "alice", Some("r2".into()), doc, &mapping).expect("ingest fixed");
         assert!(out.auto_resolved > 0);
         let dup = out
@@ -710,7 +757,7 @@ mod tests {
         assert_eq!(dup.reason.as_deref(), Some(AUTO_RESOLVED_REASON));
 
         // Break it again: our own auto-resolve reopens.
-        let (doc, mapping) = run_rules(&broken, "default", &BTreeMap::new());
+        let (doc, mapping) = run_rules(&broken, "default", &BTreeMap::new()).expect("the rule pack ran");
         let out = ingest(&pcb, "alice", Some("r3".into()), doc, &mapping).expect("ingest broken");
         assert!(out.reopened > 0);
         assert_eq!(out.filed, 0, "reopen, never re-file");
@@ -742,7 +789,7 @@ mod tests {
             line(1, &["R1"], "10k", "RC0402FR-0710KL"),
             line(2, &["R1"], "4k7", "RC0402FR-074K7L"),
         ];
-        let (doc, mapping) = run_rules(&broken, "default", &BTreeMap::new());
+        let (doc, mapping) = run_rules(&broken, "default", &BTreeMap::new()).expect("the rule pack ran");
         let out = ingest(&pcb, "alice", None, doc, &mapping).expect("ingest");
         assert_eq!(out.session_id, yesterday, "the open BOM check session is reused");
         assert_eq!(
@@ -763,14 +810,14 @@ mod tests {
             },
         )
         .expect("complete");
-        let (doc, mapping) = run_rules(&broken, "default", &BTreeMap::new());
+        let (doc, mapping) = run_rules(&broken, "default", &BTreeMap::new()).expect("the rule pack ran");
         let out = ingest(&pcb, "alice", None, doc, &mapping).expect("ingest after completing");
         assert_ne!(out.session_id, yesterday, "a completed session is not reused");
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// A findings document as the paid service would send it: same fingerprint as a
-    /// free-tier finding, higher confidence, plus a judgment finding of its own.
+    /// A findings document as a detailed review would send it: same fingerprint as a
+    /// BOM check finding, higher confidence, plus a judgment finding of its own.
     fn paid_doc(free: &FindingsDoc) -> FindingsDoc {
         let mut doc = free.clone();
         doc.pipeline = "bom-detailed".into();
@@ -778,7 +825,7 @@ mod tests {
         for f in &mut doc.findings {
             f.confidence = "High".into();
         }
-        doc.findings.push(bom_rules::Finding {
+        doc.findings.push(Finding {
             id: "B99".into(),
             section: "BOM · Judgment".into(),
             severity: "Important".into(),
@@ -788,14 +835,14 @@ mod tests {
             detail: String::new(),
             evidence: vec![],
             fix: String::new(),
-            anchors: vec![bom_rules::Anchor { kind: "bom_row".into(), refdes: vec!["R1".into()] }],
+            anchors: vec![crate::findings::Anchor { kind: "bom_row".into(), refdes: vec!["R1".into()] }],
             fingerprint: "judgment0000fingerprint"[..16].to_string(),
         });
         doc
     }
 
     #[test]
-    fn the_paid_review_refines_the_free_comment_instead_of_duplicating_it() {
+    fn each_detailed_review_files_every_finding_into_a_session_of_its_own() {
         let root = temp_root("tiers");
         let pcb = root.join(".pcbreview");
         let broken = vec![
@@ -803,43 +850,66 @@ mod tests {
             line(2, &["R1"], "4k7", "RC0402FR-074K7L"),
         ];
 
-        // Free tier files its findings.
-        let (free, mapping) = run_rules(&broken, "default", &BTreeMap::new());
+        // The BOM check files its findings.
+        let (free, mapping) = run_rules(&broken, "default", &BTreeMap::new()).expect("the rule pack ran");
         let free_count = free.findings.len();
-        let out = ingest(&pcb, "alice", None, free.clone(), &mapping).expect("free ingest");
-        assert_eq!(out.filed, free_count);
+        let free_out = ingest(&pcb, "alice", None, free.clone(), &mapping).expect("free ingest");
+        assert_eq!(free_out.filed, free_count);
 
-        // The paid review reports the same defects (same fingerprints) plus one of
-        // its own: only the new one is filed, the rest update in place.
+        // A detailed review reports the same defects (same fingerprints) plus one of its
+        // own. Every one is filed, into a new session, so the session matches the report.
         let paid = paid_doc(&free);
-        let out = ingest(&pcb, "alice", None, paid, &load::MappingReport::default())
-            .expect("paid ingest");
-        assert_eq!(out.filed, 1, "only the judgment finding is new");
-        assert_eq!(out.unchanged, free_count, "the rule findings refine the existing comments");
-        assert_eq!(
-            out.comments.iter().filter(|c| c.fingerprint.is_some()).count(),
-            free_count + 1,
-            "no duplicate comment for a defect both tiers found"
-        );
-        let judgment = out
+        let paid_count = paid.findings.len();
+        let first = ingest(&pcb, "alice", None, paid.clone(), &MappingReport::default()).expect("paid ingest");
+        assert_eq!(first.filed, paid_count, "every finding in the report is a comment");
+        assert_eq!(first.unchanged, 0, "no BOM check comment is updated in its place");
+        assert_ne!(first.session_id, free_out.session_id);
+        let in_session = |out: &CheckOutcome, id: &str| {
+            out.comments.iter().filter(|c| c.session_id.as_deref() == Some(id)).count()
+        };
+        assert_eq!(in_session(&first, &first.session_id), paid_count);
+        let judgment = first
             .comments
             .iter()
-            .find(|c| c.source == "agent")
+            .find(|c| c.source == "agent" && c.fingerprint.as_deref() == Some(&paid.findings[paid_count - 1].fingerprint))
             .expect("the judgment finding filed as an agent comment");
         assert_eq!(judgment.view, "bom");
 
-        // A later FREE run must not close the judgment finding: the rules cannot
+        // A second detailed review is a second session. It closes nothing in the first.
+        let second = ingest(&pcb, "alice", None, free_as_detailed(&free), &MappingReport::default())
+            .expect("second paid ingest");
+        assert_ne!(second.session_id, first.session_id);
+        assert_eq!(second.auto_resolved, 0);
+        assert!(
+            second
+                .comments
+                .iter()
+                .filter(|c| c.session_id.as_deref() == Some(first.session_id.as_str()))
+                .all(|c| c.status == "open"),
+            "an earlier review's comments stay as it left them"
+        );
+
+        // A later BOM check must not close a detailed-review comment: the rules cannot
         // produce it, so "no longer detected" would be a lie.
-        let (free_again, mapping) = run_rules(&broken, "default", &BTreeMap::new());
+        let (free_again, mapping) = run_rules(&broken, "default", &BTreeMap::new()).expect("the rule pack ran");
         let out = ingest(&pcb, "alice", None, free_again, &mapping).expect("free re-ingest");
         assert_eq!(out.auto_resolved, 0);
-        let judgment = out
-            .comments
-            .iter()
-            .find(|c| c.source == "agent")
-            .expect("still there");
-        assert_eq!(judgment.status, "open");
+        assert_eq!(out.session_id, free_out.session_id, "the BOM check keeps its one session");
+        assert!(out.comments.iter().filter(|c| c.source == "agent").all(|c| c.status == "open"));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The BOM check's own findings, as a detailed review would report them.
+    fn free_as_detailed(free: &FindingsDoc) -> FindingsDoc {
+        let mut doc = free.clone();
+        doc.pipeline = "bom-detailed".into();
+        doc
+    }
+
+    #[test]
+    fn a_not_verified_finding_has_a_level_of_its_own() {
+        assert_eq!(comment_severity("Not verified"), "unverified");
+        assert_eq!(comment_severity("Non-critical"), "info");
     }
 
     #[test]
@@ -877,6 +947,19 @@ mod tests {
     }
 
     #[test]
+    fn the_harness_document_version_imports_and_an_unknown_one_does_not() {
+        let doc = |v: &str| {
+            serde_json::json!({
+                "schema_version": v, "engine_version": "x", "pipeline": "bom-detailed",
+                "profile": "default", "findings": [], "bom_audit": [], "stats": {}
+            })
+        };
+        assert!(validated_doc(doc("1.3")).is_ok(), "the harness writes 1.3");
+        let err = validated_doc(doc("9.9")).expect_err("an unknown version is refused");
+        assert!(err.contains("not supported"), "{err}");
+    }
+
+    #[test]
     fn the_inbox_cannot_be_talked_out_of_its_own_folder() {
         let root = temp_root("inbox_escape");
         std::fs::create_dir_all(inbox_dir(&root)).expect("inbox");
@@ -898,7 +981,7 @@ mod tests {
             line(1, &["R1"], "10k", "RC0402FR-0710KL"),
             line(2, &["R1"], "4k7", "RC0402FR-074K7L"),
         ];
-        let (doc, mapping) = run_rules(&broken, "default", &BTreeMap::new());
+        let (doc, mapping) = run_rules(&broken, "default", &BTreeMap::new()).expect("the rule pack ran");
         let out = ingest(&pcb, "alice", None, doc, &mapping).expect("ingest");
         let id = out.comments[0].id.clone();
 
@@ -908,7 +991,7 @@ mod tests {
         action.reason = Some("intentional, variant build".into());
         reviews::apply_action(&pcb, "alice", action).expect("dismiss");
 
-        let (doc, mapping) = run_rules(&broken, "default", &BTreeMap::new());
+        let (doc, mapping) = run_rules(&broken, "default", &BTreeMap::new()).expect("the rule pack ran");
         let out = ingest(&pcb, "alice", None, doc, &mapping).expect("re-ingest");
         let c = out.comments.iter().find(|c| c.id == id).expect("still there");
         assert_eq!(c.status, "dismissed", "a person's judgment is not overruled");

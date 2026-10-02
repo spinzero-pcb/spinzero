@@ -43,3 +43,7 @@ product-strategy.html
 gldev.html
 change-report.html
 feedback
+
+# Sidecar binaries staged for the Tauri bundler by the release script. Three of the
+# four are built from the closed repo and none of them is source.
+src-tauri/binaries/

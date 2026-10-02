@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { ipc } from "../lib/ipc";
+import { SEVERITY_WEIGHT } from "../lib/severity";
 import { useDesignStore } from "../stores/designStore";
 import { useSelectionStore } from "../stores/selectionStore";
 import { useViewStore } from "../stores/viewStore";
@@ -100,8 +101,6 @@ function coveredRefs(c: Comment): string[] {
   return refs;
 }
 
-/** Severity order, so the row marker shows the worst comment on a line. */
-const SEVERITY_RANK: Record<CommentSeverity, number> = { info: 0, minor: 1, major: 2, critical: 3 };
 
 /** The leading comment gutter's width — mirrors .bom-cmt-col in app.css. */
 const CMT_COL_W = 24;
@@ -449,13 +448,23 @@ export function BomTab() {
         // severe one wins (oldest breaks a tie) — a critical must never hide behind an info.
         const better =
           !prev ||
-          SEVERITY_RANK[severity] > SEVERITY_RANK[prev.severity] ||
-          (SEVERITY_RANK[severity] === SEVERITY_RANK[prev.severity] && number < prev.number);
+          SEVERITY_WEIGHT[severity] > SEVERITY_WEIGHT[prev.severity] ||
+          (SEVERITY_WEIGHT[severity] === SEVERITY_WEIGHT[prev.severity] && number < prev.number);
         if (better) m.set(ref, { id: c.id, number, status, severity });
       }
     }
     return m;
   }, [comments, activeSessionId, indexes]);
+
+  // The designators of the comment whose thread is open. Their row stays marked for as
+  // long as the thread is open, so the row a review card landed on is still findable
+  // after the landing flash has faded.
+  const openThreadId = useReviewStore((s) => s.openThreadId);
+  const targetRefs = useMemo(() => {
+    const c = openThreadId ? comments.find((x) => x.id === openThreadId) : undefined;
+    if (!c || c.view !== "bom" || c.anchor.type !== "component") return null;
+    return new Set(coveredRefs(c));
+  }, [openThreadId, comments]);
 
   const rowComment = (l: BomLine) => {
     for (const d of l.designators) {
@@ -981,6 +990,7 @@ export function BomTab() {
                 typeof selection.ref === "string" &&
                 l.designators.includes(selection.ref);
               const statusCls = r.status ? ` bom-${r.status}` : "";
+              const target = !child && targetRefs !== null && l.designators.some((d) => targetRefs.has(d));
               const flash =
                 !child &&
                 flashKey !== null &&
@@ -1009,7 +1019,7 @@ export function BomTab() {
                       else rowRefs.current.delete(k);
                     }
                   }}
-                  className={`${active ? "active" : ""}${l.dnp ? " dnp" : ""}${statusCls}${flash}${child ? " bom-child" : ""}`}
+                  className={`${active ? "active" : ""}${target ? " bom-target" : ""}${l.dnp ? " dnp" : ""}${statusCls}${flash}${child ? " bom-child" : ""}`}
                   onClick={(e) => {
                     if (useReviewStore.getState().armed) return addComment(l, r.synthetic, e);
                     if (r.changeIds.length > 0) focusChange(r.changeIds[0]);

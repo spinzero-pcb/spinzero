@@ -1,11 +1,17 @@
 import { useEffect } from "react";
 import { useBomCheckStore } from "../stores/bomCheckStore";
-import { isRunning, useDetailedReviewStore } from "../stores/detailedReviewStore";
+import { isAgentRunning, useAgentReviewStore } from "../stores/agentReviewStore";
 import { useBomMappingStore } from "../stores/bomMappingStore";
 import { useRunLauncherStore } from "../stores/runLauncherStore";
 import { useReviewStore } from "../stores/reviewStore";
-import { executionSummary, severityCounts } from "../lib/findings";
-import type { FindingSeverity } from "../lib/findings";
+import {
+  BOM_PROFILES,
+  executionSummary,
+  isClaim,
+  resolveBomProfile,
+  reviewTallies,
+  UNSTATED_BOM_PROFILE,
+} from "../lib/findings";
 import type { CommentSeverity } from "../lib/types";
 import { IconChecklist } from "./icons";
 
@@ -13,26 +19,23 @@ import { IconChecklist } from "./icons";
 //
 // The findings themselves are NOT rendered here: they are filed as review comments,
 // so they appear in the review rail and as per-row chips in the table. This strip is
-// one button (opens the BOM Review window) and the result as clickable severity
-// chips. Everything else — application, mapping, depth — lives in that window, and
-// progress and failures live in the footer, which is on screen in every view.
+// one button (opens the BOM Review window) and the result as clickable chips.
+// Everything else — application, mapping, depth — lives in that window, and progress
+// and failures live in the footer, which is on screen in every view.
+//
+// **What is a chip and what is a tooltip.** A chip is a number that changes what the
+// user does next: fix something (Critical, Non-critical), distrust a clean result
+// (not verified), or fix the setup (no application, unread columns). A chip that
+// would read zero is not shown. Facts ABOUT the run — what it ran as, what changed
+// since last time, how many rows it touched — are in the chips' tooltip.
 
 /** Findings-schema severity → the review UI's four-level severity vocabulary, so a
  *  finding chip is the same colour here as its comment is in the rail. Findings carry
  *  two levels and the rail's are persisted on disk, so they meet at the two ends of
  *  the rail's scale rather than in the middle. Mirrors `comment_severity` in
  *  `bomcheck.rs` — change both together. */
-const SEVERITY_ROLE: Record<FindingSeverity, CommentSeverity> = {
-  Critical: "critical",
-  "Non-critical": "info",
-};
-
-/** One chip per findings severity, labelled in the findings vocabulary. Clicking one
- *  filters the rail by the comment severity it maps to. */
-const SEVERITY_LABEL: Record<FindingSeverity, string> = {
-  Critical: "Critical",
-  "Non-critical": "Non-critical",
-};
+const CRITICAL_ROLE: CommentSeverity = "critical";
+const NONCRITICAL_ROLE: CommentSeverity = "info";
 
 export function BomCheckBar() {
   const running = useBomCheckStore((s) => s.running);
@@ -43,7 +46,7 @@ export function BomCheckBar() {
   const error = useBomCheckStore((s) => s.error);
   const run = useBomCheckStore((s) => s.run);
   // The detailed run's progress is in the footer; here the button just says it is busy.
-  const detailedBusy = useDetailedReviewStore((s) => isRunning(s.phase));
+  const detailedBusy = useAgentReviewStore((s) => isAgentRunning(s.phase));
 
   // Mod+Shift+B runs the check while the BOM tab is mounted. Scoped to this component
   // so it can never fire from the schematic/PCB canvases, where it would mean nothing.
@@ -75,11 +78,10 @@ export function BomCheckBar() {
     useRunLauncherStore.getState().openSetup("bom");
   }
 
-  // `severityCounts` walks SEVERITY_ORDER and drops empty levels, so chip order stays
-  // worst-first and a clean run shows no chips at all.
-  const counts = doc ? severityCounts(doc) : [];
-  // What changed since the last run and which content produced it: useful when two
-  // runs disagree, noise the rest of the time — so it is the result's tooltip.
+  // Counted by predicate — see `reviewTallies`. "Not verified" is its own number: a
+  // review with blind spots and no findings must not read as a pass.
+  const tallies = reviewTallies(doc);
+  const unstated = doc ? profileLabel(doc.profile) === null : false;
   const execution = executionSummary(doc);
   const delta = summary
     ? [
@@ -90,7 +92,17 @@ export function BomCheckBar() {
         .filter(Boolean)
         .join(" · ")
     : "";
-  const resultTitle = [delta, execution?.text].filter(Boolean).join("\n") || undefined;
+  const about = doc
+    ? [
+        `${rowsWithFindings(doc)} of ${doc.stats.item_count} rows have findings`,
+        profileLabel(doc.profile) ? `Ran as ${profileLabel(doc.profile)}` : "",
+        delta,
+        execution?.text ?? "",
+      ]
+        .filter(Boolean)
+        .join("\n")
+    : "";
+  const clean = doc && tallies.critical === 0 && tallies.nonCritical === 0;
 
   return (
     <div className="bom-check-bar">
@@ -104,21 +116,46 @@ export function BomCheckBar() {
         {running ? "Checking…" : detailedBusy ? "Review running…" : "Review BOM"}
       </button>
 
-      {doc && counts.length === 0 && (
-        <span className="bom-check-count ok" title={resultTitle}>
+      {clean && (
+        <span className="bom-check-count ok" title={about}>
           No issues found
         </span>
       )}
-      {counts.map((c) => (
+      {tallies.critical > 0 && (
         <button
-          key={c.severity}
-          className={`bom-check-sev sev-${SEVERITY_ROLE[c.severity]}`}
-          title={`Show in the review panel${resultTitle ? `\n${resultTitle}` : ""}`}
-          onClick={() => showInReview(SEVERITY_ROLE[c.severity])}
+          className={`bom-check-sev sev-${CRITICAL_ROLE}`}
+          title={`Show in the review panel\n${about}`}
+          onClick={() => showInReview(CRITICAL_ROLE)}
         >
-          {c.n} {SEVERITY_LABEL[c.severity]}
+          {tallies.critical} Critical
         </button>
-      ))}
+      )}
+      {tallies.nonCritical > 0 && (
+        <button
+          className={`bom-check-sev sev-${NONCRITICAL_ROLE}`}
+          title={`Show in the review panel\n${about}`}
+          onClick={() => showInReview(NONCRITICAL_ROLE)}
+        >
+          {tallies.nonCritical} Non-critical
+        </button>
+      )}
+      {tallies.notVerified > 0 && (
+        <span
+          className="bom-check-gaps some"
+          title="Checks this review could not make. Open “Not fully verified” for the list."
+        >
+          {tallies.notVerified} not verified
+        </span>
+      )}
+      {unstated && (
+        <button
+          className="btn-ghost bom-check-warn"
+          title="The review ran with no end application, so it could not tell how severe a gap is. Click to set one."
+          onClick={() => useRunLauncherStore.getState().openSetup("bom")}
+        >
+          No application
+        </button>
+      )}
 
       {/* A column the checker couldn't read looks like missing data to every rule
           that needs it. One click opens the mapping to fix it. */}
@@ -138,4 +175,27 @@ export function BomCheckBar() {
       )}
     </div>
   );
+}
+
+/** How many BOM rows carry at least one finding. Counted over the anchors, because a
+ *  finding can name several designators and several findings can land on one row.
+ *
+ *  Claims only. A row whose only entry is "we could not check this part" has no
+ *  finding on it, and counting it here would report a blind spot as a defect. */
+function rowsWithFindings(doc: { findings: { severity: string; anchors: { refdes?: string[] }[] }[] }): number {
+  const rows = new Set<string>();
+  for (const f of doc.findings.filter(isClaim)) {
+    for (const a of f.anchors) for (const r of a.refdes ?? []) rows.add(r);
+  }
+  return rows.size;
+}
+
+/** The end application in the user's words, or null when none was stated. */
+function profileLabel(profile: string): string | null {
+  if (!profile) return null;
+  // Through the resolver, so a document that stored the retired `automotive` id still
+  // reads as a label rather than as a raw word from a JSON file.
+  const id = resolveBomProfile(profile);
+  if (id === UNSTATED_BOM_PROFILE) return null;
+  return BOM_PROFILES.find((p) => p.id === id)?.label ?? id;
 }

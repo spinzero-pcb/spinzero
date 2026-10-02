@@ -10,7 +10,7 @@ import { IconChevron, IconSheet } from "../icons";
 
 // The schematic sheet hierarchy (KiCad-style: nested sheets, page numbers). Moved
 // off the LEFT Explorer into the per-view RIGHT panel as the `Sheets` tab — the
-// left rail is now the global Review surface (docs/phase2-ui-plan.md §1).
+// left rail is now the global Review surface (docs/archive/phase2-ui-plan.md §1).
 
 interface SheetNode {
   sheet: SheetInfo;
