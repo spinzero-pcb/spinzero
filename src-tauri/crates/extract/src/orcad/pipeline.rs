@@ -80,7 +80,7 @@ pub fn run_design(project: &Path, out_dir: &Path, emit: &mut dyn FnMut(Msg)) -> 
     )));
 
     // Variants (CIS), when the design defines any.
-    source.variants = super::design::variants(&l.doc, &model.components);
+    source.variants = super::design::variants(&l.doc, &sheets, &mut model.components);
 
     // The board, when one pairs with this project.
     let mut pcb_svgs: Vec<serde_json::Value> = Vec::new();

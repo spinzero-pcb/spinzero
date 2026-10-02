@@ -26,10 +26,35 @@ pub const SECTION_PARAM: &str = "orcad_section";
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct VariantInfo {
     pub name: String,
-    /// Designators the variant leaves unfitted.
+    /// Designators the variant leaves unfitted: the members of the part
+    /// groups it selects whose name says do-not-fit (see [`is_dnf_group`]).
     pub not_fitted: Vec<String>,
     /// Designator -> property overrides the variant applies.
     pub overrides: BTreeMap<String, BTreeMap<String, String>>,
+    /// The part groups the variant selects, as stored.
+    pub groups: Vec<VariantGroup>,
+    /// Occurrence ids the CIS data names that no part in the design carries
+    /// (CIS data left behind by deleted parts).
+    pub stale_ids: usize,
+}
+
+/// One CIS part group, its members resolved to designators.
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct VariantGroup {
+    pub name: String,
+    /// Members whose stored state is 1.
+    pub members: Vec<String>,
+    /// Members whose stored state is 0. What the state means beyond the
+    /// do-not-fit groups is not established (see the notes).
+    pub state_zero: Vec<String>,
+}
+
+/// A group whose name marks its parts as not fitted. Measured on TI's
+/// LAUNCHXL-CC1310: the members of its `DNM` group are exactly the parts TI's
+/// released BOM lists as DNM.
+pub fn is_dnf_group(name: &str) -> bool {
+    let n = name.trim().to_ascii_uppercase().replace(['_', '-', ' '], "");
+    matches!(n.as_str(), "DNM" | "DNP" | "DNS" | "DNI" | "DNF" | "DONOTMOUNT" | "DONOTPOPULATE" | "DONOTSTUFF" | "DONOTFIT" | "NOTFITTED")
 }
 
 /// The stable handle of a placed object on a page.
@@ -268,7 +293,68 @@ pub fn build_components(
     group_parts(placements)
 }
 
-/// Variants the design defines (CIS). None are read yet.
-pub fn variants(_doc: &CaptureDoc, _components: &[Component]) -> Vec<VariantInfo> {
-    Vec::new()
+/// Parameter naming the CIS variants that leave a part off. The base design
+/// (every part fitted) stays what `components` describes, as on the Altium
+/// path.
+pub const NOT_FITTED_PARAM: &str = "orcad_not_fitted_in";
+
+/// Occurrence id -> designator, for every placed part in every sheet
+/// instance. CIS keys its records by occurrence id: the occurrence's own id in
+/// an occurrence-annotated design, the placed part's id otherwise.
+pub fn occurrence_designators(doc: &CaptureDoc, sheets: &[SheetInstance]) -> BTreeMap<u32, String> {
+    let mut out = BTreeMap::new();
+    for inst in sheets {
+        let page = &doc.folders[inst.folder].pages[inst.page];
+        for part in &page.parts {
+            let r = resolve(doc, inst, part);
+            if let Some(o) = occurrence_of(inst.scope.as_ref(), part.db_id) {
+                out.insert(o.own_db_id, r.designator.clone());
+            }
+            out.entry(part.db_id).or_insert(r.designator);
+        }
+    }
+    out
+}
+
+/// The CIS variants a design defines, resolved to designators. Each part a
+/// variant leaves off also names the variant in [`NOT_FITTED_PARAM`].
+pub fn variants(doc: &CaptureDoc, sheets: &[SheetInstance], components: &mut [Component]) -> Vec<VariantInfo> {
+    let Some(cis) = &doc.cis else { return Vec::new() };
+    let ids = occurrence_designators(doc, sheets);
+    let mut out = Vec::new();
+    for v in &cis.variants {
+        let mut info = VariantInfo { name: v.name.clone(), ..Default::default() };
+        for g in v.groups.iter().filter_map(|g| cis.groups.get(g)) {
+            let mut vg = VariantGroup { name: g.name.clone(), ..Default::default() };
+            for (on, id) in &g.members {
+                match ids.get(id) {
+                    Some(d) if *on => vg.members.push(d.clone()),
+                    Some(d) => vg.state_zero.push(d.clone()),
+                    None => info.stale_ids += 1,
+                }
+            }
+            if is_dnf_group(&g.name) {
+                info.not_fitted.extend(vg.members.iter().chain(&vg.state_zero).cloned());
+            }
+            for (id, props) in &g.updates {
+                if let Some(d) = ids.get(id) {
+                    info.overrides.entry(d.clone()).or_default().extend(props.iter().cloned());
+                }
+            }
+            vg.members.sort();
+            vg.state_zero.sort();
+            info.groups.push(vg);
+        }
+        info.not_fitted.sort();
+        info.not_fitted.dedup();
+        for c in components.iter_mut().filter(|c| info.not_fitted.binary_search(&c.designator).is_ok()) {
+            let e = c.parameters.entry(NOT_FITTED_PARAM.to_string()).or_default();
+            if !e.is_empty() {
+                e.push(';');
+            }
+            e.push_str(&v.name);
+        }
+        out.push(info);
+    }
+    out
 }

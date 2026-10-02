@@ -135,3 +135,21 @@ fn a_legacy_design_extracts_whole() {
     assert!(refs.contains("U1") && refs.contains("R104") && refs.contains("U301"));
     let _ = std::fs::remove_dir_all(&out);
 }
+
+/// CIS variants: TI's LAUNCHXL-CC1310 "Standard" BOM leaves off exactly the
+/// parts TI's released BOM (rev 1.3.0) lists as DNM.
+#[test]
+fn a_cis_variant_leaves_off_what_the_released_bom_marks_dnm() {
+    let Some(dsn) = corpus("sangphanthanh_CP_SmartGarden/Document/Hardware/mcu/swrc319/Cadence/LAUNCHXL-CC1310.DSN") else { return };
+    let out = out_dir("cis");
+    run_design(&dsn, &out, &mut |_: Msg| {}).expect("extracts");
+    let d = design_json(&out);
+    let v = &d["source"]["variants"][0];
+    assert_eq!(v["name"], "Standard");
+    let ours: BTreeSet<&str> = v["not_fitted"].as_array().unwrap().iter().map(|x| x.as_str().unwrap()).collect();
+    let ti: BTreeSet<&str> = "A1 C24 C58 FIDU1 FIDU2 FIDU3 FIDU4 FIDU5 FIDU6 MH1 MH2 MH3 MH4 MH5 P8 R13 R19 R21 R46 R47 R48 R49 R51 R59 R60"
+        .split(' ')
+        .collect();
+    assert_eq!(ours, ti);
+    let _ = std::fs::remove_dir_all(&out);
+}
