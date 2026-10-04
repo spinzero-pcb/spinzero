@@ -1,9 +1,42 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { WORKSHEET_LAYER, isWorksheetLayer, layerColorVar, usePcbViewStore } from "./pcbViewStore";
+import { WORKSHEET_LAYER, isWorksheetLayer, layerColorOf, layerColorVar, usePcbViewStore } from "./pcbViewStore";
 
 // Layer-1 coverage for the PCB appearance logic (docs/testing.md): pure store +
 // helper behaviour, no webview. Locks in the non-standard-layer colouring and the
 // default-visibility rules added when user/documentation layers became extractable.
+
+describe("layerColorOf", () => {
+  // Altium names its layers freely ("Top Layer", "IN1"), so the theme token has to come
+  // from the manifest's role/side; by name alone every Altium layer was fab grey.
+  const altium = [
+    { name: "Top Layer", role: "copper", side: "front" },
+    { name: "IN1", role: "copper", side: "inner" },
+    { name: "IN2", role: "copper", side: "inner" },
+    { name: "Bottom Layer", role: "copper", side: "back" },
+    { name: "Top Overlay", role: "silkscreen", side: "front" },
+    { name: "Bottom Solder", role: "mask", side: "back" },
+    { name: "Keep-Out Layer", role: "user" },
+  ];
+  const of = (name: string) => layerColorOf(altium.find((l) => l.name === name)!, altium);
+
+  it("themes Altium layers by role and side", () => {
+    expect(of("Top Layer")).toBe("var(--pcb-fcu)");
+    expect(of("Bottom Layer")).toBe("var(--pcb-bcu)");
+    expect(of("Top Overlay")).toBe("var(--pcb-fsilk)");
+    expect(of("Bottom Solder")).toBe("var(--pcb-bmask)");
+  });
+
+  it("numbers inner copper by its place in the stack", () => {
+    expect(of("IN1")).toBe("var(--pcb-in1, var(--pcb-in1))");
+    expect(of("IN2")).toBe("var(--pcb-in2, var(--pcb-in1))");
+  });
+
+  it("keeps KiCad names, explicit colours and unknown roles on the name lookup", () => {
+    expect(layerColorOf({ name: "F.Cu", role: "copper", side: "front" }, [])).toBe("var(--pcb-fcu)");
+    expect(layerColorOf({ name: "User.3", role: "user", color: "#C2C2C2" }, [])).toBe("#C2C2C2");
+    expect(of("Keep-Out Layer")).toBe("var(--pcb-ffab)");
+  });
+});
 
 describe("layerColorVar", () => {
   it("paints a user layer in its extracted KiCad colour when one is present", () => {

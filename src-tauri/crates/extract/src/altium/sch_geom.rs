@@ -422,7 +422,7 @@ mod tests {
                 width: 0,
             }],
             // Altium names no junction, which is exactly the case `oid` exists for.
-            junctions: vec![Junction { at: pt(20, 10), uuid: String::new(), color: String::new() }],
+            junctions: vec![Junction { at: pt(20, 10), ..Default::default() }],
             ..Default::default()
         }
     }

@@ -20,6 +20,7 @@ import { ContextMenu, type MenuItem } from "../ContextMenu";
 import { IconBoard, IconClose, IconComment, IconCopy, IconFit, IconTrash } from "../icons";
 import { registerRenderProbe } from "../../lib/renderProbe";
 import { ipc } from "../../lib/ipc";
+import { drawOverbars } from "./overbars";
 
 const SVG_NS = "http://www.w3.org/2000/svg";
 const CARD_GUTTER = 300; // keep the landing clear of the properties card on the right
@@ -292,6 +293,11 @@ export function Canvas() {
       curSvg.current = svg;
       curSheet.current = num;
       relabelInstances(svg, compOf); // re-used sheet instances: base ref → this instance's designator
+      drawOverbars(svg);
+      // A web font (KiCad's Newstroke) can land after mount and change the widths.
+      void document.fonts?.ready.then(() => {
+        if (curSvg.current === svg) drawOverbars(svg);
+      });
       hiddenSources.current = []; // new DOM; previous hidden refs are gone
       bboxCache.current = null;
       focusWorld.current = null;

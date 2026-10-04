@@ -19,7 +19,7 @@
 import earcut from "earcut";
 import type { PcbFrame, PcbGeometry, PcbLayerDef, PcbTextDef } from "../../lib/pcbGeometry";
 import { PAD_SHAPE } from "../../lib/pcbGeometry";
-import { layerColorVar } from "../../stores/pcbViewStore";
+import { layerColorOf } from "../../stores/pcbViewStore";
 import { hexToRgb, resolveCssColor, PCB_DIFF_BASE_FALLBACK } from "./glColor";
 
 const MAX_LAYERS = 64;
@@ -761,6 +761,8 @@ export class PcbGlRenderer {
   readonly layerNames: string[] = [];
   /** Copper layer ids (for "which layers a net is on" defaulting). */
   readonly copperLayers: number[] = [];
+  /** True per layer index for a back-side layer (B.Cu, Bottom Overlay, …). */
+  readonly backLayers: boolean[] = [];
 
   // Live state.
   private layerColors = new Float32Array(MAX_LAYERS * 3);
@@ -811,6 +813,7 @@ export class PcbGlRenderer {
     geom.layers.forEach((l, i) => {
       this.layerNames.push(l.name);
       if (l.role === "copper" || l.name.endsWith(".Cu")) this.copperLayers.push(i);
+      this.backLayers.push(l.side ? l.side === "back" : /^B\./.test(l.name));
     });
 
     const acc = this.build(geom);
@@ -1088,7 +1091,7 @@ export class PcbGlRenderer {
     const { geom } = this;
     for (let i = 0; i < geom.layers.length && i < MAX_LAYERS; i++) {
       const l: PcbLayerDef = geom.layers[i];
-      const [r, g, b] = resolveCssColor(layerColorVar(l.name, l.color));
+      const [r, g, b] = resolveCssColor(layerColorOf(l, geom.layers));
       this.layerColors[i * 3] = r;
       this.layerColors[i * 3 + 1] = g;
       this.layerColors[i * 3 + 2] = b;

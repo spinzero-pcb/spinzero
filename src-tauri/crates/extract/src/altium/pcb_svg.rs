@@ -479,7 +479,10 @@ fn emit_text(s: &mut String, g: &Geometry, t: &TextDef, layer: &str) {
     let _ = write!(
         s,
         r##"<g data-primitive="text" data-layer-name="{}"{comp}{role}><text x="{}" y="{}" font-family="{}" font-size="{}" text-anchor="{h}" dominant-baseline="{v}" fill="{INK}" stroke="none"{weight}{style} transform="rotate({} {} {})">{}</text></g>"##,
-        esc(layer), c(t.x), c(t.y), esc(&family), c(t.size),
+        esc(layer), c(t.x), c(t.y), esc(&family),
+        // A named face is a TrueType string, whose `size` the viewers draw at
+        // a larger em.
+        c(if t.font.is_some() { t.size * super::pcb::OUTLINE_EM_PER_SIZE } else { t.size }),
         c(-t.angle), c(t.x), c(t.y), esc(&t.text)
     );
 }

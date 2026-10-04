@@ -152,6 +152,9 @@ function drawLabelRow(
  *  is the em, so it needs the same multiplier to match KiCad's rendered size. */
 const OUTLINE_FONT_SIZE_COMP = 1.4;
 
+/** Opacity of back-side text while the board is read from the top. */
+const BACK_TEXT_ALPHA = 0.45;
+
 /** Draw a text item that overrides KiCad's stroke font with a real outline font (e.g.
  *  Calibri): KiCad plots such text with the actual TTF, so we FILL glyphs in the named
  *  family rather than stroking Newstroke. Metrics are the family's own — approximate vs
@@ -203,9 +206,16 @@ function drawOutlineText(
     const top = lineY(0), bot = lineY(n - 1);
     const yTop = vj < 0 ? top : vj > 0 ? top - px : top - px / 2;
     const yBot = vj < 0 ? bot + px : vj > 0 ? bot : bot + px / 2;
-    const m = px * 0.15;
     ctx.fillStyle = color;
-    ctx.fillRect(bx - m, yTop - m, maxW + 2 * m, yBot - yTop + 2 * m);
+    const kb = t.knockout_box;
+    if (kb) {
+      // A set background (Altium's inverted rectangle), in text-local mm.
+      const k = scale / wRatio;
+      ctx.fillRect(kb[0] * k, kb[1] * scale, (kb[2] - kb[0]) * k, (kb[3] - kb[1]) * scale);
+    } else {
+      const m = t.knockout_margin != null ? t.knockout_margin * scale : px * 0.15;
+      ctx.fillRect(bx - m, yTop - m, maxW + 2 * m, yBot - yTop + 2 * m);
+    }
     ctx.globalCompositeOperation = "destination-out";
     ctx.fillStyle = "#000"; // any opaque colour — only alpha matters when punching out
     for (let i = 0; i < n; i++) ctx.fillText(lines[i], 0, lineY(i));
@@ -880,9 +890,11 @@ export function PcbGlView({ visible }: { visible: boolean }) {
         // filled in the layer colour, with the glyph strokes punched back out
         // (pcb_text.cpp TransformTextToPolySet + buildBoundingHull).
         const b = layout.bbox;
-        const m = knockoutMargin(t.size, layout.pen);
+        const kb = t.knockout_box;
+        const m = t.knockout_margin ?? knockoutMargin(t.size, layout.pen);
         tctx.fillStyle = textColor;
-        tctx.fillRect(b.minx - m, b.miny - m, b.maxx - b.minx + 2 * m, b.maxy - b.miny + 2 * m);
+        if (kb) tctx.fillRect(kb[0], kb[1], kb[2] - kb[0], kb[3] - kb[1]);
+        else tctx.fillRect(b.minx - m, b.miny - m, b.maxx - b.minx + 2 * m, b.maxy - b.miny + 2 * m);
         tctx.globalCompositeOperation = "destination-out";
         tctx.strokeStyle = "#000"; // any opaque colour — only alpha matters here
         tctx.beginPath();
@@ -911,11 +923,23 @@ export function PcbGlView({ visible }: { visible: boolean }) {
     const vis = diffDoc?.doc ? diffVisRef.current : null;
     const blinkOn = blinkRef.current;
     const diffGrey = rootStyle.getPropertyValue("--pcb-diff-base").trim() || PCB_DIFF_BASE_FALLBACK;
-    for (let i = 0; i < r.texts.length; i++) {
-      const spotlit = diff && vis ? diff.flagsB.texts[i] > 0 && vis[diff.flagsB.texts[i]] > 0 : false;
-      if (spotlit && blinkOn && blinkA.current) continue; // added: B phase only
-      drawBoardText(ctx, r, r.texts[i], diff && vis && !spotlit ? diffGrey : undefined);
-    }
+    // Seen from the top, back-side text lies under the board: draw it first and dimmed,
+    // so a bottom-overlay knockout box cannot blot out top copper and silkscreen. With a
+    // back layer active the board is being read from below, so it goes last, full strength.
+    const activeLayer = pv.active ? r.layerNames.indexOf(pv.active) : -1;
+    const backOnTop = activeLayer >= 0 && r.backLayers[activeLayer];
+    const drawTextPass = (back: boolean) => {
+      ctx.globalAlpha = back && !backOnTop ? BACK_TEXT_ALPHA : 1;
+      for (let i = 0; i < r.texts.length; i++) {
+        if ((r.backLayers[r.texts[i].layer] ?? false) !== back) continue;
+        const spotlit = diff && vis ? diff.flagsB.texts[i] > 0 && vis[diff.flagsB.texts[i]] > 0 : false;
+        if (spotlit && blinkOn && blinkA.current) continue; // added: B phase only
+        drawBoardText(ctx, r, r.texts[i], diff && vis && !spotlit ? diffGrey : undefined);
+      }
+      ctx.globalAlpha = 1;
+    };
+    drawTextPass(!backOnTop);
+    drawTextPass(backOnTop);
     if (diff && vis && rA && (!blinkOn || blinkA.current)) {
       let sctx: CanvasRenderingContext2D | null = null;
       for (let i = 0; i < diff.geomA.texts.length; i++) {

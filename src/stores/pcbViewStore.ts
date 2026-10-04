@@ -35,9 +35,54 @@ export function layerColorVar(name: string, explicit?: string | null): string {
   // (e.g. a theme-less bundle) so it's never an undefined-var black.
   const inner = name.match(/^In(\d+)\.Cu$/);
   if (inner) return `var(--pcb-in${inner[1]}, var(--pcb-in1))`;
-  const token =
-    LAYER_TOKEN[name] ?? (name.endsWith(".Cu") ? "--pcb-in1" : "--pcb-ffab");
+  const token = LAYER_TOKEN[name] ?? (name.endsWith(".Cu") ? "--pcb-in1" : "--pcb-ffab");
   return `var(${token})`;
+}
+
+/** Theme token for a layer by its ROLE and SIDE, for layers whose name is not
+ *  KiCad's. Altium names the top copper "Top Layer" (or whatever the designer typed),
+ *  so a name lookup leaves every Altium layer the neutral fab grey. */
+function roleToken(role: string | undefined, side: string | undefined): string | null {
+  const back = side === "back";
+  switch (role) {
+    case "copper":
+      return side === "inner" ? null : back ? "--pcb-bcu" : "--pcb-fcu";
+    case "silkscreen":
+      return back ? "--pcb-bsilk" : "--pcb-fsilk";
+    case "mask":
+      return back ? "--pcb-bmask" : "--pcb-fmask";
+    case "paste":
+      return back ? "--pcb-bpaste" : "--pcb-fpaste";
+    case "courtyard":
+      return back ? "--pcb-bcrtyd" : "--pcb-fcrtyd";
+    case "fab":
+      return back ? "--pcb-bfab" : "--pcb-ffab";
+    case "edge":
+      return "--pcb-edge";
+    default:
+      return null;
+  }
+}
+
+interface LayerColorSource {
+  name: string;
+  color?: string | null;
+  role?: string;
+  side?: string;
+}
+
+/** A layer's colour, resolved by name first and by role/side second. `layers` is the
+ *  board's full layer list, needed to number an inner copper layer (`--pcb-in{N}`). */
+export function layerColorOf(l: LayerColorSource, layers: readonly LayerColorSource[]): string {
+  if (l.color) return l.color;
+  if (LAYER_TOKEN[l.name] || /^In\d+\.Cu$/.test(l.name) || !l.role) return layerColorVar(l.name);
+  if (l.role === "copper" && l.side === "inner") {
+    const inner = layers.filter((x) => x.role === "copper" && x.side === "inner");
+    const n = Math.max(inner.indexOf(l) + 1, 1);
+    return `var(--pcb-in${n}, var(--pcb-in1))`;
+  }
+  const token = roleToken(l.role, l.side);
+  return token ? `var(${token})` : layerColorVar(l.name);
 }
 
 /** Object classes toggleable in the PCB appearance panel (item 7). */

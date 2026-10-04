@@ -3,11 +3,12 @@ import { useDesignStore } from "../../stores/designStore";
 import type { LayerLite } from "../../lib/design";
 import { ContextMenu, type MenuItem } from "../ContextMenu";
 import { IconLayers } from "../icons";
+import { isCopperLayer } from "../../lib/layers";
 import {
   PCB_OBJECT_KEYS,
   PCB_OBJECT_LABELS,
   isWorksheetLayer,
-  layerColorVar,
+  layerColorOf,
   usePcbViewStore,
   type PcbObjectKey,
 } from "../../stores/pcbViewStore";
@@ -46,7 +47,7 @@ export function AppearancePanel() {
   // Right-click presets (replace the old Select-all/Deselect-all buttons). "but active"
   // keeps the active layer visible — or the right-clicked one when nothing is active.
   const allNames = boardLayers.map((l) => l.name);
-  const cuNames = allNames.filter((n) => n.endsWith(".Cu"));
+  const cuNames = boardLayers.filter(isCopperLayer).map((l) => l.name);
   const layerMenu = (clicked: string): MenuItem[] => {
     const keep = active ?? clicked;
     const layerIcon = <IconLayers size={14} />;
@@ -62,7 +63,7 @@ export function AppearancePanel() {
       { label: "Hide all layers", icon: layerIcon, onClick: () => setHidden(allNames) },
       { label: "Show all layers", icon: layerIcon, onClick: () => showAllLayers() },
       { separator: true },
-      { label: "Show only Cu layers", icon: layerIcon, onClick: () => setHidden(allNames.filter((n) => !n.endsWith(".Cu"))) },
+      { label: "Show only Cu layers", icon: layerIcon, onClick: () => setHidden(allNames.filter((n) => !cuNames.includes(n))) },
       { label: "Hide all Cu layers", icon: layerIcon, onClick: () => setHidden([...hidden, ...cuNames]) },
     ];
   };
@@ -94,7 +95,7 @@ export function AppearancePanel() {
             onChange={() => toggleLayer(l.name)}
             title={`show/hide ${l.name}`}
           />
-          <span className="pcb-swatch" style={{ background: layerColorVar(l.name, l.color) }} />
+          <span className="pcb-swatch" style={{ background: layerColorOf(l, boardLayers) }} />
           <span className="tree-name" title={l.user_name && l.user_name !== l.name ? l.name : undefined}>
             {l.user_name || l.name}
           </span>

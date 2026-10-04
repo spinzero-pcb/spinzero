@@ -221,6 +221,7 @@ pub struct BoardArtifacts {
 pub fn extract_pcb(
     board_path: &Path,
     out_dir: &Path,
+    project_params: &BTreeMap<String, String>,
     emit: &mut dyn FnMut(Msg),
 ) -> Result<BoardArtifacts, String> {
     let doc = Doc::open(board_path)?;
@@ -229,7 +230,7 @@ pub fn extract_pcb(
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let built = build(&board, &source);
+    let built = build(&board, &source, project_params);
     let g = &built.geometry;
     let summary = BoardSummary {
         layers: g.layers.len(),
@@ -455,7 +456,7 @@ pub struct Built {
 }
 
 /// Project a parsed board into the geometry IR.
-pub fn build(b: &PcbDoc, source: &str) -> Built {
+pub fn build(b: &PcbDoc, source: &str, project: &BTreeMap<String, String>) -> Built {
     let f = Flip;
 
     // ---- layer table -------------------------------------------------------
@@ -795,6 +796,7 @@ pub fn build(b: &PcbDoc, source: &str) -> Built {
             &name_of(t.c.layer),
             t.is_designator,
             t.is_comment,
+            project,
         );
         let (text, role) = (r.text, r.role);
         if r.unresolved {
@@ -803,25 +805,32 @@ pub fn build(b: &PcbDoc, source: &str) -> Built {
         if text.is_empty() {
             continue;
         }
-        let (x, y) = f.pt(t.x, t.y);
+        // A designator or comment the designer switched off is not on the board.
+        if owner.is_some_and(|o| (t.is_designator && o.name_hidden) || (t.is_comment && o.comment_hidden)) {
+            continue;
+        }
+        let place = place_text(t);
+        let (x, y) = f.pt(place.x, place.y);
         texts.push(TextDef {
             layer,
             text,
             x,
             y,
             angle: f.angle(t.rotation),
-            size: r4(t.height),
+            size: r4(if t.truetype { t.height / TRUETYPE_SIZE_PER_HEIGHT } else { t.height }),
             width: None,
-            thickness: (t.width > 0.0).then(|| r4(t.width)),
-            // Altium anchors a string at the left of its baseline, where KiCad
-            // centres it; saying so is what keeps silkscreen legends in place.
-            justify: [-1, 1],
+            thickness: (!t.truetype && t.width > 0.0).then(|| r4(t.width)),
+            justify: place.justify,
             mirror: t.mirror,
-            bold: false,
-            italic: false,
-            knockout: false,
+            bold: t.truetype && t.bold,
+            italic: t.truetype && t.italic,
+            knockout: t.inverted,
+            knockout_box: place.knockout_box,
+            knockout_margin: (t.inverted && place.knockout_box.is_none()).then(|| r4(t.inverted_margin)),
             upright: false,
-            font: (!t.font.is_empty()).then(|| t.font.clone()),
+            // Only a TrueType string names a face; the rest are Altium's stroke
+            // font, which the viewer's stroke font stands in for.
+            font: (t.truetype && !t.font.is_empty()).then(|| t.font.clone()),
             comp: comp_of(t.c.component),
             role,
         });
@@ -888,6 +897,57 @@ struct Resolved {
     unresolved: bool,
 }
 
+/// The em a viewer draws a TrueType `size` at: KiCad's outline-font scale,
+/// which the PCB view applies (`OUTLINE_FONT_SIZE_COMP` in `PcbGlView.tsx`).
+pub(crate) const OUTLINE_EM_PER_SIZE: f64 = 1.4;
+
+/// A TrueType string's `height` over the `size` the viewer takes. Altium's
+/// height is the whole font cell (Arial's is 1.117 em). Without this the
+/// string draws about 1.5 times too large.
+const TRUETYPE_SIZE_PER_HEIGHT: f64 = 1.117 * OUTLINE_EM_PER_SIZE;
+
+/// Where a text is anchored and how it is justified in the geometry IR.
+struct TextPlace {
+    x: f64,
+    y: f64,
+    justify: [i8; 2],
+    knockout_box: Option<[f64; 4]>,
+}
+
+/// Place a text. Altium anchors a string at the left of its baseline, where
+/// KiCad centres it. Inverted text with a set rectangle is the exception: the
+/// rectangle starts at the location and the string sits inside it by the
+/// record's justification, inset by the border.
+fn place_text(t: &pcb::Text) -> TextPlace {
+    let plain = TextPlace { x: t.x, y: t.y, justify: [-1, 1], knockout_box: None };
+    let Some((w, h)) = t.inverted_rect.filter(|_| t.inverted) else {
+        return plain;
+    };
+    let j = if (1..=9).contains(&t.rect_justify) { t.rect_justify } else { 3 };
+    let (col, row) = ((j - 1) / 3, (j - 1) % 3);
+    let m = t.inverted_margin.min(w / 2.0).min(h / 2.0);
+    // The anchor inside the rectangle, from its bottom-left, Y up.
+    let ax = match col {
+        0 => m,
+        1 => w / 2.0,
+        _ => w - m,
+    };
+    let ay = match row {
+        0 => h - m,
+        1 => h / 2.0,
+        _ => m,
+    };
+    // Turn with the text; a mirrored string runs the other way along it.
+    let (sin, cos) = t.rotation.to_radians().sin_cos();
+    let sx = if t.mirror { -1.0 } else { 1.0 };
+    TextPlace {
+        x: t.x + sx * ax * cos - ay * sin,
+        y: t.y + sx * ax * sin + ay * cos,
+        justify: [col as i8 - 1, row as i8 - 1],
+        knockout_box: Some([r4(-ax), r4(-(h - ay)), r4(w - ax), r4(ay)]),
+    }
+}
+
 /// Altium's special strings, resolved against the component or the document
 /// that gives them a value.
 ///
@@ -904,6 +964,7 @@ fn resolve_special(
     layer_name: &str,
     is_designator: bool,
     is_comment: bool,
+    project: &BTreeMap<String, String>,
 ) -> Resolved {
     let trimmed = text.trim();
     let key = trimmed.to_ascii_uppercase();
@@ -927,10 +988,18 @@ fn resolve_special(
         // comment, so the `role` never has to be guessed from the string.
         _ if is_designator => owned(text.to_string(), "reference"),
         _ if is_comment => owned(text.to_string(), "value"),
-        _ if is_special(trimmed) => Resolved {
-            text: text.to_string(),
-            role: String::new(),
-            unresolved: true,
+        // Any other special names a project parameter: `.PCB_DATE` is the
+        // project's `PCB_DATE`.
+        _ if is_special(trimmed) => match project
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(&trimmed[1..]))
+        {
+            Some((_, v)) => owned(v.clone(), ""),
+            None => Resolved {
+                text: text.to_string(),
+                role: String::new(),
+                unresolved: true,
+            },
         },
         _ => owned(
             text.to_string(),
@@ -1054,11 +1123,11 @@ mod tests {
             y2: 20.0,
             width: 0.2,
         });
-        let g = build(&b, "b.PcbDoc").geometry;
+        let g = build(&b, "b.PcbDoc", &BTreeMap::new()).geometry;
         assert_eq!(g.tracks.seg.xy[0], 10.0);
         assert_eq!(g.tracks.seg.xy[1], WORKSPACE_MM - 20.0);
         b.tracks.push(Track { c: common(TOP, None), x1: 0.0, y1: 900.0, x2: 1.0, y2: 900.0, width: 0.2 });
-        let g2 = build(&b, "b.PcbDoc").geometry;
+        let g2 = build(&b, "b.PcbDoc", &BTreeMap::new()).geometry;
         assert_eq!(&g2.tracks.seg.xy[..4], &g.tracks.seg.xy[..4], "the first track has not moved");
     }
 
@@ -1070,7 +1139,7 @@ mod tests {
         b.nets.push(eda_parse_altium::pcb::Net { name: "VCC".into(), color: String::new() });
         b.tracks.push(Track { c: common(TOP, Some(1)), x1: 0.0, y1: 0.0, x2: 1.0, y2: 0.0, width: 0.2 });
         b.tracks.push(Track { c: common(TOP, None), x1: 0.0, y1: 0.0, x2: 1.0, y2: 0.0, width: 0.2 });
-        let g = build(&b, "b").geometry;
+        let g = build(&b, "b", &BTreeMap::new()).geometry;
         assert_eq!(g.nets, vec!["", "GND", "VCC"]);
         assert_eq!(g.tracks.seg.net, vec![2, 0]);
     }
@@ -1106,7 +1175,7 @@ mod tests {
         };
         b.pads.push(pad(10.0, 10.0));
         b.pads.push(pad(20.0, 30.0));
-        let g = build(&b, "b").geometry;
+        let g = build(&b, "b", &BTreeMap::new()).geometry;
         assert_eq!(g.components[0].x, 15.0, "not the footprint origin at 100");
         assert_eq!(g.components[0].y, WORKSPACE_MM - 20.0);
         assert_eq!(g.components[0].angle, -90.0, "a Y flip reverses the rotation");
@@ -1132,7 +1201,7 @@ mod tests {
             rotation: 0.0,
             plated: false,
         });
-        let g = build(&b, "b").geometry;
+        let g = build(&b, "b", &BTreeMap::new()).geometry;
         let p = &g.pads[0];
         assert!(p.npth, "a drilled hole with no plating is a mounting hole");
         assert_eq!(p.shape, 0, "equal sides make it a circle, not an oval");
@@ -1153,7 +1222,7 @@ mod tests {
             from_layer: TOP,
             to_layer: 2,
         });
-        let g = build(&b, "b").geometry;
+        let g = build(&b, "b", &BTreeMap::new()).geometry;
         assert_eq!(g.vias[0].layers.len(), 2);
         assert_eq!(g.vias[0].net, 1);
     }
@@ -1171,7 +1240,7 @@ mod tests {
             end_angle: 360.0,
             width: 0.1,
         });
-        let g = build(&b, "b").geometry;
+        let g = build(&b, "b", &BTreeMap::new()).geometry;
         assert!(matches!(g.graphics[0].kind, GKind::Circle));
         assert_eq!(g.graphics[0].data, vec![10.0, WORKSPACE_MM - 10.0, 2.0]);
         assert!(g.tracks.arc.w.is_empty(), "a silkscreen arc is not a copper track");
@@ -1186,14 +1255,15 @@ mod tests {
             comment: "STM32".into(),
             ..eda_parse_altium::pcb::Component::default()
         };
+        let project: BTreeMap<String, String> = [("PCB_DATE".to_string(), "2025-02-21".to_string())].into();
         let r = |t: &str, own: bool| {
             resolve_special(
-                t, own.then_some(&c), own.then_some(0), &d, "b.PcbDoc", "Top Overlay", false, false,
+                t, own.then_some(&c), own.then_some(0), &d, "b.PcbDoc", "Top Overlay", false, false, &project,
             )
         };
         assert_eq!(r(".Designator", true).text, "U6_CH1");
         assert_eq!(
-            resolve_special("RD1", Some(&c), Some(0), &d, "b", "L", true, false).role,
+            resolve_special("RD1", Some(&c), Some(0), &d, "b", "L", true, false, &project).role,
             "reference",
             "the role comes from the file's own flag, not from matching the string"
         );
@@ -1202,6 +1272,9 @@ mod tests {
         assert_eq!(r("PIN 1", true).role, "user");
         assert_eq!(r("KEEP CLEAR", false).role, "");
         assert_eq!(r(".PCB_FILE_NAME_NO_PATH", false).text, "b.PcbDoc");
+        // Any other special is a project parameter, looked up without its dot.
+        assert_eq!(r(".pcb_date", false).text, "2025-02-21");
+        assert!(r(".PCB_MIXDOWN", false).unresolved, "an undefined one stays literal");
         assert_eq!(r(".LAYER_NAME", false).text, "Top Overlay");
         // A special string with no value is drawn as it stands and counted: an
         // empty silkscreen legend is a worse lie than a visible placeholder.
@@ -1213,11 +1286,58 @@ mod tests {
         assert!(!r(".5 mm clearance", false).unresolved, "nor every leading one");
     }
 
+    /// Board text follows the designer's switches and Altium's own sizing: a
+    /// hidden designator or comment is not drawn, a TrueType height is the whole
+    /// cell, and inverted text with a set rectangle is centred in that box.
+    #[test]
+    fn text_obeys_visibility_truetype_size_and_the_inverted_rectangle() {
+        let mut b = board();
+        b.components.push(pcb::Component { designator: "TP1".into(), name_hidden: true, comment_hidden: true, ..Default::default() });
+        b.components.push(pcb::Component { designator: "U1".into(), comment_hidden: true, ..Default::default() });
+        let text = |comp: Option<u16>, s: &str, des: bool, com: bool| pcb::Text {
+            c: Common { layer: 33, net: None, polygon: None, component: comp },
+            x: 10.0,
+            y: 20.0,
+            height: 1.651,
+            width: 0.254,
+            rotation: 0.0,
+            mirror: false,
+            font: "Arial".into(),
+            text: s.into(),
+            is_designator: des,
+            is_comment: com,
+            truetype: true,
+            bold: true,
+            italic: false,
+            inverted: false,
+            inverted_margin: 0.254,
+            inverted_rect: None,
+            rect_justify: 3,
+        };
+        b.texts.push(text(Some(0), "TP1", true, false));
+        b.texts.push(text(Some(0), "SMT Testpoint", false, true));
+        b.texts.push(text(Some(1), "U1", true, false));
+        b.texts.push(text(Some(1), "PART", false, true));
+        b.texts.push(pcb::Text { inverted: true, inverted_rect: Some((3.175, 1.651)), rect_justify: 5, ..text(None, "3v3", false, false) });
+        let g = build(&b, "b", &BTreeMap::new()).geometry;
+        let drawn: Vec<&str> = g.texts.iter().map(|t| t.text.as_str()).collect();
+        assert_eq!(drawn, ["U1", "3v3"], "hidden designator and comments are not drawn");
+        let u1 = &g.texts[0];
+        assert_eq!(u1.size, r4(1.651 / TRUETYPE_SIZE_PER_HEIGHT));
+        assert_eq!((u1.font.as_deref(), u1.bold, u1.thickness), (Some("Arial"), true, None));
+        let inv = &g.texts[1];
+        assert!(inv.knockout);
+        assert_eq!(inv.justify, [0, 0]);
+        assert_eq!(inv.knockout_box, Some([r4(-3.175 / 2.0), r4(-1.651 / 2.0), r4(3.175 / 2.0), r4(1.651 / 2.0)]));
+        let (cx, cy) = Flip.pt(10.0 + 3.175 / 2.0, 20.0 + 1.651 / 2.0);
+        assert_eq!((inv.x, inv.y), (cx, cy), "anchored at the rectangle's centre");
+    }
+
     #[test]
     fn the_board_shape_lands_on_the_edge_layer() {
         let mut b = board();
         b.outline.push(vec![(0.0, 0.0), (10.0, 0.0), (10.0, 5.0), (0.0, 5.0)]);
-        let g = build(&b, "b").geometry;
+        let g = build(&b, "b", &BTreeMap::new()).geometry;
         let edge = g.layers.iter().position(|l| l.role == "edge").expect("an edge layer");
         assert!(g
             .graphics

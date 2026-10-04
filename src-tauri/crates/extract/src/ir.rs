@@ -274,6 +274,14 @@ pub struct TextDef {
     /// KiCad knockout (inverted) text — filled layer-colour background, glyphs cut out.
     #[serde(skip_serializing_if = "is_false")]
     pub knockout: bool,
+    /// A knockout's set background: `[x0, y0, x1, y1]` in mm, relative to the
+    /// anchor, in the text's own frame (x along the text, y down), before any
+    /// mirror. Absent ⇒ the renderer sizes the box from the glyphs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub knockout_box: Option<[f64; 4]>,
+    /// Border (mm) round a glyph-sized knockout box. Absent ⇒ the KiCad margin.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub knockout_margin: Option<f64>,
     /// Footprint reference/value text is kept upright (like KiCad); board `gr_text`
     /// is drawn at its literal angle.
     #[serde(skip_serializing_if = "is_false")]
@@ -646,6 +654,8 @@ pub fn build(pcb: &Pcb, theme: &crate::theme::Theme, source: &str) -> Geometry {
             bold: t.bold,
             italic: t.italic,
             knockout: t.knockout,
+            knockout_box: None,
+            knockout_margin: None,
             upright: false,
             font: t.font.clone(),
             comp: None,
@@ -670,6 +680,8 @@ pub fn build(pcb: &Pcb, theme: &crate::theme::Theme, source: &str) -> Geometry {
                 bold: t.bold,
                 italic: t.italic,
                 knockout: t.knockout,
+                knockout_box: None,
+                knockout_margin: None,
                 upright: true,
                 font: t.font.clone(),
                 comp: Some(ci as u32),

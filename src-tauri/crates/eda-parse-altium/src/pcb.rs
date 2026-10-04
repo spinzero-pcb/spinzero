@@ -150,6 +150,21 @@ pub struct Text {
     pub is_designator: bool,
     /// True for the object that is the component's comment.
     pub is_comment: bool,
+    /// True for a TrueType string. The rest are Altium's stroke font, and a
+    /// TrueType string's `height` is the whole font cell, not the glyph.
+    pub truetype: bool,
+    pub bold: bool,
+    pub italic: bool,
+    /// Inverted text: filled background with the glyphs cut out.
+    pub inverted: bool,
+    /// Border round inverted text, in mm, when it has no set rectangle.
+    pub inverted_margin: f64,
+    /// A set size for the inverted background, in mm: the rectangle starts at
+    /// the text's location and the text sits inside it by `rect_justify`.
+    pub inverted_rect: Option<(f64, f64)>,
+    /// Altium's text-in-rectangle justification, 1 (left-top) to 9
+    /// (right-bottom), in columns of three.
+    pub rect_justify: u8,
 }
 
 /// A filled rectangle (`Fills6`).
@@ -203,6 +218,10 @@ pub struct Component {
     pub source_unique_id: String,
     pub unique_id: String,
     pub source_hierarchical_path: String,
+    /// `NAMEON=FALSE`: the designer hid the designator on the board.
+    pub name_hidden: bool,
+    /// `COMMENTON=FALSE`: the designer hid the comment on the board.
+    pub comment_hidden: bool,
 }
 
 /// A net (`Nets6`). Its position in the stream is the id primitives reference.
@@ -753,6 +772,9 @@ fn read_component(r: &TextRecord) -> Component {
         source_unique_id: r.s("SOURCEUNIQUEID").to_string(),
         unique_id: r.s("UNIQUEID").to_string(),
         source_hierarchical_path: r.s("SOURCEHIERARCHICALPATH").to_string(),
+        // Only an explicit FALSE hides the text: an absent flag shows it.
+        name_hidden: r.s("NAMEON").eq_ignore_ascii_case("FALSE"),
+        comment_hidden: r.s("COMMENTON").eq_ignore_ascii_case("FALSE"),
     }
 }
 
@@ -909,6 +931,16 @@ pub(crate) fn read_text(r: &Raw, strings: &BTreeMap<u32, String>) -> Option<Text
         text,
         is_comment: b.get(40).copied().unwrap_or(0) != 0,
         is_designator: b.get(41).copied().unwrap_or(0) != 0,
+        truetype: b.get(43).copied().unwrap_or(0) == 1,
+        bold: b.get(44).copied().unwrap_or(0) != 0,
+        italic: b.get(45).copied().unwrap_or(0) != 0,
+        inverted: b.get(110).copied().unwrap_or(0) != 0,
+        inverted_margin: coord(b, 111).unwrap_or(0.0),
+        inverted_rect: (b.get(123).copied().unwrap_or(0) != 0)
+            .then(|| Some((coord(b, 124)?, coord(b, 128)?)))
+            .flatten()
+            .filter(|(w, h)| *w > 0.0 && *h > 0.0),
+        rect_justify: b.get(132).copied().unwrap_or(3),
     })
 }
 
@@ -1248,6 +1280,13 @@ mod tests {
             text: s.to_string(),
             is_designator,
             is_comment: false,
+            truetype: false,
+            bold: false,
+            italic: false,
+            inverted: false,
+            inverted_margin: 0.0,
+            inverted_rect: None,
+            rect_justify: 3,
         };
         pcb.texts.push(text(0, "U6_CH1", true));
         pcb.texts.push(text(1, "U6_CH2", true));

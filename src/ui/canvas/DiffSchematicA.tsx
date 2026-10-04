@@ -3,6 +3,7 @@ import { useDesignStore } from "../../stores/designStore";
 import { useDiffStore } from "../../stores/diffStore";
 import { buildDiffOverlay, camBridge, diffPaint } from "./navigator";
 import { tintsA } from "../../lib/diff";
+import { drawOverbars } from "./overbars";
 
 /** The read-only A (older) schematic island for the side-by-side diff (§4). It renders
  *  the A-side SVG of whatever sheet the primary (B) Canvas currently shows, follows B's
@@ -100,6 +101,7 @@ export function DiffSchematicA() {
           svg.setAttribute("width", String(raw[2] || 297));
           svg.setAttribute("height", String(raw[3] || 210));
           svg.style.display = "block";
+          drawOverbars(svg);
         }
         paintFocused();
       } catch {

@@ -1,7 +1,7 @@
 import { Fragment, useEffect, useRef, useState } from "react";
 import { useDesignStore } from "../stores/designStore";
 import { useSelectionStore } from "../stores/selectionStore";
-import { layerColorVar, usePcbViewStore } from "../stores/pcbViewStore";
+import { layerColorOf, usePcbViewStore } from "../stores/pcbViewStore";
 import { useViewStore } from "../stores/viewStore";
 import { nav, pcbNav } from "./canvas/navigator";
 
@@ -58,6 +58,8 @@ export function PropertiesCard() {
   const indexes = useDesignStore((s) => s.indexes);
   const pcbIndex = useDesignStore((s) => s.pcbIndex);
   const setView = useViewStore((s) => s.setView);
+  // The design's own layer record, so a chip themes by role on an Altium board too.
+  const layerOf = (name: string) => indexes?.layers?.find((x) => x.name === name) ?? { name };
 
   const cardRef = useRef<HTMLDivElement>(null);
   const drag = useRef<{ dx: number; dy: number } | null>(null);
@@ -215,7 +217,7 @@ export function PropertiesCard() {
               empty: "not routed",
               chips: (pn?.layers ?? []).map((l) => (
                 <button key={l} className="xchip" onClick={() => goPcb(l)} title={l}>
-                  <span className="layer-dot" style={{ background: layerColorVar(l) }} />
+                  <span className="layer-dot" style={{ background: layerColorOf(layerOf(l), indexes?.layers ?? []) }} />
                   <span className="txt">{l}</span>
                 </button>
               )),

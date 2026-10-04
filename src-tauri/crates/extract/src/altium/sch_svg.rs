@@ -209,7 +209,7 @@ pub fn palette(sheets: &[&SchDoc]) -> BTreeMap<String, String> {
             vote("bus", &b.color);
         }
         for j in &doc.junctions {
-            vote("junction", &j.color);
+            vote("junction", junction_color(j));
         }
         for n in &doc.no_ercs {
             vote("no_connect", &n.color);
@@ -232,7 +232,7 @@ pub fn palette(sheets: &[&SchDoc]) -> BTreeMap<String, String> {
             vote("sheet_name", &s.name_color);
         }
         for s in &doc.param_sets {
-            vote("netclass_flag", &s.parameters.first().map(|p| p.color.clone()).unwrap_or_default());
+            vote("netclass_flag", &s.color);
         }
         for comp in &doc.components {
             vote("reference", &comp.designator_color);
@@ -378,18 +378,42 @@ fn rotate_attr(orientation: i64, x: f64, y: f64) -> String {
     }
 }
 
-/// Altium marks an overbar by following each character with a backslash
-/// (`R\E\S\E\T\`). The bar is emitted as an SVG overline over the whole run
-/// rather than per character, which is what the string means.
+/// Altium marks an overbar by following a character with a backslash: each
+/// backslash bars the character before it, so `R\S\T\_N` bars "RST" only.
+/// Barred runs become overlined `tspan`s, marked `data-overbar` so the viewer
+/// draws the bar itself (its webview drops most of an overline's ink on Arial
+/// capitals). The flag says whether any bar exists.
 fn markup(text: &str) -> (String, bool) {
     if !text.contains('\\') {
         return (esc(text), false);
     }
-    let stripped: String = text.chars().filter(|&ch| ch != '\\').collect();
-    // Only a fully-marked run is a bar; a lone backslash is a path separator.
-    let marked = text.len() >= stripped.len() * 2;
-    (esc(&stripped), marked && !stripped.is_empty())
+    let mut chars: Vec<(char, bool)> = Vec::with_capacity(text.len());
+    for ch in text.chars() {
+        if ch == '\\' {
+            if let Some(last) = chars.last_mut() {
+                last.1 = true;
+            }
+        } else {
+            chars.push((ch, false));
+        }
+    }
+    let mut out = String::new();
+    let mut any = false;
+    let mut i = 0;
+    while i < chars.len() {
+        let bar = chars[i].1;
+        let run: String = chars[i..].iter().take_while(|c| c.1 == bar).map(|c| c.0).collect();
+        i += run.chars().count();
+        if bar {
+            any = true;
+            let _ = write!(out, r#"<tspan text-decoration="overline" data-overbar="">{}</tspan>"#, esc(&run));
+        } else {
+            out.push_str(&esc(&run));
+        }
+    }
+    (out, any)
 }
+
 
 /// Emit one line of text with Altium's own placement.
 #[allow(clippy::too_many_arguments)]
@@ -410,15 +434,14 @@ fn emit_text(
     let (x, y) = ctx.xy(at);
     let (family, size, bold, italic) = ctx.font(font);
     let (h, v) = anchor(justify);
-    let (body, bar) = markup(text);
+    let (body, _) = markup(text);
     let weight = if bold { r#" font-weight="bold""# } else { "" };
     let style = if italic { r#" font-style="italic""# } else { "" };
-    let bar_attr = if bar { r#" text-decoration="overline""# } else { "" };
     let fill = if color.is_empty() { "#000000" } else { color };
     let over = override_attr(color, class_default);
     let _ = write!(
         s,
-        r#"<text x="{}" y="{}" font-family="{}" font-size="{}" text-anchor="{h}" dominant-baseline="{v}" fill="{fill}" stroke="none"{weight}{style}{bar_attr}{over}{}>{body}</text>"#,
+        r#"<text x="{}" y="{}" font-family="{}" font-size="{}" text-anchor="{h}" dominant-baseline="{v}" fill="{fill}" stroke="none"{weight}{style}{over}{}>{body}</text>"#,
         c(x),
         c(y),
         esc(&family),
@@ -689,25 +712,17 @@ pub fn render_sheet(doc: &SchDoc, ctx: &SheetCtx, palette: &BTreeMap<String, Str
 
     for j in &doc.junctions {
         let (x, y) = ctxt.xy(j.at);
-        let fill = if j.color.is_empty() { "#000000" } else { &j.color };
+        let color = junction_color(j);
+        let fill = if color.is_empty() { "#000000" } else { color };
         let _ = write!(
             s,
             r#"<g data-primitive="junction"{}{}><circle cx="{}" cy="{}" r="{}" fill="{fill}" stroke="none"/></g>"#,
-            uuid_attr(&oid(&j.uuid, "j", j.at)), override_attr(&j.color, ctxt.class("junction")), c(x), c(y), c(mm(sch::UNIT) * 0.6)
+            uuid_attr(&oid(&j.uuid, "j", j.at)), override_attr(color, ctxt.class("junction")), c(x), c(y), c(mm(sch::UNIT) * JUNCTION_RADIUS)
         );
     }
 
     for n in &doc.no_ercs {
-        let (x, y) = ctxt.xy(n.at);
-        let r = mm(sch::UNIT) * 0.6;
-        let stroke = if n.color.is_empty() { "#FF0000" } else { &n.color };
-        let _ = write!(
-            s,
-            r#"<g data-primitive="no-connect"{}{}><polyline points="{},{} {},{}" stroke="{stroke}"/><polyline points="{},{} {},{}" stroke="{stroke}"/></g>"#,
-            uuid_attr(&oid(&n.uuid, "nc", n.at)), override_attr(&n.color, ctxt.class("no_connect")),
-            c(x - r), c(y - r), c(x + r), c(y + r),
-            c(x - r), c(y + r), c(x + r), c(y - r)
-        );
+        emit_no_erc(&mut s, &ctxt, n);
     }
 
     for sym in &doc.sheet_symbols {
@@ -745,17 +760,7 @@ pub fn render_sheet(doc: &SchDoc, ctx: &SheetCtx, palette: &BTreeMap<String, Str
 
     // Net-class and other directives placed on a wire.
     for ps in &doc.param_sets {
-        let (x, y) = ctxt.xy(ps.at);
-        let color = ps.parameters.first().map(|p| p.color.clone()).unwrap_or_default();
-        let stroke = if color.is_empty() { "#FF0000" } else { &color };
-        let r = mm(sch::UNIT);
-        let _ = write!(
-            s,
-            r#"<g data-primitive="netclass-flag"{}{}><polyline points="{},{} {},{} {},{} {},{} {},{}" stroke="{stroke}"/>"#,
-            uuid_attr(&oid(&ps.uuid, "ps", ps.at)), override_attr(&color, ctxt.class("netclass_flag")),
-            c(x), c(y), c(x + r), c(y - r), c(x + r * 3.0), c(y - r),
-            c(x + r * 3.0), c(y - r * 2.0), c(x + r), c(y - r * 2.0)
-        );
+        emit_param_set_glyph(&mut s, &ctxt, ps);
         for (i, p) in ps.parameters.iter().filter(|p| !p.hidden).enumerate() {
             emit_text(
                 &mut s,
@@ -1136,11 +1141,13 @@ fn emit_pin(s: &mut String, ctx: &Ctx, comp: &sch::Component, p: &Pin) {
         );
     }
 
-    // Name and number sit in Altium's own places: the name just inside the body
-    // past the stub's body end, the number over the middle of the stub.
+    // Name and number sit in Altium's own places, in sheet units: the name 5
+    // inside the body, the number starting 8 out along the stub with its foot 2
+    // above the line (Altium's descent offset), so it never sits on the stub.
     let len = ((ex - bx).powi(2) + (ey - by).powi(2)).sqrt();
     let (ux, uy) = if len > 1e-9 { ((ex - bx) / len, (ey - by) / len) } else { (1.0, 0.0) };
-    let gap = mm(sch::UNIT) * 0.5;
+    let u = mm(sch::UNIT);
+    let gap = u * 5.0;
     // Text stays upright: a vertical pin's name reads left to right, the way
     // Altium draws it.
     let name_right = ux < -0.5 || (ux.abs() < 0.5 && uy < 0.0);
@@ -1159,9 +1166,21 @@ fn emit_pin(s: &mut String, ctx: &Ctx, comp: &sch::Component, p: &Pin) {
         );
     }
     if p.show_designator() && !p.number.is_empty() {
-        let (mx, my) = ((bx + sx) / 2.0, (by + sy) / 2.0);
-        let at = px_to_pt(ctx, mx, my - gap);
-        emit_text(s, ctx, &p.number, at, pin_font(p.number_font), 1, 0, &p.color, ctx.class("pin_number"));
+        let out = u * 8.0;
+        let foot = u * 2.0;
+        // A horizontal pin's number runs outward from 8 units past the body.
+        // A vertical pin's number sits beside the stub, ending at its line.
+        let (mx, my, justify) = if ux > 0.5 {
+            (bx + out, by - foot, 0)
+        } else if ux < -0.5 {
+            (bx - out, by - foot, 2)
+        } else if uy < 0.0 {
+            (bx - foot, by - out - foot, 8)
+        } else {
+            (bx - foot, by + out + foot, 2)
+        };
+        let at = px_to_pt(ctx, mx, my);
+        emit_text(s, ctx, &p.number, at, pin_font(p.number_font), justify, 0, &p.color, ctx.class("pin_number"));
     }
     s.push_str("</g>");
 }
@@ -1183,7 +1202,109 @@ fn px_to_pt(ctx: &Ctx, x: f64, y: f64) -> Pt {
     Pt { x: inv(x), y: inv(ctx.height - y) }
 }
 
+/// Radius of a junction dot in sheet units: Altium draws a 4-unit dot.
+const JUNCTION_RADIUS: f64 = 2.0;
+
+/// Altium's auto-junction colour (navy). It draws a junction it computed in
+/// this colour whatever colour the cached record carries.
+const AUTO_JUNCTION_COLOR: &str = "#000080";
+
+/// The colour a junction is drawn in.
+fn junction_color(j: &sch::Junction) -> &str {
+    if j.auto {
+        AUTO_JUNCTION_COLOR
+    } else {
+        &j.color
+    }
+}
+
+/// A straight line between two points, in the current group's stroke.
+fn line(s: &mut String, (x1, y1): (f64, f64), (x2, y2): (f64, f64)) {
+    let _ = write!(s, r#"<polyline points="{},{} {},{}"/>"#, c(x1), c(y1), c(x2), c(y2));
+}
+
+/// A no-ERC directive: Altium's marker for the directive's `Symbol`. The sizes
+/// are Altium's own, in sheet units: a cross 8 units across (4 for the small
+/// one), a checkbox, or a filled triangle.
+fn emit_no_erc(s: &mut String, ctx: &Ctx, n: &sch::NoErc) {
+    let (x, y) = ctx.xy(n.at);
+    let u = mm(sch::UNIT);
+    let stroke = if n.color.is_empty() { "#FF0000" } else { &n.color };
+    // The thin cross is a hairline; the other markers use a half-unit pen.
+    let width = if n.symbol == 0 { u * 0.25 } else { units::sch_line_width_mm(0) };
+    let _ = write!(
+        s,
+        r#"<g data-primitive="no-connect"{}{}><g{} stroke="{stroke}" stroke-width="{}" fill="none">"#,
+        uuid_attr(&oid(&n.uuid, "nc", n.at)),
+        override_attr(&n.color, ctx.class("no_connect")),
+        rotate_attr(n.orientation, x, y),
+        c(width)
+    );
+    let p = |dx: f64, dy: f64| (x + dx * u, y + dy * u);
+    match n.symbol {
+        // Checkbox: a stem to a small box holding a tick.
+        3 => {
+            line(s, p(0.0, 0.0), p(-2.0, -2.0));
+            let _ = write!(
+                s,
+                r#"<rect x="{}" y="{}" width="{}" height="{}"/><polyline points="{},{} {},{} {},{}"/>"#,
+                c(x - 6.0 * u), c(y - 6.0 * u), c(4.0 * u), c(4.0 * u),
+                c(x - 5.5 * u), c(y - 4.333 * u),
+                c(x - 4.5 * u), c(y - 3.333 * u),
+                c(x - 2.5 * u), c(y - 5.333 * u)
+            );
+        }
+        // Triangle: filled, its tip on the pin.
+        4 => {
+            let _ = write!(
+                s,
+                r#"<polygon points="{},{} {},{} {},{}" fill="{stroke}"/>"#,
+                c(x), c(y),
+                c(x + 2.6667 * u), c(y - 4.6188 * u),
+                c(x - 2.6667 * u), c(y - 4.6188 * u)
+            );
+        }
+        symbol => {
+            let half = if symbol == 2 { 2.0 } else { 4.0 };
+            line(s, p(-half, -half), p(half, half));
+            line(s, p(-half, half), p(half, -half));
+        }
+    }
+    s.push_str("</g></g>");
+}
+
+/// Length of a power port's stub in sheet units, by `Style`. The glyph sits at
+/// the stub's far end.
+fn power_stub_len(style: i64) -> f64 {
+    match style {
+        0 | 1 => 4.0,
+        3 => 6.0,
+        8 | 9 => 16.0,
+        10 => 20.0,
+        _ => 10.0,
+    }
+}
+
+/// How far a power port's name sits from the port, in sheet units, by `Style`.
+/// The grounds put it past their taller glyphs.
+fn power_text_offset(style: i64) -> f64 {
+    let symbol = match style {
+        8 | 9 => 16.0,
+        10 => 20.0,
+        _ => 10.0,
+    };
+    match style {
+        4..=6 => symbol * 2.0,
+        8 => symbol + 8.0,
+        9 => symbol + 12.0,
+        _ => symbol,
+    }
+}
+
 /// A power port: Altium's glyph for the style, plus the net name.
+///
+/// The glyph is drawn for orientation 0, where the stub runs to the right, and
+/// then turned with the port. The sizes are Altium's own, in sheet units.
 fn emit_power_port(s: &mut String, ctx: &Ctx, p: &PowerPort) {
     let (x, y) = ctx.xy(p.at);
     let stroke = if p.color.is_empty() { "#800000" } else { &p.color };
@@ -1196,92 +1317,123 @@ fn emit_power_port(s: &mut String, ctx: &Ctx, p: &PowerPort) {
         p.style,
         override_attr(&p.color, ctx.class("label_hier"))
     );
-    // The glyph is drawn pointing up and then rotated with the port, which is
-    // how Altium orients it.
     let rot = rotate_attr(p.orientation, x, y);
     let _ = write!(s, r#"<g{rot} stroke="{stroke}" stroke-width="{}" fill="none">"#, c(w));
-    let stem = |s: &mut String, h: f64| {
-        let _ = write!(s, r#"<polyline points="{},{} {},{}"/>"#, c(x), c(y), c(x), c(y - h));
+    let ex = x + power_stub_len(p.style) * u;
+    // A point relative to the stub's end.
+    let e = |dx: f64, dy: f64| (ex + dx * u, y + dy * u);
+    line(s, (x, y), e(0.0, 0.0));
+    // Parallel bars across the stub: (distance past the end, half length).
+    let bars = |s: &mut String, specs: &[(f64, f64)]| {
+        for &(off, half) in specs {
+            line(s, e(off, -half), e(off, half));
+        }
     };
     match p.style {
-        // Circle, arrow, bar and wave all sit on a stem.
         0 => {
-            stem(s, u * 2.0);
-            let _ = write!(s, r#"<circle cx="{}" cy="{}" r="{}"/>"#, c(x), c(y - u * 2.5), c(u * 0.5));
+            let _ = write!(s, r#"<circle cx="{}" cy="{}" r="{}"/>"#, c(ex + 3.0 * u), c(y), c(3.0 * u));
         }
         1 => {
-            stem(s, u * 2.0);
-            let _ = write!(
-                s,
-                r#"<polyline points="{},{} {},{} {},{}"/>"#,
-                c(x - u * 0.7), c(y - u * 1.3), c(x), c(y - u * 2.5), c(x + u * 0.7), c(y - u * 1.3)
-            );
-        }
-        2 => {
-            stem(s, u * 2.0);
-            let _ = write!(
-                s,
-                r#"<polyline points="{},{} {},{}"/>"#,
-                c(x - u), c(y - u * 2.0), c(x + u), c(y - u * 2.0)
-            );
+            line(s, e(6.0, 0.0), e(0.0, -3.0));
+            line(s, e(6.0, 0.0), e(0.0, 3.0));
+            line(s, e(0.0, -3.0), e(0.0, 3.0));
         }
         3 => {
-            stem(s, u * 2.0);
+            let r = 4.0 * u;
             let _ = write!(
                 s,
-                r#"<path d="M {} {} q {} {} {} 0 q {} {} {} 0"/>"#,
-                c(x - u), c(y - u * 2.0), c(u * 0.5), c(-u), c(u), c(u * 0.5), c(u), c(u)
+                r#"<path d="M {} {} A {r} {r} 0 0 1 {} {} A {r} {r} 0 0 0 {} {}"/>"#,
+                c(ex - r), c(y - r), c(ex), c(y), c(ex + r), c(y + r),
+                r = c(r)
             );
         }
-        // Power ground: three shortening bars.
-        4 => {
-            stem(s, u * 2.0);
-            for (i, k) in [1.0f64, 0.66, 0.33].iter().enumerate() {
-                let yy = y - u * (2.0 + i as f64 * 0.5);
-                let _ = write!(
-                    s,
-                    r#"<polyline points="{},{} {},{}"/>"#,
-                    c(x - u * k), c(yy), c(x + u * k), c(yy)
-                );
-            }
-        }
-        // Signal ground and earth: a triangle and a hatched bar.
+        4 => bars(s, &[(0.0, 10.0), (3.0, 7.0), (6.0, 4.0), (9.0, 1.0)]),
         5 => {
-            stem(s, u * 2.0);
-            let _ = write!(
-                s,
-                r#"<polygon points="{},{} {},{} {},{}" fill="none"/>"#,
-                c(x - u), c(y - u * 2.0), c(x + u), c(y - u * 2.0), c(x), c(y - u * 3.0)
-            );
+            line(s, e(0.0, -10.0), e(0.0, 10.0));
+            line(s, e(0.0, -10.0), e(10.0, 0.0));
+            line(s, e(0.0, 10.0), e(10.0, 0.0));
         }
-        _ => {
-            stem(s, u * 2.0);
-            let _ = write!(
-                s,
-                r#"<polyline points="{},{} {},{}"/>"#,
-                c(x - u), c(y - u * 2.0), c(x + u), c(y - u * 2.0)
-            );
-            for k in [-1.0f64, 0.0, 1.0] {
-                let _ = write!(
-                    s,
-                    r#"<polyline points="{},{} {},{}"/>"#,
-                    c(x + u * k * 0.6), c(y - u * 2.0), c(x + u * k * 0.6 - u * 0.4), c(y - u * 2.8)
-                );
-            }
+        6 => {
+            line(s, e(0.0, -10.0), e(0.0, 10.0));
+            line(s, e(0.0, 10.0), e(10.0, 15.0));
+            line(s, e(0.0, 0.0), e(10.0, 5.0));
+            line(s, e(0.0, -10.0), e(10.0, -5.0));
         }
+        7 => {
+            line(s, e(0.0, 0.0), e(-6.0, -3.0));
+            line(s, e(0.0, 0.0), e(-6.0, 3.0));
+        }
+        8 => bars(s, &[(0.0, 10.0), (4.0, 6.0), (8.0, 2.0)]),
+        9 => {
+            bars(s, &[(0.0, 10.0), (4.0, 6.0), (8.0, 2.0)]);
+            let _ = write!(s, r#"<circle cx="{}" cy="{}" r="{}"/>"#, c(ex), c(y), c(12.0 * u));
+        }
+        10 => bars(s, &[(0.0, 8.0)]),
+        // Style 2 is the bar; an unknown style draws as one too.
+        _ => bars(s, &[(0.0, 5.0)]),
     }
     s.push_str("</g>");
     if p.show_net_name {
-        // The name reads away from the glyph, on the side the port points.
+        // The name reads upright, past the glyph, on the side the port points.
+        // Altium keeps it 2 units clear; above the port that gap is the room the
+        // text box keeps below its baseline.
+        let off = (power_text_offset(p.style) * sch::UNIT as f64) as i64;
+        let gap = sch::UNIT * 2;
         let (justify, at) = match p.orientation.rem_euclid(4) {
-            1 => (1, Pt { x: p.at.x, y: p.at.y + sch::UNIT * 4 }),
-            2 => (3, Pt { x: p.at.x + sch::UNIT * 4, y: p.at.y }),
-            3 => (7, Pt { x: p.at.x, y: p.at.y - sch::UNIT * 4 }),
-            _ => (5, Pt { x: p.at.x - sch::UNIT * 4, y: p.at.y }),
+            1 => (1, Pt { x: p.at.x, y: p.at.y + off + gap }),
+            2 => (5, Pt { x: p.at.x - off - gap, y: p.at.y }),
+            // Below the port a hanging baseline sits at the capitals' tops, so one
+            // unit keeps them off the glyph.
+            3 => (7, Pt { x: p.at.x, y: p.at.y - off - sch::UNIT }),
+            _ => (3, Pt { x: p.at.x + off + gap, y: p.at.y }),
         };
         emit_text(s, ctx, &p.text, at, p.font, justify, 0, &p.color, ctx.class("label_hier"));
     }
     s.push_str("</g>");
+}
+
+/// Open a parameter set's group and draw Altium's directive flag: a short line
+/// to a circle with an "i" in it, then the directive's name past the circle.
+/// The tiny style draws a smaller circle and no text. The caller closes the
+/// group after the set's visible parameters.
+fn emit_param_set_glyph(s: &mut String, ctx: &Ctx, ps: &sch::ParamSet) {
+    let (x, y) = ctx.xy(ps.at);
+    let u = mm(sch::UNIT);
+    let stroke = if ps.color.is_empty() { "#FF0000" } else { &ps.color };
+    let tiny = ps.style == 1;
+    let (radius, centre, stub) = if tiny { (2.0, 4.0, 2.0) } else { (6.0, 12.0, 6.0) };
+    let _ = write!(
+        s,
+        r#"<g data-primitive="netclass-flag"{}{}><g{} stroke="{stroke}" stroke-width="{}" fill="none">"#,
+        uuid_attr(&oid(&ps.uuid, "ps", ps.at)),
+        override_attr(&ps.color, ctx.class("netclass_flag")),
+        rotate_attr(ps.orientation, x, y),
+        c(units::sch_line_width_mm(0))
+    );
+    line(s, (x, y), (x + stub * u, y));
+    let _ = write!(s, r#"<circle cx="{}" cy="{}" r="{}"/></g>"#, c(x + centre * u), c(y), c(radius * u));
+    if tiny {
+        return;
+    }
+    // The flag turns with the directive; its text stays upright.
+    let turn = |d: f64| -> Pt {
+        let d = (d * sch::UNIT as f64) as i64;
+        match ps.orientation.rem_euclid(4) {
+            1 => Pt { x: ps.at.x, y: ps.at.y + d },
+            2 => Pt { x: ps.at.x - d, y: ps.at.y },
+            3 => Pt { x: ps.at.x, y: ps.at.y - d },
+            _ => Pt { x: ps.at.x + d, y: ps.at.y },
+        }
+    };
+    let class = ctx.class("netclass_flag");
+    emit_text(s, ctx, "i", turn(centre), 1, 4, 0, &ps.color, class);
+    let justify = match ps.orientation.rem_euclid(4) {
+        1 => 1,
+        2 => 5,
+        3 => 7,
+        _ => 3,
+    };
+    emit_text(s, ctx, &ps.name, turn(20.0), 1, justify, 0, &ps.color, class);
 }
 
 /// A port — Altium's cross-sheet connector, which is the hierarchical label of
@@ -1767,6 +1919,7 @@ mod tests {
                 name: "NetClass".into(),
                 uuid: "ps".into(),
                 parameters: vec![sch::Param { name: "ClassName".into(), text: "HV".into(), ..Default::default() }],
+                ..Default::default()
             }],
             regions: vec![sch::Region { min: Pt { x: 0, y: 0 }, max: Pt { x: U, y: U }, uuid: "r".into() }],
             blankets: vec![Graphic {
@@ -1845,13 +1998,56 @@ mod tests {
         assert_eq!(anchor(8), ("end", "hanging"), "top-right");
     }
 
-    /// An overbar is a per-character backslash in the file and one decoration
-    /// in the output.
+    /// An overbar is a per-character backslash in the file and one overlined
+    /// run per barred stretch in the output.
     #[test]
     fn an_overbarred_name_loses_its_backslashes() {
-        assert_eq!(markup("R\\E\\S\\E\\T\\"), ("RESET".to_string(), true));
+        let bar = |t: &str| format!(r#"<tspan text-decoration="overline" data-overbar="">{t}</tspan>"#);
+        assert_eq!(markup("R\\E\\S\\E\\T\\"), (bar("RESET"), true));
         assert_eq!(markup("PLAIN"), ("PLAIN".to_string(), false));
-        assert_eq!(markup("C:\\x"), ("C:x".to_string(), false), "a lone slash is not a bar");
+        // Each backslash bars the character before it, as Altium does.
+        assert_eq!(markup("R\\S\\T\\_N"), (format!("{}_N", bar("RST")), true));
+        assert_eq!(markup("C:\\x"), (format!("C{}x", bar(":")), true));
+    }
+
+    /// Glyphs are Altium's size and colour: an auto junction is a navy 4-unit
+    /// dot whatever its record says, a no-ERC cross spans 8 units, and a bar
+    /// power port at orientation 0 has its bar 10 units right with the name
+    /// past it (not on the wire).
+    #[test]
+    fn glyphs_have_altiums_size_colour_and_side() {
+        let u = mm(sch::UNIT);
+        let s = sheet(SchDoc {
+            sheet: a4(),
+            junctions: vec![Junction { at: Pt { x: 0, y: 0 }, uuid: "j".into(), color: "#800000".into(), auto: true }],
+            no_ercs: vec![sch::NoErc { at: Pt { x: 0, y: 0 }, uuid: "x".into(), ..Default::default() }],
+            power_ports: vec![PowerPort {
+                at: Pt { x: 100 * U, y: 100 * U },
+                text: "GND".into(),
+                style: 2,
+                show_net_name: true,
+                uuid: "pp".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+        assert!(s.contains(&format!(r##"r="{}" fill="#000080""##, c(u * 2.0))), "junction: {s}");
+        assert!(s.contains(&format!(r#"points="{},{} {},{}""#, c(-4.0 * u), c(760.0 * u - 4.0 * u), c(4.0 * u), c(760.0 * u + 4.0 * u))), "cross: {s}");
+        let (px, py) = (100.0 * u, 660.0 * u);
+        assert!(s.contains(&format!(r#"points="{},{} {},{}""#, c(px + 10.0 * u), c(py - 5.0 * u), c(px + 10.0 * u), c(py + 5.0 * u))), "bar: {s}");
+        assert!(s.contains(&format!(r#"x="{}" y="{}""#, c(px + 12.0 * u), c(py))) && s.contains(r#"text-anchor="start""#), "name: {s}");
+    }
+
+    /// A barred run reaches the sheet as an overlined `tspan` inside the text,
+    /// which is what the viewer measures to draw the bar.
+    #[test]
+    fn a_barred_run_is_an_overlined_tspan_in_its_text() {
+        let s = sheet(SchDoc {
+            sheet: a4(),
+            net_labels: vec![NetLabel { at: Pt { x: 0, y: 0 }, text: "R\\S\\T\\".into(), ..Default::default() }],
+            ..Default::default()
+        });
+        assert!(s.contains(r#"<tspan text-decoration="overline" data-overbar="">RST</tspan>"#), "{s}");
     }
 }
 

@@ -658,7 +658,7 @@ fn run_design_altium(
     // review is a real review — and says so rather than failing the run.
     let mut pcb_svgs: Vec<serde_json::Value> = Vec::new();
     let pcb_geometry = match crate::altium::pcb::board_beside(project) {
-        Some(board) => match crate::altium::pcb::extract_pcb(&board, out_dir, emit) {
+        Some(board) => match crate::altium::pcb::extract_pcb(&board, out_dir, &project_params, emit) {
             Ok(artifacts) => {
                 let (rel, summary) = (artifacts.geometry, artifacts.summary);
                 pcb_svgs = artifacts.svgs;

@@ -402,15 +402,24 @@ pub struct Junction {
     pub at: Pt,
     pub uuid: String,
     pub color: String,
+    /// True for a junction Altium computed and cached (`IndexInSheet` below
+    /// zero or absent). The designer did not place it, and Altium draws it in
+    /// its own auto-junction colour, not the one the record carries.
+    pub auto: bool,
 }
 
 /// A parameter set (`RECORD=43`) — a directive placed on a net, e.g. a net class.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ParamSet {
     pub at: Pt,
     pub name: String,
     pub uuid: String,
     pub parameters: Vec<Param>,
+    pub color: String,
+    /// Quarter turns counter-clockwise; 0 points the flag to the right.
+    pub orientation: i64,
+    /// 0 is Altium's large flag (circle plus name), 1 its tiny one (circle only).
+    pub style: i64,
 }
 
 /// A rectangular region (`RECORD=211`). See `altium::netlist` for why these are
@@ -522,6 +531,9 @@ pub struct NoErc {
     /// Altium's marker shape enum; 0 is the plain cross.
     pub symbol: i64,
     pub uuid: String,
+    /// Quarter turns counter-clockwise. Only the checkbox and triangle
+    /// markers have a direction; a cross looks the same every way round.
+    pub orientation: i64,
 }
 
 /// A placed image (`RECORD=30`). The bytes live in the document's `Storage`
@@ -640,8 +652,11 @@ fn color(r: &TextRecord) -> String {
 /// A record's fill colour, present only when the object is actually solid.
 /// Altium keeps `AreaColor` on outline-only objects too, so reading it without
 /// checking `IsSolid` fills every rectangle on the sheet.
+///
+/// A solid object with no `AreaColor` is filled black: Altium omits a field
+/// that holds 0, so absent means 0. A test point's solid dot is stored this way.
 fn fill(r: &TextRecord) -> Option<String> {
-    r.b("IsSolid").then(|| units::bgr_hex(r.i("AreaColor").unwrap_or(0xFF_FF_FF)))
+    r.b("IsSolid").then(|| units::bgr_hex(r.i("AreaColor").unwrap_or(0)))
 }
 
 /// The shape of a graphic record, or `None` for a type this does not draw.
@@ -1045,6 +1060,9 @@ pub fn parse_records(recs: Vec<TextRecord>) -> SchDoc {
                     name: r.s("Name").to_string(),
                     uuid: r.s("UniqueID").to_string(),
                     parameters: Vec::new(),
+                    color: color(r),
+                    orientation: r.i("Orientation").unwrap_or(0),
+                    style: r.i("Style").unwrap_or(0),
                 });
             }
             Some(44) => {
@@ -1257,12 +1275,14 @@ pub fn parse_records(recs: Vec<TextRecord>) -> SchDoc {
                 at: pt(r, "Location.X", "Location.Y"),
                 uuid: r.s("UniqueID").to_string(),
                 color: color(r),
+                auto: r.i("IndexInSheet").map(|i| i < 0).unwrap_or(true),
             }),
             22 => out.no_ercs.push(NoErc {
                 at: pt(r, "Location.X", "Location.Y"),
                 color: color(r),
                 symbol: r.i("Symbol").unwrap_or(0),
                 uuid: r.s("UniqueID").to_string(),
+                orientation: r.i("Orientation").unwrap_or(0),
             }),
             30 => out.images.push(SchImage {
                 min: pt(r, "Location.X", "Location.Y"),
@@ -1466,6 +1486,26 @@ mod tests {
     /// `IsCurrent`. Taking the first gives a footprint in the right family and
     /// wrong — `SOIC127P1030X265-16N-4` where the board has `…-16N-V`. Found by
     /// the plan §8.3 differential on U2 of the EVAL design.
+    /// A junction Altium cached (`IndexInSheet=-1`) is marked auto; a placed
+    /// one is not. The parameter set keeps its colour, turn and style, and a
+    /// solid shape with no `AreaColor` fills black, Altium's absent-means-0.
+    #[test]
+    fn junction_origin_param_set_look_and_absent_fill() {
+        let rec = |s: &str| TextRecord::parse(format!("{s} ").as_bytes());
+        let doc = parse_records(vec![
+            rec("|HEADER=Protel for Windows - Schematic Capture|"),
+            rec("|RECORD=29|IndexInSheet=-1|Location.X=10|Location.Y=10|Color=128|"),
+            rec("|RECORD=29|IndexInSheet=4|Location.X=20|Location.Y=10|Color=128|"),
+            rec("|RECORD=43|Location.X=30|Location.Y=10|Color=4408131|Orientation=3|Style=1|Name=EMMC|"),
+            rec("|RECORD=1|LibReference=TP|"),
+            rec("|RECORD=8|OwnerIndex=3|Location.X=40|Location.Y=40|Radius=5|SecondaryRadius=5|IsSolid=T|"),
+        ]);
+        assert!(doc.junctions[0].auto && !doc.junctions[1].auto);
+        let ps = &doc.param_sets[0];
+        assert_eq!((ps.color.as_str(), ps.orientation, ps.style), ("#434343", 3, 1));
+        assert_eq!(doc.components[0].graphics[0].fill.as_deref(), Some("#000000"));
+    }
+
     #[test]
     fn the_footprint_is_the_current_implementation() {
         let rec = |s: &str| TextRecord::parse(format!("{s} ").as_bytes());

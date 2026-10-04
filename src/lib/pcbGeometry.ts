@@ -153,6 +153,12 @@ export interface PcbTextDef {
   italic?: boolean;
   /** KiCad knockout (inverted) text — filled layer-colour background, glyphs cut out. */
   knockout?: boolean;
+  /** A knockout's set background `[x0, y0, x1, y1]` in mm, relative to the anchor in
+   *  the text's own frame (x along the text, y down), before any mirror. Absent ⇒ the
+   *  box is sized from the glyphs. */
+  knockout_box?: [number, number, number, number];
+  /** Border (mm) round a glyph-sized knockout box; absent ⇒ the renderer's default. */
+  knockout_margin?: number;
   /** Footprint reference/value text is kept upright; board text uses its literal angle. */
   upright?: boolean;
   /** Custom outline-font family (e.g. "Calibri") from KiCad `(font (face …))`; absent ⇒
