@@ -25,8 +25,12 @@ import type {
   UiSettings,
 } from "./types";
 import type { CheckOutcome, FindingsDoc, MappingView, ReviewInboxEntry } from "./findings";
-import type { AgentReviewSettings } from "./types";
-import type { ReviewBundle } from "./reviewService";
+import type {
+  AgentProfile,
+
+  AssistantSetup,
+  RegisterOutcome,
+} from "./types";
 import type { DesignIndexes } from "./design";
 import type { DiffHandle } from "./diff";
 
@@ -127,12 +131,14 @@ export const ipc = {
    *  BOM). Writing it at all is what stops the dialog interrupting the next review. */
   setBomMapping: (overrides: Record<string, string>) =>
     invoke<void>("set_bom_mapping", { overrides }),
-  /** Paid tier, step 1: exactly what a detailed review would upload — shown in the
-   *  pre-flight dialog before anything leaves the machine (plan §4.2). */
-  buildReviewBundle: (profile: string) =>
-    invoke<ReviewBundle>("build_review_bundle", { profile }),
-  /** Paid tier, step 2: the service's findings.json, ingested through the SAME path
-   *  as the free check so fingerprints reconcile against the existing comments. */
+  /** The review setup window (`SpinZero --setup <dir>`): the question an MCP review
+   *  server wrote, untyped — parse it with `parseSetupRequest`. */
+  setupRequest: () => invoke<unknown>("setup_request"),
+  /** Save the user's answer for the review server. `mapping` holds only changed fields. */
+  setupSubmit: (profile: string | null, mapping: Record<string, string>) =>
+    invoke<void>("setup_submit", { profile, mapping }),
+  /** A findings.json from outside, ingested through the SAME path as the free check
+   *  so fingerprints reconcile against the existing comments. */
   ingestFindings: (doc: FindingsDoc) => invoke<CheckOutcome>("ingest_findings", { doc }),
   /** What is waiting in `<project>/reviews/inbox/` — findings produced by a review
    *  that ran outside the app (the engine CLI, or the user's agent over MCP). Listing
@@ -144,12 +150,30 @@ export const ipc = {
   importReviewInbox: (name: string) =>
     invoke<CheckOutcome>("import_review_inbox", { name }),
 
-  /** Paid tier, local surface: run the review through the user's own AI assistant
-   *  over MCP. Returns as soon as the assistant is running; progress arrives on
-   *  `agent-event` and the findings come back through the review inbox. */
-  startAgentReview: (profile: string, config: AgentReviewSettings) =>
-    invoke<void>("start_agent_review", { profile, config }),
+  /** Run the detailed review through the user's own agent, over MCP. Returns as soon
+   *  as the agent is running; progress arrives on `agent-event` and the findings come
+   *  back through the review inbox. */
+  startAgentReview: (agent: AgentProfile, brief: ReviewBrief) =>
+    invoke<void>("start_agent_review", { agent, brief }),
   agentReviewRunning: () => invoke<boolean>("agent_review_running"),
+  /** The agent profiles SpinZero ships, for the setup screen's picker. */
+  /** Stop the agent review this app started. False when none of ours is running. */
+  cancelAgentReview: () => invoke<boolean>("cancel_agent_review"),
+  agentProfiles: () => invoke<AgentProfile[]>("agent_profiles"),
+  /** This project's newest review, whoever started it — read off the review server's
+   *  own `status.json`. Asked on mount so a reopened window picks up a run in flight. */
+  agentReviewStatus: () => invoke<RunStatus | null>("agent_review_status"),
+
+  /** Everything the "Connect your AI agent" screen needs: where the server is,
+   *  where the licence file is, and which assistants this machine has. */
+  assistantSetup: () => invoke<AssistantSetup>("assistant_setup"),
+  /** The assistants whose own config lists SpinZero. Reads files, spawns nothing. */
+  assistantConnected: () => invoke<{ id: string; label: string }[]>("assistant_connected"),
+  /** Run one client's own `mcp add`. We never edit its config file ourselves. */
+  registerAssistant: (clientId: string) =>
+    invoke<RegisterOutcome>("register_assistant", { clientId }),
+  /** Write the licence key into the one file every client reads it from. */
+  setLicenceKey: (key: string) => invoke<string>("set_licence_key", { key }),
 
   getReviewAuthor: () => invoke<string>("get_review_author"),
   listComments: () => invoke<Comment[]>("list_comments"),
@@ -199,13 +223,65 @@ export function onCrunchEvent(
   return listen<CrunchEvent>("crunch-event", (e) => handler(e.payload));
 }
 
-/** One line of life from a review running through the user's assistant. Mirrors
+/**
+ * One review's state, exactly as the review server wrote it into `status.json`.
+ * Mirrors `mcpstatus::RunStatus` and `local/status.ts`.
+ *
+ * Counts, phase names, stage ids and two paths. Nothing here is board content, which
+ * is what makes the file safe to write on a customer's machine.
+ */
+/** One open step in `status.json`. `handed_out_ts` is null while no sub-agent has
+ *  fetched it. Step ids are the server's ("verify_parts#3", "board_review"). */
+export interface OpenStepStatus {
+  step: string;
+  index: number;
+  opened_ts: string;
+  handed_out_ts: string | null;
+}
+
+export interface RunStatus {
+  status_version: number;
+  review_id: string;
+  pipeline: string;
+  profile: string;
+  project_dir: string | null;
+  phase: "preflight" | "preparing" | "step_open" | "assembling" | "done" | "failed";
+  stage: string | null;
+  steps_done: number;
+  steps_total: number;
+  /** The steps open now, oldest first. Up to ten run at once. Absent from a server
+   *  older than parallel steps. */
+  open_steps?: OpenStepStatus[];
+  parts_done: number;
+  parts_total: number;
+  datasheets_read: number;
+  datasheets_total: number;
+  started_ts: string;
+  /** A gap here is a stalled run — see `isStalled` in `agentReviewStore`. */
+  updated_ts: string;
+  findings_path: string | null;
+  report_path: string | null;
+  error: string | null;
+}
+
+/** The preflight answers SpinZero already holds, handed to the agent in its prompt.
+ *  Mirrors `agent::ReviewBrief`. */
+export interface ReviewBrief {
+  /** The end application profile id, or "" when the user has not stated one. */
+  profile: string;
+  /** Only the corrections. An empty column means "this BOM has no such column". */
+  mapping: { field: string; column: string }[];
+}
+
+/** One line of life from a review running through the user's agent. Mirrors
  *  `agent::AgentEvent`. */
 export type AgentEvent =
-  | { kind: "started"; assistant: string }
+  | { kind: "started"; agent: string }
   | { kind: "progress"; line: string }
-  | { kind: "finished"; seconds: number }
-  | { kind: "failed"; detail: string };
+  | { kind: "status"; status: RunStatus }
+  | { kind: "finished"; seconds: number; last_line: string | null }
+  | { kind: "failed"; detail: string }
+  | { kind: "cancelled" };
 
 export function onAgentEvent(handler: (ev: AgentEvent) => void): Promise<UnlistenFn> {
   return listen<AgentEvent>("agent-event", (e) => handler(e.payload));

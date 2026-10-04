@@ -98,7 +98,7 @@ function VersionChip() {
   );
 }
 
-/** Soft fork-awareness (version-control-plan.md §1): when a teammate crunched a
+/** Soft fork-awareness (docs/version-control-plan.md §1): when a teammate crunched a
  *  revision recently, warn that a parallel edit may fork. Dismissible; reappears only
  *  for a newer heartbeat. Never blocks — there are no locks. */
 function PresenceBanner() {

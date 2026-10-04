@@ -22,6 +22,8 @@ fn empty_indexes() -> DesignIndexes {
         components: HashMap::new(),
         theme: serde_json::Value::Null,
         pcb_geometry: None,
+        board_3d: serde_json::Value::Null,
+        design_tool: None,
     }
 }
 

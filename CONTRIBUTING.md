@@ -44,7 +44,12 @@ naming from KiCad or any other EDA tool's source** into a contribution —
 parser changes must be derivable from the format, not from another
 implementation.
 
-## License
+## Licence
 
-By contributing you agree that your contributions are licensed under the
-project's license, GPL-3.0-or-later.
+SpinZero is proprietary. The source is published so you can read it, audit it
+and report problems — not so it can be redistributed or reused. `LICENSE` has
+the terms.
+
+By contributing you assign us the copyright in your contribution, and you
+confirm it is your own work. That is what lets the whole program ship under one
+set of terms.

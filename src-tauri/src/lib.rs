@@ -1,4 +1,5 @@
 mod agent;
+mod mcpstatus;
 mod bomcheck;
 mod cache;
 mod checkpoints;
@@ -7,12 +8,16 @@ mod device;
 mod diff;
 mod events;
 mod index_db;
+mod lane;
 mod logging;
 mod presence;
 mod project;
 mod rawstore;
-mod reviewbundle;
 mod reviews;
+mod assistant;
+mod findings;
+mod bomrules;
+mod setupwin;
 mod sidecar;
 mod telemetry;
 mod util;
@@ -111,6 +116,13 @@ fn open_handle(
         let (app, p) = (app.clone(), handle.clone());
         let generation = p.watcher_gen.load(Ordering::SeqCst);
         std::thread::spawn(move || watcher::run(app, p, generation));
+    }
+
+    // The review server's run directory. Watched for THIS project's newest review,
+    // whoever started it — the app, a terminal, or an editor we have never heard of.
+    {
+        let (app, p) = (app.clone(), handle.clone());
+        std::thread::spawn(move || mcpstatus::run(app, p));
     }
 
     // Background: a schema bump empties the DB — refill it from the system of record
@@ -1085,7 +1097,7 @@ fn get_bom_presets(state: State<AppState>) -> Result<Vec<design::BomPreset>, Str
 }
 
 // ------------------------------------------------------ BOM check (free tier)
-// Deterministic rules over the crunched BOM (`crates/bom-rules`), whose findings.json
+// Deterministic rules over the crunched BOM (the `bom-rules` program), whose findings.json
 // is ingested as review comments. The paid detailed review emits the same document,
 // so it lands through the same path — see bomcheck.rs.
 
@@ -1098,7 +1110,7 @@ fn run_bom_check(
     let lines = design::bom_lines(opt_active_extraction(&state))?;
     let profile = profile.unwrap_or_else(|| "default".to_string());
     let overrides = saved_bom_mapping(&handle.project_dir).unwrap_or_default();
-    let (doc, mapping) = bomcheck::run_rules(&lines, &profile, &overrides);
+    let (doc, mapping) = bomcheck::run_rules(&lines, &profile, &overrides)?;
     telemetry::bump("bom_checks");
     bomcheck::ingest(
         &handle.project_dir,
@@ -1131,7 +1143,7 @@ fn get_bom_mapping(
     let lines = design::bom_lines(opt_active_extraction(&state))?;
     let profile = profile.unwrap_or_else(|| "default".to_string());
     let saved = saved_bom_mapping(&handle.project_dir);
-    Ok(bomcheck::mapping_view(&lines, &profile, saved.as_ref()))
+    bomcheck::mapping_view(&lines, &profile, saved.as_ref())
 }
 
 /// Record the mapping the user approved. Skipping the dialog saves an empty map —
@@ -1153,33 +1165,8 @@ fn set_bom_mapping(
 // bundle, and to land the result through the SAME ingestion path as the free check
 // so a paid finding refines the free comment instead of duplicating it.
 //
-// The HTTP conversation itself (submit, SSE progress, findings, ack) lives in the
-// frontend (`src/lib/reviewService.ts`): it is plain fetch against a configurable
-// base URL, and keeping it there means no provider token, no job state and no retry
-// policy in the Rust process.
-
-/// Exactly what a detailed review would upload, for the pre-flight dialog. Pure —
-/// nothing is sent, nothing is written.
-#[tauri::command]
-fn build_review_bundle(
-    state: State<AppState>,
-    profile: Option<String>,
-) -> Result<reviewbundle::ReviewBundle, String> {
-    let handle = current_project(&state)?;
-    let profile = profile.unwrap_or_else(|| "default".to_string());
-    let design_tool = handle.design_tool.lock_safe().clone();
-    let component_count = design::bom_lines(opt_active_extraction(&state))
-        .map(|lines| lines.iter().map(|l| l.designators.len()).sum())
-        .unwrap_or(0);
-    reviewbundle::build(
-        opt_active_extraction(&state),
-        &profile,
-        &handle.name,
-        &design_tool,
-        handle.effective_extraction_id(),
-        component_count,
-    )
-}
+// There is no hosted tier any more. A detailed review runs through the user's own
+// agent, over MCP, and lands here through the same drop-box every outside review uses.
 
 /// Ingest a findings document the review service produced.
 ///
@@ -1204,7 +1191,7 @@ fn ingest_findings(
 /// incomplete, and file the comments.
 fn ingest_validated(
     handle: &Arc<ProjectHandle>,
-    doc: bom_rules::FindingsDoc,
+    doc: crate::findings::FindingsDoc,
 ) -> Result<bomcheck::CheckOutcome, String> {
     telemetry::bump("detailed_reviews");
     log::info!(
@@ -1238,7 +1225,7 @@ fn ingest_validated(
         &project::author_slug(),
         handle.effective_extraction_id(),
         doc,
-        &bom_rules::load::MappingReport::default(),
+        &crate::findings::MappingReport::default(),
     )
 }
 
@@ -1280,36 +1267,110 @@ fn import_review_inbox(
     Ok(outcome)
 }
 
-/// Start a detailed review through the user's own AI assistant, over MCP.
+/// Start a BOM review through the user's own AI agent, over MCP.
 ///
-/// The app writes an MCP config naming its own review server, spawns the assistant's
-/// CLI against it, and gets out of the way. The findings come back through the review
-/// drop-box like every other review that ran outside this window, so there is exactly
-/// one ingestion path (see `bomcheck::inbox_dir`).
+/// The app supplies the prompt, and for Claude Code it first points the `spinzero`
+/// registration at this build's own server (`lane.rs`). The agent's permissions and
+/// sub-agents are its owner's business — see `agent.rs`. The findings
+/// come back through the review drop-box like every other review that ran outside this
+/// window, so there is exactly one ingestion path (`bomcheck::inbox_dir`).
 ///
-/// Progress arrives on `agent-event`; this returns as soon as the process is up.
+/// Progress does not arrive from the agent: `mcpstatus.rs` reads it from the review
+/// server's own `status.json`. This returns as soon as the process is up.
 #[tauri::command]
 fn start_agent_review(
     app: AppHandle,
     state: State<AppState>,
-    profile: Option<String>,
-    config: agent::AgentConfig,
+    agent: agent::AgentProfile,
+    brief: agent::ReviewBrief,
 ) -> Result<(), String> {
     let handle = current_project(&state)?;
-    let profile = profile.unwrap_or_else(|| "default".to_string());
-    // Scratch, not project: the MCP config is regenerable and must not land in the
-    // folder that syncs (docs/storage-model.md).
-    let scratch = project::local_data_root(&handle.project_dir).join("agent");
+    // A dev build's server needs the dev service. Usually start-up already started it,
+    // and this is one port check. If it went down since, it starts again here.
+    lane::ensure_dev_service().map_err(|e| format!("This dev build needs the dev service: {e}"))?;
+    // Claude Code finds the review server through its `spinzero` registration, so make
+    // it this build's own before the review starts. See lane.rs.
+    if agent.id == "claude-code" {
+        let lane = lane::current();
+        match lane::sync() {
+            Ok(outcome) => log::info!("review lane {}: {outcome:?}", lane.name()),
+            // An installed build reviews anyway: the Connect screen set the entry, and a
+            // customer should not be stopped by our housekeeping.
+            Err(e) if lane == lane::Lane::Installed => {
+                log::warn!("could not check the review server registration");
+                log::info!("{} review lane: {e}", telemetry::LOCAL_ONLY);
+            }
+            // A dev or candidate build stops: the review would run on another build's
+            // server and look like it ran on this one.
+            Err(e) => return Err(format!("This {} build could not point Claude Code at its own review server: {e}", lane.name())),
+        }
+    }
     telemetry::bump("agent_reviews");
-    log::info!("starting an assistant review, profile {profile}");
+    log::info!("starting an agent review with the {} profile", agent.id);
     state
         .agent
         .lock_safe()
-        .start(app, handle.project_dir.clone(), scratch, profile, config)
+        .start(app, handle.project_dir.clone(), agent, brief)
+}
+
+/// Stop the agent review this app started, and everything it started. Nothing is
+/// imported. False when no agent of ours is running (a review started in the user's
+/// own terminal is theirs to stop).
+#[tauri::command]
+fn cancel_agent_review(state: State<AppState>) -> Result<bool, String> {
+    state.agent.lock_safe().cancel()
+}
+
+/// The agent profiles SpinZero ships, for the setup screen's picker.
+#[tauri::command]
+fn agent_profiles() -> Vec<agent::AgentProfile> {
+    agent::builtin_profiles()
+}
+
+/// This project's newest review, whoever started it. Asked on mount so a reopened
+/// window picks up a run already in flight rather than waiting for its next write.
+#[tauri::command]
+fn agent_review_status(state: State<AppState>) -> Option<mcpstatus::RunStatus> {
+    let handle = current_project(&state).ok()?;
+    let root = mcpstatus::run_root()?;
+    mcpstatus::newest_for(&root, &handle.project_dir)
 }
 
 /// Is an assistant review in flight? The launcher asks on mount so a reopened window
 /// does not offer to start a second one.
+// ------------------------------------------------ connecting an AI assistant
+// We never edit another product's config file. Where a client has its own `mcp add`
+// we run that; where it does not, the user pastes a block. See assistant.rs.
+
+// Both spawn other programs (`claude --version`, `claude mcp add`) and wait for them.
+// A sync command runs on the main thread, which froze the whole window while they ran.
+// So both are async and do the work on a blocking thread.
+#[tauri::command]
+async fn assistant_setup() -> Result<assistant::AssistantSetup, String> {
+    tauri::async_runtime::spawn_blocking(assistant::setup)
+        .await
+        .map_err(|e| format!("setup check failed: {e}"))
+}
+
+#[tauri::command]
+async fn assistant_connected() -> Vec<assistant::ConnectedClient> {
+    tauri::async_runtime::spawn_blocking(assistant::connected_clients)
+        .await
+        .unwrap_or_default()
+}
+
+#[tauri::command]
+async fn register_assistant(client_id: String) -> Result<assistant::RegisterOutcome, String> {
+    tauri::async_runtime::spawn_blocking(move || assistant::register(&client_id))
+        .await
+        .map_err(|e| format!("registration failed: {e}"))?
+}
+
+#[tauri::command]
+fn set_licence_key(key: String) -> Result<String, String> {
+    assistant::write_licence_key(&key)
+}
+
 #[tauri::command]
 fn agent_review_running(state: State<AppState>) -> bool {
     state.agent.lock_safe().is_running()
@@ -1435,6 +1496,27 @@ fn set_settings(app: AppHandle, settings: serde_json::Value) -> Result<(), Strin
 
 // ------------------------------------------------------------ external links
 
+/// The setup window's question. Errors when this process is not a setup window.
+#[tauri::command]
+fn setup_request(mode: State<setupwin::SetupMode>) -> Result<serde_json::Value, String> {
+    let dir = mode.0.as_ref().ok_or("this window was not opened for a review setup")?;
+    setupwin::read_request(dir)
+}
+
+/// Save what the user confirmed in the setup window. `mapping` holds only the fields
+/// they changed. The window closes itself once this returns.
+#[tauri::command]
+fn setup_submit(
+    mode: State<setupwin::SetupMode>,
+    profile: Option<String>,
+    mapping: BTreeMap<String, String>,
+) -> Result<(), String> {
+    let dir = mode.0.as_ref().ok_or("this window was not opened for a review setup")?;
+    setupwin::write_answer(dir, profile.as_deref(), &mapping).inspect_err(|e| log::error!("review setup: {e}"))?;
+    log::info!("review setup confirmed: {} field(s) changed", mapping.len());
+    Ok(())
+}
+
 /// Open an http(s) URL in the user's default browser — the About dialog's link to
 /// the public releases repo (README / downloads / changelog). Tauri's webview
 /// won't open a bare `target="_blank"`, and a few lines beat pulling in a plugin
@@ -1523,11 +1605,21 @@ fn ensure_valid_cwd() {
 }
 
 pub fn run() {
+    // A dev build runs the fresh `bom-rules` build, like the dev review server does.
+    // First, because it sets an environment variable, which must happen before any
+    // thread starts. See lane.rs.
+    lane::adopt_dev_sidecars();
+
     // Initialise Sentry FIRST and keep its guard for the entire run — it flushes
     // pending telemetry on drop and installs the panic-capture integration that
     // our logging panic hook (set up later) chains onto. DSN-gated, so this stays
     // inert unless PCBREVIEW_SENTRY_DSN is set. See telemetry.rs.
     let _sentry_guard = telemetry::init();
+
+    // `--setup <dir>`: an MCP review server asking the user to confirm a review's
+    // setup. This process then shows only that window. See setupwin.rs.
+    let setup_dir = setupwin::dir_from_args(std::env::args());
+    let setup_mode = setup_dir.is_some();
 
     // `mut` is only exercised by the debug-only plugin block below.
     #[allow(unused_mut)]
@@ -1561,6 +1653,7 @@ pub fn run() {
     let app = builder
         .plugin(tauri_plugin_dialog::init())
         .manage(AppState::default())
+        .manage(setupwin::SetupMode(setup_dir))
         .setup(move |app| {
             // Logging: official Tauri plugin → rotating file `<app_log_dir>/spinzero.log`
             // plus a stdout mirror for `cargo tauri dev`. All code logs via `log::*`.
@@ -1590,6 +1683,37 @@ pub fn run() {
             // CWD-relative path resolution fail with "os error 3" (the updater check and
             // extraction included). Pin it to a valid directory now, before either runs.
             ensure_valid_cwd();
+            // The main window is `create: false` in tauri.conf.json, so exactly one of
+            // the two windows is built here.
+            if !setup_mode {
+                // Point Claude Code's `spinzero` at this build's own server now, so the
+                // review screen's "connected" check reads the right answer. Off the main
+                // thread: it can run the `claude` CLI, which takes a second. A dev build
+                // also starts the dev service here, so it is up before the first review.
+                std::thread::spawn(|| {
+                    if let Err(e) = lane::ensure_dev_service() {
+                        log::info!("{} dev service not started: {e}", telemetry::LOCAL_ONLY);
+                    }
+                    match lane::sync() {
+                        Ok(outcome) => log::info!("review lane {}: {outcome:?}", lane::current().name()),
+                        Err(e) => log::info!("{} review lane not set at start-up: {e}", telemetry::LOCAL_ONLY),
+                    }
+                });
+            }
+            if setup_mode {
+                log::info!("starting as the review setup window");
+                tauri::WebviewWindowBuilder::new(app, "setup", tauri::WebviewUrl::App("index.html?setup=1".into()))
+                    .title("SpinZero · Review setup")
+                    .inner_size(760.0, 860.0)
+                    .min_inner_size(560.0, 480.0)
+                    .theme(Some(tauri::Theme::Dark))
+                    .focused(true)
+                    .always_on_top(true)
+                    .center()
+                    .build()?;
+            } else if let Some(cfg) = app.config().app.windows.iter().find(|w| w.label == "main") {
+                tauri::WebviewWindowBuilder::from_config(app, cfg)?.build()?;
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -1633,12 +1757,18 @@ pub fn run() {
             run_bom_check,
             get_bom_mapping,
             set_bom_mapping,
-            build_review_bundle,
             ingest_findings,
             list_review_inbox,
             import_review_inbox,
             start_agent_review,
+            cancel_agent_review,
             agent_review_running,
+            agent_profiles,
+            agent_review_status,
+            assistant_setup,
+            register_assistant,
+            assistant_connected,
+            set_licence_key,
             get_review_author,
             list_comments,
             apply_review_action,
@@ -1653,6 +1783,8 @@ pub fn run() {
             log_frontend_warn,
             get_telemetry_info,
             set_telemetry_enabled,
+            setup_request,
+            setup_submit,
         ])
         .build(tauri::generate_context!())
         .unwrap_or_else(|e| {
@@ -1663,12 +1795,17 @@ pub fn run() {
             std::process::exit(1);
         });
 
-    app.run(|_handle, event| {
+    app.run(move |_handle, event| {
         // The event loop may terminate the process without unwinding, so ship
         // the usage summary + flush pending telemetry on the Exit event rather
         // than trusting the Sentry guard's drop.
+        // Not from the setup window: it runs beside the main app, and its exit would
+        // write back the counters it loaded at start over the ones the main app has
+        // saved since.
         if let tauri::RunEvent::Exit = event {
-            telemetry::on_exit();
+            if !setup_mode {
+                telemetry::on_exit();
+            }
         }
     });
 }

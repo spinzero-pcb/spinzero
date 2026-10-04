@@ -69,7 +69,9 @@ pub struct ProjectFile {
     /// Hint to skip auto-detection: "kicad" | null.
     #[serde(default)]
     pub design_tool: Option<String>,
-    /// Project class: automotive | commercial | medical | industrial | space | general | null.
+    /// Project class: automotive-comfort | automotive-safety | commercial | medical |
+    /// industrial | space | general | null. The retired `automotive` still reads, as
+    /// automotive-safety (see `src/lib/projectClass.ts`).
     #[serde(default)]
     pub class: Option<String>,
     #[serde(default)]

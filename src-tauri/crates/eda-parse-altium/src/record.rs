@@ -240,8 +240,19 @@ impl TextRecord {
     }
 
     /// Field value, preferring the `%UTF8%` variant when the file carries one.
+    ///
+    /// A twin that holds U+FFFD is broken: Altium wrote a replacement character
+    /// where it could not convert. The plain key then wins if it is clean, because
+    /// the plain key is Windows-1252 and `decode` reads it as such (`0x99` is the
+    /// trade mark sign).
     pub fn get(&self, key: &str) -> Option<&str> {
-        self.raw(&format!("%UTF8%{key}")).or_else(|| self.raw(key))
+        let twin = self.raw(&format!("%UTF8%{key}"));
+        let plain = self.raw(key);
+        match (twin, plain) {
+            (Some(t), Some(p)) if t.contains('\u{FFFD}') && !p.contains('\u{FFFD}') => Some(p),
+            (Some(t), _) => Some(t),
+            (None, p) => p,
+        }
     }
 
     /// Field value, or the empty string.
@@ -475,6 +486,29 @@ mod tests {
         let r = TextRecord::parse(&payload);
         assert_eq!(r.s("DESCRIPTION"), "NTC 100°C");
         assert_eq!(r.raw("DESCRIPTION"), Some("NTC 100°C"), "Latin-1 fallback decodes too");
+    }
+
+    /// A text record with no `%UTF8%` twin is Windows-1252: `0x99` is the trade mark
+    /// sign, not U+FFFD and not a C1 control.
+    #[test]
+    fn a_plain_key_without_a_twin_reads_as_windows_1252() {
+        let mut payload = b"|ComponentDescription=STripFET".to_vec();
+        payload.push(0x99);
+        payload.extend_from_slice(b" F7|\0");
+        let r = TextRecord::parse(&payload);
+        assert_eq!(r.s("ComponentDescription"), "STripFET\u{2122} F7");
+    }
+
+    /// A twin that Altium wrote with a replacement character loses to a clean plain key.
+    #[test]
+    fn a_broken_utf8_twin_does_not_beat_a_clean_plain_key() {
+        let mut payload = b"|ComponentDescription=STripFET".to_vec();
+        payload.push(0x99);
+        payload.extend_from_slice(b"|%UTF8%ComponentDescription=STripFET");
+        payload.extend_from_slice(&[0xEF, 0xBF, 0xBD]); // U+FFFD
+        payload.extend_from_slice(b"|\0");
+        let r = TextRecord::parse(&payload);
+        assert_eq!(r.s("ComponentDescription"), "STripFET\u{2122}");
     }
 
     /// Corner cases 2 and 4 together. The escape character in a `%UTF8%` pair

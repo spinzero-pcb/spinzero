@@ -195,3 +195,29 @@ describe("pcbViewStore visibility actions", () => {
     expect(s().active).toBe("F.Cu");
   });
 });
+
+describe("zones opacity default", () => {
+  const layers = [{ name: "Top Layer", svg: "x.svg", role: "copper", side: "front" }];
+  beforeEach(() => {
+    usePcbViewStore.setState({ active: null, hidden: new Set(), known: [], edge: null, userSet: new Set() });
+    usePcbViewStore.setState({ opacity: { ...usePcbViewStore.getState().opacity, zones: 0.6 } });
+  });
+
+  it("is full strength for an Altium board and 60% for KiCad", () => {
+    usePcbViewStore.getState().resetForLayers(layers, "altium");
+    expect(usePcbViewStore.getState().opacity.zones).toBe(1);
+    usePcbViewStore.getState().resetForLayers(layers, null);
+    expect(usePcbViewStore.getState().opacity.zones).toBe(0.6);
+  });
+
+  it("keeps a value the user set", () => {
+    usePcbViewStore.getState().setOpacity("zones", 0.3);
+    usePcbViewStore.getState().resetForLayers(layers, "altium");
+    expect(usePcbViewStore.getState().opacity.zones).toBe(0.3);
+  });
+
+  it("saves only the sliders the user moved", () => {
+    usePcbViewStore.getState().setOpacity("tracks", 0.5);
+    expect([...usePcbViewStore.getState().userSet]).toEqual(["tracks"]);
+  });
+});

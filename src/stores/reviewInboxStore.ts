@@ -14,10 +14,12 @@ import { useToastStore } from "./toastStore";
 //
 // Three decisions worth keeping:
 //
-// * **Importing is a click, never automatic.** The backend refuses to let the folder
+// * **Importing is a click, with one exception.** The backend refuses to let the folder
 //   watcher do it (see `bomcheck::inbox_dir`): filing comments into someone's project
 //   the instant a file appears is not a convenience. What the app does by itself is
-//   NOTICE — the launcher shows what is waiting.
+//   NOTICE — the launcher shows what is waiting. The exception is a review this window
+//   started: the user already asked for it, so `agentReviewStore` imports that run's own
+//   file when the agent finishes.
 // * **A file that cannot be imported is shown, not skipped.** A review the user
 //   believes ran and cannot find anywhere is worse than an error line.
 // * **Nothing here is persisted.** The drop-box is the state; this store is a view of

@@ -663,6 +663,7 @@ fn run_design_altium(
                 let (rel, summary) = (artifacts.geometry, artifacts.summary);
                 pcb_svgs = artifacts.svgs;
                 model.theme.board = artifacts.theme;
+                model.board_3d = artifacts.board_3d;
                 emit(Msg::Progress(format!(
                     "board {}: {} layers, {} components, {} tracks, {} pads, {} vias",
                     board.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),

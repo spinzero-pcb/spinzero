@@ -218,9 +218,10 @@ pub struct Component {
     pub source_unique_id: String,
     pub unique_id: String,
     pub source_hierarchical_path: String,
-    /// `NAMEON=FALSE`: the designer hid the designator on the board.
+    /// `NAMEON=FALSE`: the designator text exists in `Texts6` but Altium does not
+    /// draw it. A record that omits the key counts as shown.
     pub name_hidden: bool,
-    /// `COMMENTON=FALSE`: the designer hid the comment on the board.
+    /// `COMMENTON=FALSE`: the same for the comment (value) text.
     pub comment_hidden: bool,
 }
 
@@ -370,6 +371,12 @@ pub struct PcbDoc {
     pub regions: Vec<Region>,
     /// Board shape rings from `BoardRegions`, millimetres.
     pub outline: Vec<Vec<(f64, f64)>>,
+    /// The board's 3D view colours (`CFG3D.<NAME>COLOR` in `Board6`), as `#RRGGBB`
+    /// keyed by the name without the `CFG3D.` prefix, e.g. `TOPSILKSCREENCOLOR`.
+    pub view_colors: BTreeMap<String, String>,
+    /// The matching `CFG3D.*COLOROPACITY` values (0..1), keyed the same way
+    /// (`TOPSOLDERMASKCOLOROPACITY`).
+    pub view_opacity: BTreeMap<String, f64>,
     /// Net classes (`Classes6` `KIND=0`): class name -> member net names.
     pub net_classes: Vec<(String, Vec<String>)>,
     /// The board's layer-stack regions — the rigid-flex model. A board with one
@@ -399,6 +406,8 @@ pub fn parse(doc: &Doc) -> PcbDoc {
     if let Some(board) = doc.text_records("Board6").first() {
         read_layers(board, &mut out);
         read_substacks(board, &mut out);
+        out.view_colors = read_view_colors(board);
+        out.view_opacity = read_view_opacity(board);
     }
     for r in doc.text_records("Nets6") {
         out.nets.push(Net {
@@ -518,6 +527,43 @@ pub fn designators(pcb: &PcbDoc) -> Vec<String> {
         out[i] = t.text.clone();
     }
     out
+}
+
+/// The `CFG3D.*` pairs of `Board6`.
+///
+/// Altium writes them as one backtick-separated run inside the value of another
+/// key (`...=TRUE`CFG3D.COPPERCOLOR=3323360`CFG3D.TOPSILKSCREENCOLOR=...`), so
+/// the record parser does not split them. They are 3D-view settings.
+fn cfg3d_pairs(b: &TextRecord) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for (k, v) in &b.fields {
+        for seg in format!("{k}={v}").split('`') {
+            let Some((name, val)) = seg.split_once('=') else { continue };
+            if let Some(name) = name.strip_prefix("CFG3D.") {
+                out.push((name.to_string(), val.trim().to_string()));
+            }
+        }
+    }
+    out
+}
+
+/// The `CFG3D.*COLOR` settings, as `#RRGGBB` (the file stores BGR integers).
+/// The `*COLOROPACITY` keys are not colours and are skipped.
+pub fn read_view_colors(b: &TextRecord) -> BTreeMap<String, String> {
+    cfg3d_pairs(b)
+        .into_iter()
+        .filter(|(n, _)| n.ends_with("COLOR"))
+        .filter_map(|(n, v)| Some((n, units::bgr_hex(v.parse::<i64>().ok()?))))
+        .collect()
+}
+
+/// The `CFG3D.*COLOROPACITY` settings.
+pub fn read_view_opacity(b: &TextRecord) -> BTreeMap<String, f64> {
+    cfg3d_pairs(b)
+        .into_iter()
+        .filter(|(n, _)| n.ends_with("COLOROPACITY"))
+        .filter_map(|(n, v)| Some((n, v.parse::<f64>().ok()?)))
+        .collect()
 }
 
 /// The layer stack and the legacy id -> name table.
@@ -772,9 +818,8 @@ fn read_component(r: &TextRecord) -> Component {
         source_unique_id: r.s("SOURCEUNIQUEID").to_string(),
         unique_id: r.s("UNIQUEID").to_string(),
         source_hierarchical_path: r.s("SOURCEHIERARCHICALPATH").to_string(),
-        // Only an explicit FALSE hides the text: an absent flag shows it.
-        name_hidden: r.s("NAMEON").eq_ignore_ascii_case("FALSE"),
-        comment_hidden: r.s("COMMENTON").eq_ignore_ascii_case("FALSE"),
+        name_hidden: r.has("NAMEON") && !r.b("NAMEON"),
+        comment_hidden: r.has("COMMENTON") && !r.b("COMMENTON"),
     }
 }
 
@@ -1095,6 +1140,19 @@ fn pascal(b: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn view_colors_are_read_from_the_backtick_run() {
+        let rec = TextRecord::parse(
+            b"RECORD=Board|X=TRUE`CFG3D.COPPERCOLOR=3323360`CFG3D.TOPSILKSCREENCOLOR=16777215`CFG3D.TOPSOLDERMASKCOLOROPACITY=0.83`CFG3D.BOTSOLDERMASKCOLOR=255|Y=1",
+        );
+        let c = read_view_colors(&rec);
+        assert_eq!(c.get("TOPSILKSCREENCOLOR").map(String::as_str), Some("#FFFFFF"));
+        assert_eq!(c.get("BOTSOLDERMASKCOLOR").map(String::as_str), Some("#FF0000"));
+        assert!(c.contains_key("COPPERCOLOR"));
+        assert!(!c.contains_key("TOPSOLDERMASKCOLOROPACITY"), "opacity is not a colour");
+        assert_eq!(read_view_opacity(&rec).get("TOPSOLDERMASKCOLOROPACITY"), Some(&0.83));
+    }
+
     use super::*;
     use crate::record::Mode;
 

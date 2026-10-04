@@ -372,6 +372,10 @@ pub struct Design {
     /// monochrome SVGs with, derived from KiCad instead of hand-mirrored in CSS.
     /// Filled by the pipeline; empty when no KiCad config is reachable.
     pub theme: crate::theme::Theme,
+    /// The board's own 3D-view appearance (Altium `CFG3D.*`). For a 3D view; the 2D
+    /// layer colours never read it. Empty for KiCad and for boards without it.
+    #[serde(skip_serializing_if = "Board3d::is_empty", default)]
+    pub board_3d: Board3d,
     /// Project drawing defaults (line width, text size) from the `.kicad_pro`.
     pub drawing: crate::theme::Drawing,
     /// Source-tool block: which front-end produced this bundle, the compile
@@ -380,6 +384,22 @@ pub struct Design {
     /// BOM mapping report instead.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub source: Option<serde_json::Value>,
+}
+
+/// A board's 3D-view appearance, as the design file states it. Colours are
+/// `#RRGGBB`, keyed by the file's name without `CFG3D.` (`COPPERCOLOR`,
+/// `TOPSILKSCREENCOLOR`, `TOPSOLDERMASKCOLOR`, `BOARDCORECOLOR`, ...). Opacity is
+/// 0..1, keyed `<NAME>OPACITY`. Mirrored by `Board3d` in `src/lib/design.ts`.
+#[derive(Debug, Default, Clone, Serialize)]
+pub struct Board3d {
+    pub colors: BTreeMap<String, String>,
+    pub opacity: BTreeMap<String, f64>,
+}
+
+impl Board3d {
+    pub fn is_empty(&self) -> bool {
+        self.colors.is_empty() && self.opacity.is_empty()
+    }
 }
 
 /// Assemble the design model for a single (root) schematic sheet.
@@ -602,6 +622,7 @@ pub fn assemble(
         // Filled by the pipeline (KiCad theme is application-global, the project
         // file gives drawing defaults) — both default to empty here.
         theme: crate::theme::Theme::default(),
+        board_3d: Board3d::default(),
         drawing: crate::theme::Drawing::default(),
         source: None,
     }
@@ -817,5 +838,22 @@ mod tests {
         assert_eq!(classify("U", 48), "ic");
         assert_eq!(classify("J", 12), "connector");
         assert_eq!(classify("X", 4), "crystal");
+    }
+}
+
+#[cfg(test)]
+mod board_3d_tests {
+    use super::Board3d;
+
+    #[test]
+    fn board_3d_serialises_colours_and_opacity_apart_from_the_2d_theme() {
+        let mut b = Board3d::default();
+        assert!(b.is_empty());
+        b.colors.insert("TOPSILKSCREENCOLOR".into(), "#FFFFFF".into());
+        b.opacity.insert("TOPSOLDERMASKCOLOROPACITY".into(), 0.83);
+        assert!(!b.is_empty());
+        let v = serde_json::to_value(&b).unwrap();
+        assert_eq!(v["colors"]["TOPSILKSCREENCOLOR"], "#FFFFFF");
+        assert_eq!(v["opacity"]["TOPSOLDERMASKCOLOROPACITY"], 0.83);
     }
 }

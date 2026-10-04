@@ -1,7 +1,8 @@
 import { create } from "zustand";
 import { ipc } from "../lib/ipc";
 import { usePcbViewStore } from "./pcbViewStore";
-import type { AgentReviewSettings, KeymapPreset, ProjectUi, ReviewServiceSettings } from "../lib/types";
+import { DEFAULT_AGENT_PROFILE } from "../lib/agentProfiles";
+import type { AgentProfile, AgentReviewSettings, KeymapPreset, ProjectUi } from "../lib/types";
 
 // App-level UI preferences. `keymap === null` after load means the user has
 // never chosen — App shows the first-launch preset picker (spec: onboarding).
@@ -26,15 +27,15 @@ interface SettingsState {
   bottomPanelH: number | null;
   /** Downloaded-but-unapplied update version; null = nothing pending. */
   updateDeferred: string | null;
-  /** Review-service endpoint + token; null = never configured (the detailed review
-   *  button then explains how to point the app at a service). */
-  reviewService: ReviewServiceSettings | null;
-  /** How to run a review through the user's own AI assistant; null = not set up. */
+  /** Where SpinZero's own review server is, for the block the user pastes into their
+   *  agent; null = not set up. */
   agentReview: AgentReviewSettings | null;
-  /** Which surface the detailed BOM review runs on. Absent keeps the hosted service,
-   *  so an existing install's button does exactly what it did yesterday. */
-  reviewDriver: "service" | "agent" | null;
+  /** Which agent runs the review, and how to start it; null = the shipped default. */
+  agentProfile: AgentProfile | null;
   loaded: boolean;
+  /** The profile a review would run with right now — the saved one, or the default.
+   *  Every caller asks this rather than handling null itself. */
+  effectiveAgent: () => AgentProfile;
   load: () => Promise<void>;
   setKeymap: (k: KeymapPreset) => Promise<void>;
   setProjectRoot: (p: string) => Promise<void>;
@@ -54,10 +55,8 @@ interface SettingsState {
   setBottomPanelH: (h: number) => Promise<void>;
   /** Persist (or clear, with null) the pending update version. */
   setUpdateDeferred: (v: string | null) => Promise<void>;
-  /** Persist the review-service endpoint + token (or clear it with null). */
-  setReviewService: (v: ReviewServiceSettings | null) => Promise<void>;
   setAgentReview: (v: AgentReviewSettings | null) => Promise<void>;
-  setReviewDriver: (v: "service" | "agent") => Promise<void>;
+  setAgentProfile: (v: AgentProfile | null) => Promise<void>;
 }
 
 export const useSettingsStore = create<SettingsState>((set, get) => ({
@@ -71,10 +70,11 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   diffBlink: null,
   bottomPanelH: null,
   updateDeferred: null,
-  reviewService: null,
   agentReview: null,
-  reviewDriver: null,
+  agentProfile: null,
   loaded: false,
+
+  effectiveAgent: () => get().agentProfile ?? DEFAULT_AGENT_PROFILE,
 
   load: async () => {
     try {
@@ -107,9 +107,11 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
             ? s.bottom_panel_h
             : null,
         updateDeferred: typeof s?.update_deferred === "string" ? s.update_deferred : null,
-        reviewService: normalizeReviewService(s?.review_service ?? null),
+        // `review_driver` and `review_service` are not read. The hosted tier is gone,
+        // and `persist` writes a whole fresh object, so a saved one is dropped on the
+        // next save without asking the user anything.
         agentReview: normalizeAgentReview(s?.agent_review ?? null),
-        reviewDriver: s?.review_driver === "agent" ? "agent" : s?.review_driver === "service" ? "service" : null,
+        agentProfile: normalizeAgentProfile(s?.agent_profile ?? null),
         loaded: true,
       });
       // Push the saved transparency into the PCB view store so the sliders open where
@@ -189,21 +191,15 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
     await persist();
   },
 
-  setReviewService: async (v) => {
-    await ensureLoaded();
-    set({ reviewService: normalizeReviewService(v) });
-    await persist();
-  },
-
   setAgentReview: async (v) => {
     await ensureLoaded();
     set({ agentReview: normalizeAgentReview(v) });
     await persist();
   },
 
-  setReviewDriver: async (v) => {
+  setAgentProfile: async (v) => {
     await ensureLoaded();
-    set({ reviewDriver: v });
+    set({ agentProfile: normalizeAgentProfile(v) });
     await persist();
   },
 }));
@@ -235,7 +231,7 @@ async function persist() {
   if (!useSettingsStore.getState().loaded) return;
   const {
     keymap, projectRoot, accentColor, authorName, projectUi, pcbOpacity, bomChips,
-    diffBlink, bottomPanelH, updateDeferred, reviewService, agentReview, reviewDriver,
+    diffBlink, bottomPanelH, updateDeferred, agentReview, agentProfile,
   } = useSettingsStore.getState();
   try {
     await ipc.setSettings({
@@ -249,17 +245,38 @@ async function persist() {
       diff_blink: diffBlink,
       bottom_panel_h: bottomPanelH,
       update_deferred: updateDeferred,
-      review_service: reviewService,
       agent_review: agentReview,
-      review_driver: reviewDriver,
+      agent_profile: agentProfile,
     });
   } catch {
     // Persisting failed (e.g. read-only config dir) — the in-memory choice stands.
   }
 }
 
-/** Settings are hand-editable, so the service config is untrusted at load: an
- *  endpoint that is not http(s) is dropped rather than handed to fetch. */
+/**
+ * Vet a saved agent profile on the way in.
+ *
+ * Settings are hand-editable, and this one names a program the app will start. A
+ * profile with no binary is null rather than a subprocess error a minute later, and
+ * the arguments must be strings — the backend passes each one as one argument, so
+ * anything else is a shape it cannot quote.
+ */
+function normalizeAgentProfile(v: unknown): AgentProfile | null {
+  if (typeof v !== "object" || v === null) return null;
+  const o = v as Record<string, unknown>;
+  const bin = typeof o.bin === "string" ? o.bin.trim() : "";
+  if (!bin) return null;
+  const args = Array.isArray(o.args) ? o.args.filter((a): a is string => typeof a === "string") : [];
+  return {
+    id: typeof o.id === "string" && o.id.trim() ? o.id.trim() : "custom",
+    label: typeof o.label === "string" && o.label.trim() ? o.label.trim() : "Your agent",
+    bin,
+    prompt_via: o.prompt_via === "stdin" ? "stdin" : "arg",
+    args,
+    verified: o.verified === true,
+  };
+}
+
 /** Vet the assistant config on the way in. A half-filled one is null rather than a
  *  config that fails at spawn time: the UI offers "set this up" for null, which is a
  *  better answer than a subprocess error a minute later. */
@@ -285,14 +302,6 @@ function normalizeAgentReview(v: unknown): AgentReviewSettings | null {
     server_args: args,
     server_env: env,
   };
-}
-
-function normalizeReviewService(v: unknown): ReviewServiceSettings | null {
-  if (typeof v !== "object" || v === null) return null;
-  const o = v as { base_url?: unknown; token?: unknown };
-  const baseUrl = typeof o.base_url === "string" ? o.base_url.trim().replace(/\/+$/, "") : "";
-  if (!/^https?:\/\//i.test(baseUrl)) return null;
-  return { base_url: baseUrl, token: typeof o.token === "string" ? o.token : "" };
 }
 
 // ---- debounced persist ----------------------------------------------------

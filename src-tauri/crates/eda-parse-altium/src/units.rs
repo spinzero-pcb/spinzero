@@ -60,6 +60,32 @@ pub fn sch_font_mm(size: i64) -> f64 {
     size as f64 * SCH_UNIT_MM / FONT_CELL_PER_EM
 }
 
+/// Ascent and descent of a face, in ems (from its `hhea` table). The cell is
+/// their sum, so the em that fits an Altium cell depends on the face: Courier
+/// New's cell is 2% taller than Times'. An unknown face gets Times' numbers.
+pub fn face_metrics(face: &str) -> (f64, f64) {
+    let f = face.to_ascii_lowercase();
+    if f.contains("courier") {
+        (1705.0 / 2048.0, 615.0 / 2048.0)
+    } else if f.contains("arial") || f.contains("helvetica") {
+        (1854.0 / 2048.0, 434.0 / 2048.0)
+    } else {
+        (1825.0 / 2048.0, 443.0 / 2048.0)
+    }
+}
+
+/// As [`sch_font_mm`], for the face the font table names.
+pub fn sch_font_mm_for(face: &str, size: i64) -> f64 {
+    let (a, d) = face_metrics(face);
+    size as f64 * SCH_UNIT_MM / (a + d)
+}
+
+/// An Altium font's cell height in millimetres: the pitch between two lines of a
+/// text frame, whatever the face.
+pub fn sch_font_cell_mm(size: i64) -> f64 {
+    size as f64 * SCH_UNIT_MM
+}
+
 /// The zone ruler for a `SheetStyle`: columns, rows, and the margin band's
 /// width in sheet units.
 ///
@@ -118,15 +144,14 @@ pub fn bgr_hex(v: i64) -> String {
     format!("#{r:02X}{g:02X}{b:02X}")
 }
 
-/// Altium's own default sheet style, which is **B** (15 x 9.5 inch) — not A4.
+/// The sheet style of a `.SchDoc` that omits `SheetStyle`: **A4** (style 0).
 ///
-/// A `.SchDoc` written with the factory setting omits `SheetStyle` entirely, and
-/// reading the absent key as 0 makes that sheet A4: 350 units narrower and 190
-/// shorter. Since the page is what the Y flip is anchored to, every coordinate
-/// on the sheet then lands 48 mm out, and nothing fails. Confirmed against
-/// Altium's own on-screen geometry for the corpus sheet that omits the key: it
-/// draws at 1500 x 950 with a six-by-four zone ruler.
-pub const DEFAULT_SHEET_STYLE: i64 = 6;
+/// Altium leaves out any key whose value is 0, and A4 is style 0. So a missing
+/// key means A4 (1150 x 760 units), not B. The page is what the Y flip is
+/// anchored to, so a wrong size puts every object out of place and nothing
+/// fails. Evidence: the MB1419 CAN sheet has no key, its template is
+/// `Schematic_A4_Landscape`, and Altium's title block prints "Size A4".
+pub const DEFAULT_SHEET_STYLE: i64 = 0;
 
 /// Sheet size in millimetres for a `SheetStyle` index, following Altium's own
 /// table. An unknown style falls back to [`DEFAULT_SHEET_STYLE`]'s size.
@@ -155,14 +180,14 @@ pub fn sheet_style_mm(style: i64) -> (f64, f64) {
 mod tests {
     use super::*;
 
-    /// The factory default is B, and reading an absent `SheetStyle` as A4 moves
-    /// every coordinate on the sheet by 48 mm.
+    /// Altium omits a key whose value is 0, so a missing `SheetStyle` is A4.
     #[test]
-    fn an_unstated_sheet_style_is_altiums_own_default() {
-        assert_eq!(sheet_style_mm(DEFAULT_SHEET_STYLE), sheet_style_mm(6));
+    fn an_unstated_sheet_style_is_a4() {
+        assert_eq!(sheet_style_mm(DEFAULT_SHEET_STYLE), sheet_style_mm(0));
         let (w, h) = sheet_style_mm(DEFAULT_SHEET_STYLE);
-        assert!((w - 1500.0 * 0.254).abs() < 1e-9 && (h - 950.0 * 0.254).abs() < 1e-9);
-        assert_eq!(sheet_zones(DEFAULT_SHEET_STYLE), (6, 4, 20));
+        assert!((w - 1150.0 * 0.254).abs() < 1e-9 && (h - 760.0 * 0.254).abs() < 1e-9);
+        assert_eq!(sheet_zones(DEFAULT_SHEET_STYLE), (4, 4, 20));
+        assert_eq!(sheet_zones(6), (6, 4, 20), "B, confirmed against Altium");
         assert_eq!(sheet_zones(1), (5, 4, 20), "A3, confirmed against Altium");
     }
 

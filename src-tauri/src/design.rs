@@ -157,6 +157,12 @@ pub struct DesignIndexes {
     /// maps), forwarded verbatim so the viewer themes with the user's real palette
     /// instead of the static `tokens.css` mirror. `Null` for theme-less bundles.
     pub theme: Value,
+    /// The board's 3D-view colours and opacities (Altium `CFG3D.*`); `Null` when absent.
+    /// Not used by the 2D layer colours.
+    pub board_3d: Value,
+    /// The tool that produced the bundle (`source.tool`, "altium"); `None` for KiCad,
+    /// whose bundles carry no source block. Lets the viewer pick per-tool defaults.
+    pub design_tool: Option<String>,
     /// Cache-relative path of the structured PCB geometry IR (`pcb/geometry.json`),
     /// the GPU renderer's input. `None` for schematic-only / older bundles.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -541,6 +547,12 @@ fn build_indexes_kicad(cache: &Path, design_dir: &Path) -> Result<DesignIndexes,
         nets,
         components,
         theme: d.get("theme").cloned().unwrap_or(Value::Null),
+        board_3d: d.get("board_3d").cloned().unwrap_or(Value::Null),
+        design_tool: d
+            .get("source")
+            .and_then(|s| s.get("tool"))
+            .and_then(|t| t.as_str())
+            .map(str::to_string),
         pcb_geometry,
     })
 }

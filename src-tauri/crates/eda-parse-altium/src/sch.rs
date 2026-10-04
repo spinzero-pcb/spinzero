@@ -131,6 +131,11 @@ pub struct Pin {
     /// sheet's own default.
     pub name_font: i64,
     pub number_font: i64,
+    /// Where the designer moved the name / the number along the pin, measured
+    /// from the body end (`Name_CustomPosition_Margin`, in sheet units). `None`
+    /// when the file states no value; the renderer then uses Altium's default.
+    pub name_margin: Option<i64>,
+    pub number_margin: Option<i64>,
 }
 
 /// `PinConglomerate` is a bit field: the low two bits are the rotation and the
@@ -191,6 +196,9 @@ impl Pin {
 #[derive(Debug, Clone, Default)]
 pub struct Component {
     pub library_ref: String,
+    /// `DesignItemId`: the library part this placement came from. Altium's BOM
+    /// groups on it. A file that predates the key leaves it empty.
+    pub design_item_id: String,
     pub description: String,
     /// Text of the `RECORD=34` designator child.
     pub designator: String,
@@ -258,6 +266,9 @@ pub struct PowerPort {
     pub font: i64,
     pub orientation: i64,
     pub show_net_name: bool,
+    /// An off-sheet connector. Altium stores it as a power port with this flag
+    /// and draws a double chevron instead of the style's glyph.
+    pub cross_sheet: bool,
 }
 
 /// A port (`RECORD=18`). It has TWO connection points, its left and right edges.
@@ -402,10 +413,10 @@ pub struct Junction {
     pub at: Pt,
     pub uuid: String,
     pub color: String,
-    /// True for a junction Altium computed and cached (`IndexInSheet` below
-    /// zero or absent). The designer did not place it, and Altium draws it in
-    /// its own auto-junction colour, not the one the record carries.
-    pub auto: bool,
+    /// `Locked`: the designer placed this dot by hand. Altium paints the dots it
+    /// adds itself in the colour of the wire they sit on, and keeps a hand-placed
+    /// dot's own colour.
+    pub locked: bool,
 }
 
 /// A parameter set (`RECORD=43`) — a directive placed on a net, e.g. a net class.
@@ -516,6 +527,9 @@ pub struct SchText {
     /// `WordWrap`: the frame wraps its text to its own box. Altium's default is
     /// on, and every frame in the corpus sets it.
     pub word_wrap: bool,
+    /// `TextMargin` of a `RECORD=209` note, in sheet units: the gap between the
+    /// box edge and its text. Zero for every other text.
+    pub margin: i64,
     /// True when the text belongs to the drawing sheet's template rather than to
     /// the design — Altium's analogue of KiCad's worksheet.
     pub template: bool,
@@ -528,8 +542,8 @@ pub struct SchText {
 pub struct NoErc {
     pub at: Pt,
     pub color: String,
-    /// Altium's marker shape enum; 0 is the plain cross.
-    pub symbol: i64,
+    /// Altium's marker style, as the file names it (`Thin Cross`, `Small Cross`, …).
+    pub symbol: String,
     pub uuid: String,
     /// Quarter turns counter-clockwise. Only the checkbox and triangle
     /// markers have a direction; a cross looks the same every way round.
@@ -576,6 +590,10 @@ pub struct SheetProps {
     pub margin: i64,
     /// The template file the drawing sheet came from, when the sheet names one.
     pub template_file: String,
+    /// `ShowTemplateGraphics`: the template's own frame and title block are on
+    /// the sheet. When they are, Altium does not add its built-in border and
+    /// zone ruler on top of them.
+    pub show_template_graphics: bool,
 }
 
 /// One parsed `.SchDoc`.
@@ -891,6 +909,8 @@ pub fn parse_binary_pin(b: &[u8]) -> Option<Pin> {
         color,
         name_font: 0,
         number_font: 0,
+        name_margin: None,
+        number_margin: None,
     })
 }
 
@@ -1008,6 +1028,7 @@ pub fn parse_records(recs: Vec<TextRecord>) -> SchDoc {
                 comp_at.insert(i, out.components.len());
                 out.components.push(Component {
                     library_ref: r.s("LibReference").to_string(),
+                    design_item_id: r.s("DesignItemId").to_string(),
                     description: r.s("ComponentDescription").to_string(),
                     designator: String::new(),
                     designator_uuid: String::new(),
@@ -1099,7 +1120,9 @@ pub fn parse_records(recs: Vec<TextRecord>) -> SchDoc {
                     number: r.s("Designator").to_string(),
                     name: r.s("Name").to_string(),
                     description: r.s("Description").to_string(),
-                    electrical: r.i("Electrical").unwrap_or(4),
+                    // Altium omits a key whose value is 0, and 0 is `Input`. A
+                    // pin with no `Electrical` is an input, not a passive pin.
+                    electrical: r.i("Electrical").unwrap_or(0),
                     conglomerate: r.i("PinConglomerate").unwrap_or(0),
                     length: r.i("PinLength").unwrap_or(0),
                     at: pt(r, "Location.X", "Location.Y"),
@@ -1118,6 +1141,12 @@ pub fn parse_records(recs: Vec<TextRecord>) -> SchDoc {
                     color: color(r),
                     name_font: r.i("Name_CustomFontID").unwrap_or(0),
                     number_font: r.i("Designator_CustomFontID").unwrap_or(0),
+                    name_margin: r
+                        .has("Name_CustomPosition_Margin")
+                        .then(|| coord(r, "Name_CustomPosition_Margin")),
+                    number_margin: r
+                        .has("Designator_CustomPosition_Margin")
+                        .then(|| coord(r, "Designator_CustomPosition_Margin")),
                 });
             }
             34 => {
@@ -1235,6 +1264,7 @@ pub fn parse_records(recs: Vec<TextRecord>) -> SchDoc {
                 font: r.i("FontID").unwrap_or(1),
                 orientation: r.i("Orientation").unwrap_or(0),
                 show_net_name: r.b("ShowNetName"),
+                cross_sheet: r.b("IsCrossSheetConnector"),
             }),
             18 => out.ports.push(Port {
                 at: pt(r, "Location.X", "Location.Y"),
@@ -1275,12 +1305,12 @@ pub fn parse_records(recs: Vec<TextRecord>) -> SchDoc {
                 at: pt(r, "Location.X", "Location.Y"),
                 uuid: r.s("UniqueID").to_string(),
                 color: color(r),
-                auto: r.i("IndexInSheet").map(|i| i < 0).unwrap_or(true),
+                locked: r.b("Locked"),
             }),
             22 => out.no_ercs.push(NoErc {
                 at: pt(r, "Location.X", "Location.Y"),
                 color: color(r),
-                symbol: r.i("Symbol").unwrap_or(0),
+                symbol: r.s("Symbol").to_string(),
                 uuid: r.s("UniqueID").to_string(),
                 orientation: r.i("Orientation").unwrap_or(0),
             }),
@@ -1297,8 +1327,8 @@ pub fn parse_records(recs: Vec<TextRecord>) -> SchDoc {
             31 => {
                 let custom = r.b("UseCustomSheet");
                 let n_fonts = r.i("FontIdCount").unwrap_or(0);
-                // An absent `SheetStyle` is Altium's factory default, which is B
-                // and NOT A4 — see `units::DEFAULT_SHEET_STYLE`.
+                // An absent `SheetStyle` means 0 (A4), because Altium omits a
+                // key whose value is 0 — see `units::DEFAULT_SHEET_STYLE`.
                 let style = r.i("SheetStyle").unwrap_or(units::DEFAULT_SHEET_STYLE);
                 let (zx, zy, margin) = units::sheet_zones(style);
                 // Pass 1 recorded the template file from RECORD=39; the sheet
@@ -1336,6 +1366,7 @@ pub fn parse_records(recs: Vec<TextRecord>) -> SchDoc {
                     zones_y: r.i("CustomYZones").filter(|v| *v > 0).unwrap_or(zy),
                     margin: r.i("CustomMarginWidth").filter(|v| *v > 0).unwrap_or(margin),
                     template_file,
+                    show_template_graphics: r.b("ShowTemplateGraphics"),
                 };
             }
             211 => out.regions.push(Region {
@@ -1380,6 +1411,7 @@ pub fn parse_records(recs: Vec<TextRecord>) -> SchDoc {
                     mirrored: r.b("IsMirrored"),
                     show_border: r.b("ShowBorder"),
                     word_wrap: !r.has("WordWrap") || r.b("WordWrap"),
+                    margin: if t == 209 { r.i("TextMargin").unwrap_or(0) } else { 0 },
                     template,
                     uuid: r.s("UniqueID").to_string(),
                 });
@@ -1482,12 +1514,8 @@ mod tests {
         assert_eq!(s.entry_point(&e(3, 3)), Pt { x: 220 * UNIT, y: 600 * UNIT });
     }
 
-    /// A part carries several PCBLIB models and Altium places the one flagged
-    /// `IsCurrent`. Taking the first gives a footprint in the right family and
-    /// wrong — `SOIC127P1030X265-16N-4` where the board has `…-16N-V`. Found by
-    /// the plan §8.3 differential on U2 of the EVAL design.
-    /// A junction Altium cached (`IndexInSheet=-1`) is marked auto; a placed
-    /// one is not. The parameter set keeps its colour, turn and style, and a
+    /// A junction with no `Locked` flag is not locked, whatever its
+    /// `IndexInSheet`. The parameter set keeps its colour, turn and style, and a
     /// solid shape with no `AreaColor` fills black, Altium's absent-means-0.
     #[test]
     fn junction_origin_param_set_look_and_absent_fill() {
@@ -1500,12 +1528,16 @@ mod tests {
             rec("|RECORD=1|LibReference=TP|"),
             rec("|RECORD=8|OwnerIndex=3|Location.X=40|Location.Y=40|Radius=5|SecondaryRadius=5|IsSolid=T|"),
         ]);
-        assert!(doc.junctions[0].auto && !doc.junctions[1].auto);
+        assert!(!doc.junctions[0].locked && !doc.junctions[1].locked);
         let ps = &doc.param_sets[0];
         assert_eq!((ps.color.as_str(), ps.orientation, ps.style), ("#434343", 3, 1));
         assert_eq!(doc.components[0].graphics[0].fill.as_deref(), Some("#000000"));
     }
 
+    /// A part carries several PCBLIB models and Altium places the one flagged
+    /// `IsCurrent`. Taking the first gives a footprint in the right family and
+    /// wrong — `SOIC127P1030X265-16N-4` where the board has `…-16N-V`. Found by
+    /// the plan §8.3 differential on U2 of the EVAL design.
     #[test]
     fn the_footprint_is_the_current_implementation() {
         let rec = |s: &str| TextRecord::parse(format!("{s} ").as_bytes());

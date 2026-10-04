@@ -12,19 +12,19 @@ import {
 import { bomNav, nav, pcbNav } from "../canvas/navigator";
 import { formatRelative } from "../../lib/time";
 import type { Comment, CommentSeverity, CommentView } from "../../lib/types";
+import { SEVERITIES, SEVERITY_LABEL, SEVERITY_WEIGHT } from "../../lib/severity";
 import { ContextMenu, type MenuItem } from "../ContextMenu";
 import { IconChecklist, IconComment, IconCopy, IconCheck, IconRefresh, IconTrash } from "../icons";
 
 /** Worst first. A rail sorted by filing order buries the one comment that matters
  *  under twenty notes, so severity decides the order and time only breaks ties. An
  *  unset severity sorts last: it is a comment nobody has triaged. */
-const SEVERITY_RANK: Record<CommentSeverity, number> = { critical: 0, major: 1, minor: 2, info: 3 };
-const NO_SEVERITY_RANK = 4;
+const NO_SEVERITY_WEIGHT = -1;
 
 function bySeverity(a: Comment, b: Comment): number {
-  const ra = a.severity ? SEVERITY_RANK[a.severity] : NO_SEVERITY_RANK;
-  const rb = b.severity ? SEVERITY_RANK[b.severity] : NO_SEVERITY_RANK;
-  return ra - rb;
+  const wa = a.severity ? SEVERITY_WEIGHT[a.severity] : NO_SEVERITY_WEIGHT;
+  const wb = b.severity ? SEVERITY_WEIGHT[b.severity] : NO_SEVERITY_WEIGHT;
+  return wb - wa;
 }
 
 /** Resolved and dismissed threads are DONE. They stay reachable, but out of the way:
@@ -34,6 +34,7 @@ const CLOSED: DisplayStatus[] = ["resolved", "dismissed"];
 const SEVERITY_CLASS: Record<CommentSeverity, string> = {
   info: "sev-info",
   minor: "sev-minor",
+  unverified: "sev-unverified",
   major: "sev-major",
   critical: "sev-critical",
 };
@@ -42,10 +43,10 @@ const SEVERITY_CLASS: Record<CommentSeverity, string> = {
 const SEVERITY_COLOR: Record<CommentSeverity, string> = {
   info: "var(--fg-2)",
   minor: "var(--accent)",
+  unverified: "var(--unverified)",
   major: "var(--warn)",
   critical: "var(--err)",
 };
-const SEVERITIES: CommentSeverity[] = ["info", "minor", "major", "critical"];
 const VIEW_LABEL: Record<CommentView, string> = {
   schematic: "Schematic",
   pcb: "PCB",
@@ -160,7 +161,7 @@ export function ReviewPanel() {
       label: "Severity",
       icon: <IconChecklist size={14} />,
       submenu: SEVERITIES.map((sev) => ({
-        label: sev,
+        label: SEVERITY_LABEL[sev],
         swatch: SEVERITY_COLOR[sev],
         active: c.severity === sev,
         onClick: () => void setSeverity(c.id, sev),
@@ -227,7 +228,7 @@ export function ReviewPanel() {
             <span className="rv-ref mono">{anchorLabel}</span>
             <span className={`rv-viewtag view-${c.view}`}>{VIEW_LABEL[c.view]}</span>
             {c.severity && (
-              <span className={`rv-sev ${SEVERITY_CLASS[c.severity]}`}>{c.severity}</span>
+              <span className={`rv-sev ${SEVERITY_CLASS[c.severity]}`}>{SEVERITY_LABEL[c.severity]}</span>
             )}
             {c.source !== "human" && (
               <span className={`rv-src src-${c.source}`}>{c.source}</span>
@@ -339,11 +340,14 @@ export function ReviewPanel() {
       </div>
       <div className="rv-head">
         <div className="rv-filters">
-          {chip("all", "All", sessionCount)}
+          {/* Open leads and carries the number that matters. "All" has no count: it
+              added resolved comments into one total, and 109 beside a report of 91
+              read as findings nobody could find. */}
           {chip("open", "Open", counts.open)}
           {chip("recheck", "⟳", counts.recheck)}
           {chip("resolved", "Done", counts.resolved)}
           {chip("dismissed", "Dismissed", counts.dismissed)}
+          {chip("all", "All")}
         </div>
       </div>
 
@@ -358,7 +362,7 @@ export function ReviewPanel() {
           <option value="all">Any severity</option>
           {SEVERITIES.map((s) => (
             <option key={s} value={s}>
-              {s}
+              {SEVERITY_LABEL[s]}
             </option>
           ))}
         </select>

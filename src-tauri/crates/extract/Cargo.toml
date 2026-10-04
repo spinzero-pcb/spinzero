@@ -3,7 +3,7 @@ name = "extract"
 version = "0.0.1"
 edition = "2021"
 description = "Projects KiCad designs into the review bundle (design model, lean SVGs, BOM, 3D placement)"
-license = "GPL-3.0-or-later"
+license = "LicenseRef-SpinZero-Proprietary"
 
 [lib]
 name = "extract"

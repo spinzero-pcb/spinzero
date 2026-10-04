@@ -408,16 +408,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "bom-rules"
-version = "0.0.1"
-dependencies = [
- "blake3",
- "regex",
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "borsh"
 version = "1.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4427,10 +4417,9 @@ dependencies = [
 
 [[package]]
 name = "spinzero"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "blake3",
- "bom-rules",
  "dirs 5.0.1",
  "extract",
  "log",

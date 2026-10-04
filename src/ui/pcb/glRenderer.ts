@@ -20,6 +20,7 @@ import earcut from "earcut";
 import type { PcbFrame, PcbGeometry, PcbLayerDef, PcbTextDef } from "../../lib/pcbGeometry";
 import { PAD_SHAPE } from "../../lib/pcbGeometry";
 import { layerColorOf } from "../../stores/pcbViewStore";
+import { outlineBBox } from "./fitBBox";
 import { hexToRgb, resolveCssColor, PCB_DIFF_BASE_FALLBACK } from "./glColor";
 
 const MAX_LAYERS = 64;
@@ -828,6 +829,9 @@ export class PcbGlRenderer {
         maxx: Math.max(b.maxx, pw), maxy: Math.max(b.maxy, ph),
       };
     }
+    // Without a drawing sheet (Altium), frame the board outline, not the notes and
+    // drawings lying around it; KiCad keeps the whole-content fit.
+    if (!geom.page) this.contentBbox = outlineBBox(geom) ?? this.contentBbox;
     this.uploadBatches(acc);
 
     this.netMask = this.makeMask(Math.max(1, geom.nets.length));

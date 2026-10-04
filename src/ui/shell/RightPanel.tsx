@@ -8,7 +8,7 @@ import { useDesignStore } from "../../stores/designStore";
 import { listNetClasses } from "../../lib/netClasses";
 import { IconChevron, IconSheet } from "../icons";
 
-// The RIGHT panel is the per-view navigator/tools (docs/phase2-ui-plan.md §1):
+// The RIGHT panel is the per-view navigator/tools (docs/archive/phase2-ui-plan.md §1):
 // `Sheets` on the schematic (moved off the old left Explorer), `Appearance` on the
 // PCB, nothing on the BOM. The LEFT panel owns comments; revisions moved to the
 // clickable footer chip (item 21). Layers and comments never collide.

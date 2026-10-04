@@ -1,8 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 import { useBomCheckStore } from "../../stores/bomCheckStore";
-import { isRunning, useDetailedReviewStore } from "../../stores/detailedReviewStore";
+import { isAgentRunning, useAgentReviewStore } from "../../stores/agentReviewStore";
 import { useRunLauncherStore } from "../../stores/runLauncherStore";
-import { runHealthSummary } from "../../lib/reviewService";
+import { useSettingsStore } from "../../stores/settingsStore";
+import { explainFailure } from "../../lib/agentFailure";
+import { coverageGaps, partCoverage, runHealthSummary, type CoverageGap } from "../../lib/findings";
 import { IconAlert } from "../icons";
 
 // What the last review did wrong, kept on screen until it is dealt with.
@@ -33,26 +35,45 @@ import { IconAlert } from "../icons";
 
 /** The last run's failure, or null when there is nothing wrong to report.
  *
- *  `error` is a run that never landed — the store already holds the sentence. The
- *  health summary is the other one: a run that landed and should not be trusted. */
-export function useReviewOutcome(): { kind: "failed" | "incomplete"; text: string; detail: string } | null {
-  const error = useDetailedReviewStore((s) => s.error);
-  const phase = useDetailedReviewStore((s) => s.phase);
+ *  Three sources, and they are widened from one. `error` is a run that never landed.
+ *  `run_health` is a run whose own stage reported that it was cut short. `bom_audit`
+ *  is the rest of it — every check that could not be made — and that is the one the
+ *  app used to throw away, so a review with twenty blind spots and no findings read
+ *  as a pass. `run_health` now decides only whether the heading says "incomplete";
+ *  the LIST is the audit, derived exactly as the review page derives it. */
+export function useReviewOutcome(): {
+  kind: "failed" | "incomplete";
+  text: string;
+  detail: string;
+  gaps: CoverageGap[];
+  coverage: string | null;
+} | null {
+  const error = useAgentReviewStore((s) => s.error);
+  const phase = useAgentReviewStore((s) => s.phase);
   const doc = useBomCheckStore((s) => s.doc);
   const dismissed = useBomCheckStore((s) => s.healthDismissed);
 
   // A run in flight is its own story; the progress bar is already telling it.
-  if (isRunning(phase)) return null;
-  if (error) return { kind: "failed", text: "Review failed", detail: error };
+  if (isAgentRunning(phase)) return null;
+  if (error) return { kind: "failed", text: "Review failed", detail: error, gaps: [], coverage: null };
   if (dismissed) return null;
   const health = runHealthSummary(doc);
-  if (!health) return null;
-  return { kind: "incomplete", text: "Review incomplete", detail: health.detail };
+  const gaps = coverageGaps(doc);
+  if (!health && !gaps.length) return null;
+  return {
+    kind: "incomplete",
+    // A stage that died and a check that could not be made are different news, and
+    // the heading is where the reader learns which this is.
+    text: health ? "Review incomplete" : "Not fully verified",
+    detail: health?.detail ?? "",
+    gaps,
+    coverage: partCoverage(doc),
+  };
 }
 
 export function ReviewOutcome() {
   const outcome = useReviewOutcome();
-  const clearError = useDetailedReviewStore((s) => s.clearError);
+  const clearError = useAgentReviewStore((s) => s.clearError);
   const dismissHealth = useBomCheckStore((s) => s.dismissHealth);
   const [open, setOpen] = useState(false);
   const wrapRef = useRef<HTMLDivElement | null>(null);
@@ -92,11 +113,16 @@ export function ReviewOutcome() {
   }
 
   const failed = outcome.kind === "failed";
+  // A failed run says what went wrong and what to do, in that order. The agent's own
+  // words stay underneath, small: they are the evidence, not the message.
+  const advice = failed
+    ? explainFailure(outcome.detail, useSettingsStore.getState().effectiveAgent().label)
+    : null;
   return (
     <div className="review-outcome" ref={wrapRef}>
       <button
         className={`review-outcome-pill ${failed ? "failed" : "incomplete"} ${open ? "on" : ""}`}
-        title={outcome.detail}
+        title={advice ? advice.title : outcome.detail}
         aria-haspopup="dialog"
         aria-expanded={open}
         onClick={() => setOpen((v) => !v)}
@@ -107,19 +133,39 @@ export function ReviewOutcome() {
 
       {open && (
         <div className="review-outcome-pop" role="dialog" aria-label={outcome.text}>
-          <div className="review-outcome-hd">{outcome.text}</div>
-          {/* What it MEANS, before what it was. A stage name answers a question the
-              reader did not ask; "do not trust the all-clear" is the one they did. */}
+          <div className="review-outcome-hd">{advice ? advice.title : outcome.text}</div>
+          {/* What to DO, before what it was. A stage name or an exit code answers a
+              question the reader did not ask. */}
           <p className="review-outcome-what">
-            {failed
-              ? "This review did not finish, so nothing from it has been filed. The findings in the review panel are from an earlier run."
-              : "Part of this review did not run. Its findings were filed anyway, marked low confidence — treat them as unchecked, and do not read a clean result as an all-clear."}
+            {advice
+              ? advice.fix
+              : "Some of this board was not checked. Do not read a clean result as an all-clear — the list below is what nobody looked at."}
           </p>
-          <div className="review-outcome-detail">
-            {outcome.detail.split("\n").map((line, i) => (
-              <div key={i}>{line}</div>
-            ))}
-          </div>
+          {/* The coverage sentence first, because "65 of 72 part numbers were accounted
+              for" answers the question the list below only implies. */}
+          {outcome.coverage && <p className="review-outcome-coverage">{outcome.coverage}</p>}
+          {outcome.detail && (
+            <div className={`review-outcome-detail ${failed ? "said" : ""}`}>
+              {outcome.detail.split("\n").map((line, i) => (
+                <div key={i}>{line}</div>
+              ))}
+            </div>
+          )}
+          {/* What the review could not check, from its own audit trail. This is the
+              part the app used to throw away, which is how a review with twenty blind
+              spots and no findings read as a pass. */}
+          {outcome.gaps.length > 0 && (
+            <ul className="review-outcome-gaps">
+              {outcome.gaps.map((g) => (
+                // The whole note only as a tooltip, and only when the line is shorter
+                // than it — a title repeating the text under it is a second copy.
+                <li key={g.item} title={g.full !== g.note ? g.full : undefined}>
+                  <b>{g.item}</b>
+                  {g.note ? ` — ${g.note}` : ""}
+                </li>
+              ))}
+            </ul>
+          )}
           <div className="review-outcome-acts">
             <button className="btn-ghost" onClick={dismiss}>
               Dismiss
@@ -128,10 +174,11 @@ export function ReviewOutcome() {
               className="btn-primary"
               onClick={() => {
                 dismiss();
-                useRunLauncherStore.getState().openSetup("bom");
+                if (advice?.action === "connect") useRunLauncherStore.getState().openConnect();
+                else useRunLauncherStore.getState().openSetup("bom");
               }}
             >
-              Run again
+              {advice?.action === "connect" ? "Connect…" : "Run again"}
             </button>
           </div>
         </div>

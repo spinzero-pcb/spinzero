@@ -766,7 +766,7 @@ export function Canvas() {
       // with a tolerance that shrinks as you zoom in (~12 screen px, max 3 mm).
       if (!hit) hit = nearestNetAt(w.x, w.y, Math.min(3, 12 / cam.current.s));
       // Comment mode (C armed): the click picks the object to anchor a new comment
-      // to, instead of selecting (docs/phase2-ui-plan.md §3).
+      // to, instead of selecting (docs/archive/phase2-ui-plan.md §3).
       const review = useReviewStore.getState();
       if (review.armed && hit) {
         const sheet =

@@ -133,13 +133,14 @@ describe("missingFrom", () => {
   it("names what is missing rather than answering yes or no", () => {
     // A disabled Copy button with no explanation is how a user concludes the feature
     // is broken.
-    expect(missingFrom(null)).toContain("the licence key");
-    expect(missingFrom({ ...CONFIG, server_env: {} })).toEqual(["the licence key"]);
+    expect(missingFrom(null)).toContain("the server command");
     expect(missingFrom({ ...CONFIG, server_command: "  " })).toContain("the server command");
   });
 
-  it("is satisfied by a development build, which needs no key", () => {
-    expect(missingFrom({ ...CONFIG, server_env: { SPINZERO_MCP_DEV: "1" } })).toEqual([]);
+  it("does not ask for a licence key, because the key is not in this config", () => {
+    // It lives in one file on the machine that the server reads for itself. Demanding
+    // it here would report every correctly set up customer as incomplete.
+    expect(missingFrom({ ...CONFIG, server_env: {} })).toEqual([]);
   });
 
   it("is satisfied by a complete setup", () => {

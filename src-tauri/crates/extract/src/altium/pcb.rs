@@ -53,6 +53,12 @@ impl Flip {
     fn angle(self, deg: f64) -> f64 {
         r4(-deg)
     }
+    /// A text angle in the geometry is the angle a reader SEES, counter-clockwise,
+    /// like a KiCad text angle. Altium's is the same visible angle, so the Y flip
+    /// leaves it alone: negating it turns 90 degree text the wrong way.
+    fn text_angle(self, deg: f64) -> f64 {
+        r4(deg)
+    }
 }
 
 /// The rigid-flex stack, with every GUID resolved to the name the designer
@@ -213,6 +219,9 @@ pub struct BoardArtifacts {
     pub svgs: Vec<serde_json::Value>,
     /// Board colours for the design model's `theme` block.
     pub theme: std::collections::BTreeMap<String, String>,
+    /// The board's own 3D-view colours and opacities, for the design model's
+    /// `board_3d` block. Not used in 2D.
+    pub board_3d: crate::design::Board3d,
     pub summary: BoardSummary,
 }
 
@@ -285,6 +294,10 @@ pub fn extract_pcb(
         geometry: rel,
         svgs,
         theme: crate::altium::pcb_svg::board_theme(g),
+        board_3d: crate::design::Board3d {
+            colors: board.view_colors.clone(),
+            opacity: board.view_opacity.clone(),
+        },
         summary,
     })
 }
@@ -504,12 +517,11 @@ pub fn build(b: &PcbDoc, source: &str, project: &BTreeMap<String, String>) -> Bu
             role: role_of(id),
             side: layers::side(id),
             ord: ord as i64,
-            // Colour is Altium's own only for the layers the bundle does not
-            // already theme by role; the fabrication layers keep the viewer's
-            // CSS variables, exactly as the KiCad path leaves them.
+            // Set below by `paint_layers`, once the whole stack is known.
             color: None,
         });
     }
+    crate::altium::pcb_svg::paint_layers(&mut layer_defs);
     let li = |id: u8| layer_idx.get(&id).copied();
 
     // ---- nets --------------------------------------------------------------
@@ -708,11 +720,14 @@ pub fn build(b: &PcbDoc, source: &str, project: &BTreeMap<String, String>) -> Bu
                 [x, y]
             })
             .collect();
-        // A region that belongs to a polygon is that pour's filled copper; a
+        // A region that belongs to a polygon on copper is that pour's filled
+        // copper (a zone, which the viewer may draw translucent). The same on an
+        // overlay, mask or drawing layer is plain artwork, such as a logo. A
         // keep-out is an unfilled restriction. Everything else — a shape-based
         // pad's paste aperture, a footprint's own copper region — is a filled
         // graphic on its layer.
-        if r.c.polygon.is_some() || r.is_keepout() {
+        let on_copper = layer_defs[usize::from(layer)].role == "copper";
+        if (r.c.polygon.is_some() && on_copper) || r.is_keepout() {
             zones.push(ZoneDef {
                 layer,
                 net: net_of(r.c.net),
@@ -787,6 +802,13 @@ pub fn build(b: &PcbDoc, source: &str, project: &BTreeMap<String, String>) -> Bu
     for t in &b.texts {
         let Some(layer) = li(t.c.layer) else { continue };
         let owner = t.c.component.and_then(|i| b.components.get(usize::from(i)));
+        // The component's NAMEON / COMMENTON flags say whether Altium draws its
+        // designator and comment. The text stays in the file; it is not shown.
+        if owner.is_some_and(|c| {
+            (t.is_designator && c.name_hidden) || (t.is_comment && c.comment_hidden)
+        }) {
+            continue;
+        }
         let r = resolve_special(
             &t.text,
             owner,
@@ -816,7 +838,7 @@ pub fn build(b: &PcbDoc, source: &str, project: &BTreeMap<String, String>) -> Bu
             text,
             x,
             y,
-            angle: f.angle(t.rotation),
+            angle: f.text_angle(t.rotation),
             size: r4(if t.truetype { t.height / TRUETYPE_SIZE_PER_HEIGHT } else { t.height }),
             width: None,
             thickness: (!t.truetype && t.width > 0.0).then(|| r4(t.width)),
@@ -828,14 +850,16 @@ pub fn build(b: &PcbDoc, source: &str, project: &BTreeMap<String, String>) -> Bu
             knockout_box: place.knockout_box,
             knockout_margin: (t.inverted && place.knockout_box.is_none()).then(|| r4(t.inverted_margin)),
             upright: false,
-            // Only a TrueType string names a face; the rest are Altium's stroke
-            // font, which the viewer's stroke font stands in for.
+            // Only a TrueType text names a font. The stroke font ("Default")
+            // keeps the viewer's own stroke engine, whatever name the record
+            // carries.
             font: (t.truetype && !t.font.is_empty()).then(|| t.font.clone()),
             comp: comp_of(t.c.component),
             role,
         });
     }
 
+    paint_order(&layer_defs, &mut tracks, &mut zones, &mut graphics);
     let bbox = bbox_of(&components, &tracks, &pads, &vias, &graphics, &zones);
     let geometry = Geometry {
         schema: GEOMETRY_SCHEMA,
@@ -966,7 +990,13 @@ fn resolve_special(
     is_comment: bool,
     project: &BTreeMap<String, String>,
 ) -> Resolved {
+    // A special string is sometimes stored in single quotes (`'.Designator'`).
     let trimmed = text.trim();
+    let trimmed = trimmed
+        .strip_prefix('\'')
+        .and_then(|t| t.strip_suffix('\''))
+        .filter(|t| t.starts_with('.'))
+        .unwrap_or(trimmed);
     let key = trimmed.to_ascii_uppercase();
     let designator = owner_index
         .and_then(|i| designators.get(usize::from(i)))
@@ -983,7 +1013,11 @@ fn resolve_special(
             owned(owner.map(|c| c.comment.clone()).unwrap_or_default(), "value")
         }
         ".PCB_FILE_NAME" | ".PCB_FILE_NAME_NO_PATH" => owned(source.to_string(), ""),
-        ".LAYER_NAME" => owned(layer_name.to_string(), ""),
+        // The layer's own name: a mechanical layer shows as `M14-Top Assembly`
+        // in the stack, and the special string gives `Top Assembly`.
+        ".LAYER_NAME" => owned(strip_mech_prefix(layer_name).to_string(), ""),
+        // Altium prints this for a board with no assembly variant.
+        ".VARIANTNAME" => owned("[No Variations]".to_string(), ""),
         // The file marks which text object IS the designator and which is the
         // comment, so the `role` never has to be guessed from the string.
         _ if is_designator => owned(text.to_string(), "reference"),
@@ -1005,6 +1039,69 @@ fn resolve_special(
             text.to_string(),
             if owner.is_some() { "user" } else { "" },
         ),
+    }
+}
+
+/// The viewer paints each object class in array order, so a later primitive
+/// covers an earlier one. The order is the one a viewer sees from the top, so
+/// the layers do not cover each other in file order. Each group keeps its own
+/// file order.
+fn paint_order(
+    layers: &[LayerDef],
+    tracks: &mut Tracks,
+    zones: &mut Vec<ZoneDef>,
+    graphics: &mut Vec<GraphicDef>,
+) {
+    let copper: Vec<u16> = layers
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| l.role == "copper")
+        .map(|(i, _)| i as u16)
+        .collect();
+    // Seen from the top: bottom-side layers, then the copper from the bottom up,
+    // then top-side layers, then layers with no side (drill, board shape).
+    // A mechanical layer has no `side`, so its name says which side it is on.
+    let rank = |layer: u16| -> u32 {
+        if let Some(p) = copper.iter().position(|&c| c == layer) {
+            return 10 + (copper.len() - p) as u32;
+        }
+        let l = &layers[usize::from(layer)];
+        let name = l.name.to_ascii_lowercase();
+        match l.side {
+            Some("back") => 0,
+            Some("front") => 100,
+            _ if name.contains("bottom") => 0,
+            _ if name.contains("top") => 100,
+            _ => 200,
+        }
+    };
+    let order = |layers_of: &[u16]| -> Vec<usize> {
+        let mut idx: Vec<usize> = (0..layers_of.len()).collect();
+        idx.sort_by_key(|&i| rank(layers_of[i]));
+        idx
+    };
+    let seg = order(&tracks.seg.layer);
+    tracks.seg.xy = seg.iter().flat_map(|&i| tracks.seg.xy[4 * i..4 * i + 4].to_vec()).collect();
+    tracks.seg.w = seg.iter().map(|&i| tracks.seg.w[i]).collect();
+    tracks.seg.net = seg.iter().map(|&i| tracks.seg.net[i]).collect();
+    tracks.seg.layer = seg.iter().map(|&i| tracks.seg.layer[i]).collect();
+    let arc = order(&tracks.arc.layer);
+    tracks.arc.xy = arc.iter().flat_map(|&i| tracks.arc.xy[6 * i..6 * i + 6].to_vec()).collect();
+    tracks.arc.w = arc.iter().map(|&i| tracks.arc.w[i]).collect();
+    tracks.arc.net = arc.iter().map(|&i| tracks.arc.net[i]).collect();
+    tracks.arc.layer = arc.iter().map(|&i| tracks.arc.layer[i]).collect();
+    zones.sort_by_key(|z| rank(z.layer));
+    graphics.sort_by_key(|g| rank(g.layer));
+}
+
+/// `M14-Top Assembly` -> `Top Assembly`; any other name comes back unchanged.
+fn strip_mech_prefix(name: &str) -> &str {
+    let rest = name.strip_prefix('M').unwrap_or(name);
+    let digits = rest.chars().take_while(char::is_ascii_digit).count();
+    if digits > 0 && rest[digits..].starts_with('-') && rest.len() > digits + 1 {
+        &rest[digits + 1..]
+    } else {
+        name
     }
 }
 
@@ -1331,6 +1428,129 @@ mod tests {
         assert_eq!(inv.knockout_box, Some([r4(-3.175 / 2.0), r4(-1.651 / 2.0), r4(3.175 / 2.0), r4(1.651 / 2.0)]));
         let (cx, cy) = Flip.pt(10.0 + 3.175 / 2.0, 20.0 + 1.651 / 2.0);
         assert_eq!((inv.x, inv.y), (cx, cy), "anchored at the rectangle's centre");
+    }
+
+    fn plain_text(layer: u8, rotation: f64) -> eda_parse_altium::pcb::Text {
+        eda_parse_altium::pcb::Text {
+            c: Common { layer, net: None, polygon: None, component: None },
+            x: 5.0,
+            y: 5.0,
+            height: 1.0,
+            width: 0.1,
+            rotation,
+            mirror: false,
+            font: "Arial".into(),
+            text: "TP1".into(),
+            is_designator: false,
+            is_comment: false,
+            truetype: false,
+            bold: false,
+            italic: false,
+            inverted: false,
+            inverted_margin: 0.0,
+            inverted_rect: None,
+            rect_justify: 3,
+        }
+    }
+
+    /// 90 degree text keeps its visible angle, a stroke text keeps its height
+    /// and names no font, and a TrueType text names its face.
+    #[test]
+    fn text_keeps_its_angle_and_scales_its_height() {
+        let mut b = board();
+        b.texts.push(plain_text(33, 90.0));
+        let mut tt = plain_text(33, 0.0);
+        tt.truetype = true;
+        b.texts.push(tt);
+        let g = build(&b, "b", &BTreeMap::new()).geometry;
+        assert_eq!(g.texts[0].angle, 90.0, "not negated by the Y flip");
+        assert_eq!(g.texts[0].size, 1.0);
+        assert_eq!(g.texts[0].font, None, "a stroke text has no font");
+        assert_eq!(g.texts[1].font.as_deref(), Some("Arial"));
+    }
+
+    #[test]
+    fn quoted_special_strings_resolve() {
+        let d = vec!["U1".to_string()];
+        let r = |t: &str, layer: &str| resolve_special(t, None, Some(0), &d, "b", layer, false, false, &BTreeMap::new());
+        assert_eq!(r("'.Designator'", "L").text, "U1");
+        assert_eq!(r("'.Layer_Name'", "M14-Top Assembly").text, "Top Assembly");
+        assert_eq!(r("'.VariantName'", "L").text, "[No Variations]");
+        assert!(r(".GM14", "L").unresolved, "a legend stays as written");
+    }
+
+    /// A polygon region on an overlay is artwork, not a pour.
+    #[test]
+    fn a_polygon_region_off_copper_is_a_graphic() {
+        let mut b = board();
+        let ring = vec![(0.0, 0.0), (1.0, 0.0), (1.0, 1.0)];
+        for layer in [TOP, 33u8] {
+            b.regions.push(eda_parse_altium::pcb::Region {
+                c: Common { layer, net: None, polygon: Some(0), component: None },
+                params: eda_parse_altium::record::TextRecord::default(),
+                outline: ring.clone(),
+            });
+        }
+        let g = build(&b, "b", &BTreeMap::new()).geometry;
+        assert_eq!(g.zones.len(), 1, "only the copper one is a zone");
+        assert_eq!(g.graphics.len(), 1);
+    }
+
+    /// The bottom copper paints first and the top copper last.
+    #[test]
+    fn copper_paints_from_the_bottom_up() {
+        let mut b = board();
+        for layer in [TOP, 2u8, BOTTOM] {
+            b.tracks.push(Track { c: common(layer, None), x1: 0.0, y1: 0.0, x2: 1.0, y2: 0.0, width: 0.2 });
+        }
+        let g = build(&b, "b", &BTreeMap::new()).geometry;
+        let name = |i: usize| g.layers[usize::from(g.tracks.seg.layer[i])].name.clone();
+        assert_eq!(name(0), "Bottom Layer");
+        assert_eq!(name(2), "Top Layer");
+    }
+
+    /// Seen from the top: bottom-side artwork, then copper bottom up, then
+    /// top-side artwork, then side-neutral layers.
+    #[test]
+    fn layers_paint_by_side_as_seen_from_the_top() {
+        let def = |name: &str, role: &'static str, side: Option<&'static str>| LayerDef {
+            name: name.into(),
+            role,
+            side,
+            ord: 0,
+            color: None,
+        };
+        let layers = vec![
+            def("Top Layer", "copper", Some("front")),
+            def("Signal Layer 1", "copper", Some("inner")),
+            def("Bottom Layer", "copper", Some("back")),
+            def("Top Overlay", "silkscreen", Some("front")),
+            def("Bottom Overlay", "silkscreen", Some("back")),
+            def("M15-Bottom Assembly", "user", None),
+            def("M14-Top Assembly", "user", None),
+            def("Keep-Out Layer", "edge", None),
+        ];
+        let mut tracks = Tracks { seg: SegCol::default(), arc: ArcCol::default() };
+        let mut graphics = Vec::new();
+        let mut zones: Vec<ZoneDef> = (0..layers.len() as u16)
+            .rev()
+            .map(|layer| ZoneDef { layer, net: 0, filled: true, keepout: false, pts: vec![] })
+            .collect();
+        paint_order(&layers, &mut tracks, &mut zones, &mut graphics);
+        let names: Vec<&str> = zones.iter().map(|z| layers[usize::from(z.layer)].name.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "M15-Bottom Assembly",
+                "Bottom Overlay",
+                "Bottom Layer",
+                "Signal Layer 1",
+                "Top Layer",
+                "M14-Top Assembly",
+                "Top Overlay",
+                "Keep-Out Layer"
+            ]
+        );
     }
 
     #[test]

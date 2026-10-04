@@ -20,7 +20,7 @@
   "tools": [
     {
       "name": "spinzero_start_review",
-      "description": "PREPARE a SpinZero review. Give it a KiCad project directory or a prepared review bundle directory; a raw project is extracted for you. THIS REVIEW ASKS YOU A QUESTION BEFORE IT STARTS, and that is not an error: the result carries a `preflight` block with the board's end application and its column mapping. SHOW `preflight.mapping.table` TO THE USER VERBATIM — it is a formatted table, print it as-is rather than describing it — and ASK which end application the board is for. Then call spinzero_confirm_setup, which is what actually starts the pipeline — bundle validation, distributor lookups, EVERY datasheet on the BOM (fetched AND searched for the topics a BOM review turns on, so the passages come to you with each batch), the public rule pack, and a field-by-field cross-check of every row against the distributor record. Expect THAT call to take a minute or two on a real board. Nothing else in this toolset works until you call it. PRIVACY: the schematic, BOM and layout never leave this machine; part numbers go out only for distributor and datasheet lookups. If this server has improvement telemetry switched on, the result of this call says so in `telemetry` and names exactly what would be sent — relay that sentence to the user before you go any further.",
+      "description": "PREPARE a SpinZero review. Give it a KiCad project directory or a prepared review bundle directory; a raw project is extracted for you. THIS REVIEW ASKS YOU A QUESTION BEFORE IT STARTS, and that is not an error: the result carries a `preflight` block with the board's end application and its column mapping. If the result says `setup_window: \"open\"`, a SpinZero window on the user's screen asks both questions: follow `next` and do not ask them in chat. Otherwise SHOW `preflight.mapping.table` TO THE USER VERBATIM — it is a formatted table, print it as-is rather than describing it — and ASK which end application the board is for. Then call spinzero_confirm_setup, which is what actually starts the pipeline — bundle validation, distributor lookups, EVERY datasheet on the BOM (fetched AND searched for the topics a BOM review turns on, so the passages come to you with each batch), the public rule pack, and a field-by-field cross-check of every row against the distributor record. Expect THAT call to take a minute or two on a real board. Nothing else in this toolset works until you call it. PRIVACY: the schematic, BOM and layout never leave this machine; part numbers go out only for distributor and datasheet lookups. If this server has improvement telemetry switched on, the result of this call says so in `telemetry` and names exactly what would be sent — relay that sentence to the user before you go any further.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -42,9 +42,10 @@
           "pipeline": {
             "type": "string",
             "enum": [
-              "bom-detailed"
+              "bom-detailed",
+              "schematic-detailed"
             ],
-            "description": "Which review to run. Only bom-detailed is available over MCP today."
+            "description": "Which review to run. bom-detailed reviews the BOM. schematic-detailed reviews the schematic: every part gets a design record backed by a calc or a datasheet page."
           },
           "model": {
             "type": "string",
@@ -53,6 +54,10 @@
           "allow_low_coverage": {
             "type": "boolean",
             "description": "Review the board even when most of its datasheets could not be obtained. Only pass this after a run has been refused for low coverage AND the user has said to go ahead: the resulting review cannot verify specs against documents it does not have, and the report will say so. Requires a SpinZero licence."
+          },
+          "non_interactive": {
+            "type": "boolean",
+            "description": "There is no user in this conversation. Pass it only when you were STARTED with the preflight answers already in hand — SpinZero does this when it runs a review for you. The preflight then tells you to confirm and continue instead of telling you to show a table and ask a question nobody is there to answer. Never pass it in a chat with a person."
           },
           "pack_version": {
             "type": "string",
@@ -67,7 +72,7 @@
     },
     {
       "name": "spinzero_confirm_setup",
-      "description": "Answer the preflight and START the review. spinzero_start_review only PREPARES one: it extracts the board and reads the column mapping, then stops and asks you two things, because both are inputs where a wrong guess is invisible in the finished report. (1) THE END APPLICATION. It decides whether a missing AEC-Q qualification is a finding at all. Ask the user; do not infer it from the board. If they will not or cannot say, call this with no profile — the review then runs under the strictest setting of every rule and the report states that nobody said, which is honest. Never pass a profile the user did not choose. (2) THE COLUMN MAPPING. Show the user the `preflight.mapping.fields` table — their column next to the field we read it as — and accept a plain yes. This is meant to be cheap to agree to. Read out `preflight.attention` if it is non-empty and nothing else: those are the entries that actually need a decision. Only pass `mapping_overrides` if the user corrects something.",
+      "description": "Answer the preflight and START the review. spinzero_start_review only PREPARES one: it extracts the board and reads the column mapping, then stops and asks you two things, because both are inputs where a wrong guess is invisible in the finished report. (1) THE END APPLICATION. It decides whether a missing AEC-Q qualification is a finding at all. Ask the user; do not infer it from the board. If they will not or cannot say, call this with no profile — the review then runs under the strictest setting of every rule and the report states that nobody said, which is honest. Never pass a profile the user did not choose. (2) THE COLUMN MAPPING. Show the user the `preflight.mapping.fields` table — their column next to the field we read it as — and accept a plain yes. This is meant to be cheap to agree to. Read out `preflight.attention` if it is non-empty and nothing else: those are the entries that actually need a decision. Only pass `mapping_overrides` if the user corrects something. BOTH ANSWERS ARE FIXED once this call returns: changing either means starting a new review on the same path, so ask before you call, not after. SETUP WINDOW: when start_review returned `setup_window: \"open\"`, the user answers both questions in a SpinZero window instead. Do not ask them in chat; wait until the user says they pressed Confirm, then call this with only the review_id.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -92,6 +97,51 @@
             "additionalProperties": {
               "type": "string"
             }
+          },
+          "intent": {
+            "type": "object",
+            "description": "schematic-detailed only: the design intent from the user, answering preflight.schematic.questions. Keys: net_voltages ({net: {value} or {min, max}}, e.g. the bus voltage range), facts ({name: text}, e.g. ambient, rated current, PWM frequency, ADC sample time, option bytes), variant (one of preflight.schematic.variants), scope ({sheets: [...]} and/or {parts: [...]}, taken from the user's request, never asked: leave it out for the whole design), ground_nets. Leave an answer out when the user does not know it: the review then brackets it and reports the limit.",
+            "properties": {
+              "net_voltages": {
+                "type": "object"
+              },
+              "facts": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string"
+                }
+              },
+              "variant": {
+                "type": "string"
+              },
+              "scope": {
+                "type": "object",
+                "properties": {
+                  "sheets": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "parts": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                }
+              },
+              "ground_nets": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "answered_in_chat": {
+            "type": "boolean",
+            "description": "Only when start_review opened a setup window (`setup_window: \"open\"`) and the user says it never appeared, so you asked both questions in chat instead. Without it, this call reads the answer from the window and ignores profile and mapping_overrides."
           }
         },
         "required": [
@@ -102,17 +152,74 @@
     },
     {
       "name": "spinzero_get_step",
-      "description": "Fetch the open step: the instructions, the evidence assembled for it, and the JSON schema your submission must satisfy. Read the evidence in full before using any evidence tool — the BOM rows, the field-by-field cross-check against the distributor, and the DATASHEET EXTRACTS (every held document, already searched for qualification, temperature, compliance, moisture sensitivity, lifecycle, ratings and derating, verbatim with page numbers) are all already in it. Most steps are a BATCH OF PARTS you must account for individually; the last one is the whole board, for consolidation and systemic gaps.",
+      "description": "Fetch the open step: the instructions, the evidence assembled for it, and the JSON schema your submission must satisfy. Read the evidence in full before using any evidence tool — the BOM rows, the field-by-field cross-check against the distributor, and the DATASHEET EXTRACTS (every held document, already searched for qualification, temperature, compliance, moisture sensitivity, lifecycle, ratings and derating, verbatim with page numbers) are all already in it. Most steps are a BATCH OF PARTS you must account for individually; the last one is the whole board, for consolidation and systemic gaps. The review's GUIDANCE (the rules, the profile table, the severity definitions) is NOT in this result. Call spinzero_get_guidance for it first, unless it is already in this conversation.",
       "inputSchema": {
         "type": "object",
         "properties": {
           "review_id": {
             "type": "string",
             "description": "The id returned by spinzero_start_review."
+          },
+          "step": {
+            "type": "string",
+            "description": "The step id you were given (from spinzero_status `open_steps`). Several steps are open at once, so name yours. Without it you get the oldest step nobody has fetched."
+          },
+          "full_guidance": {
+            "type": "boolean",
+            "description": "No longer used: the guidance is never sent inline. Call spinzero_get_guidance instead. Accepted so that an older client is not refused."
           }
         },
         "required": [
           "review_id"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "spinzero_get_guidance",
+      "description": "The rules for the open step: the review rules, the profile table, the severity and confidence definitions, the house style, and how to work a step. Call it once, before spinzero_get_step, in every conversation that works a step. A sub-agent in a fresh conversation does not have it. Reviewing a batch without the severity table is worse than the tokens.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "review_id": {
+            "type": "string",
+            "description": "The id returned by spinzero_start_review."
+          },
+          "step": {
+            "type": "string",
+            "description": "The step id you were given (from spinzero_status `open_steps`). Several steps are open at once, so name yours. Without it you get the oldest step nobody has fetched."
+          }
+        },
+        "required": [
+          "review_id"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "spinzero_more",
+      "description": "The next page of a SpinZero result that was too large for one message. A paged result starts with a line that names the cursor and the page to ask for. Read every page, in order, before you act on the result. Never read a saved copy of a result from disk.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "review_id": {
+            "type": "string",
+            "description": "The id returned by spinzero_start_review."
+          },
+          "cursor": {
+            "type": "string",
+            "description": "The cursor from the page header, verbatim."
+          },
+          "page": {
+            "type": "integer",
+            "minimum": 2,
+            "description": "The page number to fetch."
+          }
+        },
+        "required": [
+          "review_id",
+          "cursor",
+          "page"
         ],
         "additionalProperties": false
       }
@@ -163,13 +270,17 @@
     },
     {
       "name": "spinzero_abandon",
-      "description": "Give up on the open step and close the review anyway. Use it when you cannot complete a step — not to skip work you could do. The report still assembles, and every check nobody ruled on reaches the engineer marked unreviewed, so an abandoned review can never read as a clean one.",
+      "description": "Give up on a step you cannot complete — not to skip work you could do. With `step`, only that step closes and the review goes on. Without it, every open step closes and the review ends. The report still assembles, and every check nobody ruled on reaches the engineer marked unreviewed, so an abandoned review can never read as a clean one.",
       "inputSchema": {
         "type": "object",
         "properties": {
           "review_id": {
             "type": "string",
             "description": "The id returned by spinzero_start_review."
+          },
+          "step": {
+            "type": "string",
+            "description": "The one step to give up on. Omit it to end the whole review."
           },
           "reason": {
             "type": "string",
@@ -226,7 +337,7 @@
     },
     {
       "name": "spinzero_status",
-      "description": "Where a review is: its phase, how many steps are done, and what to call next. Use it to resume a review you lost track of rather than starting a second one over the same board.",
+      "description": "Where a review is: its phase, how many steps are done, the open steps (`open_steps`, with `handed_out` false for each one no sub-agent has fetched yet), and what to call next. Use it to resume a review you lost track of rather than starting a second one over the same board.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -250,6 +361,10 @@
           "review_id": {
             "type": "string",
             "description": "The id returned by spinzero_start_review."
+          },
+          "step": {
+            "type": "string",
+            "description": "The step id you were given (from spinzero_status `open_steps`). Several steps are open at once, so name yours. Without it you get the oldest step nobody has fetched."
           }
         },
         "additionalProperties": false,
@@ -267,6 +382,10 @@
           "review_id": {
             "type": "string",
             "description": "The id returned by spinzero_start_review."
+          },
+          "step": {
+            "type": "string",
+            "description": "The step id you were given (from spinzero_status `open_steps`). Several steps are open at once, so name yours. Without it you get the oldest step nobody has fetched."
           },
           "path": {
             "type": "string",
@@ -294,6 +413,10 @@
             "type": "string",
             "description": "The id returned by spinzero_start_review."
           },
+          "step": {
+            "type": "string",
+            "description": "The step id you were given (from spinzero_status `open_steps`). Several steps are open at once, so name yours. Without it you get the oldest step nobody has fetched."
+          },
           "mpn": {
             "type": "string",
             "description": "Manufacturer part number, verbatim."
@@ -315,6 +438,10 @@
           "review_id": {
             "type": "string",
             "description": "The id returned by spinzero_start_review."
+          },
+          "step": {
+            "type": "string",
+            "description": "The step id you were given (from spinzero_status `open_steps`). Several steps are open at once, so name yours. Without it you get the oldest step nobody has fetched."
           },
           "mpn": {
             "type": "string",
@@ -347,6 +474,10 @@
             "type": "string",
             "description": "The id returned by spinzero_start_review."
           },
+          "step": {
+            "type": "string",
+            "description": "The step id you were given (from spinzero_status `open_steps`). Several steps are open at once, so name yours. Without it you get the oldest step nobody has fetched."
+          },
           "mpn": {
             "type": "string",
             "description": "Manufacturer part number, exactly as it appears in the BOM."
@@ -367,6 +498,10 @@
           "review_id": {
             "type": "string",
             "description": "The id returned by spinzero_start_review."
+          },
+          "step": {
+            "type": "string",
+            "description": "The step id you were given (from spinzero_status `open_steps`). Several steps are open at once, so name yours. Without it you get the oldest step nobody has fetched."
           },
           "mpn": {
             "type": "string",
@@ -397,6 +532,10 @@
             "type": "string",
             "description": "The id returned by spinzero_start_review."
           },
+          "step": {
+            "type": "string",
+            "description": "The step id you were given (from spinzero_status `open_steps`). Several steps are open at once, so name yours. Without it you get the oldest step nobody has fetched."
+          },
           "query": {
             "type": "string",
             "description": "Search query, e.g. 'ERJ-2RKF1001X datasheet'."
@@ -411,6 +550,213 @@
           "query"
         ],
         "additionalProperties": false
+      }
+    },
+    {
+      "name": "spinzero_component",
+      "description": "One component: its value, fitted state, sheet, part fields, and each pin with its net, the net voltage when known, and the other parts on that net. Also its stress-table row.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "review_id": {
+            "type": "string",
+            "description": "The id returned by spinzero_start_review."
+          },
+          "step": {
+            "type": "string",
+            "description": "The step id you were given (from spinzero_status `open_steps`). Several steps are open at once, so name yours. Without it you get the oldest step nobody has fetched."
+          },
+          "refdes": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "review_id",
+          "refdes"
+        ]
+      }
+    },
+    {
+      "name": "spinzero_net",
+      "description": "One net: its terminals with values and fitted state, its known voltage, and the rule candidates on it.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "review_id": {
+            "type": "string",
+            "description": "The id returned by spinzero_start_review."
+          },
+          "step": {
+            "type": "string",
+            "description": "The step id you were given (from spinzero_status `open_steps`). Several steps are open at once, so name yours. Without it you get the oldest step nobody has fetched."
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "review_id",
+          "name"
+        ]
+      }
+    },
+    {
+      "name": "spinzero_calc",
+      "description": "Run a calc. Use a library calc when one fits (list: true gives the table). When none fits, set calc to 'custom' and write your own formulas in define: {title, theory, inputs: {name: unit}, outputs: [[name, expression, unit], ...], checks: [[value, 'le'|'ge', limit], ...]}. Expressions use + - * / ^, parentheses, sqrt, ln, log10, exp, abs, min, max, pow and pi, in SI units. Give every input with value (or min and max for a bracket), source (datasheet, netlist, intent, bom, kb, policy, web, assumed, model, sim) and ref (a datasheet ref needs a page, table or figure; a web ref needs the URL). The server computes every output, the worst-case margin, and the boundary where a margin is zero. The result has a calc id: cite it in your submission.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "review_id": {
+            "type": "string",
+            "description": "The id returned by spinzero_start_review."
+          },
+          "step": {
+            "type": "string",
+            "description": "The step id you were given (from spinzero_status `open_steps`). Several steps are open at once, so name yours. Without it you get the oldest step nobody has fetched."
+          },
+          "list": {
+            "type": "boolean"
+          },
+          "calc": {
+            "type": "string",
+            "description": "a library calc id, or 'custom' with define"
+          },
+          "define": {
+            "type": "object",
+            "description": "your own calc, when calc is 'custom'",
+            "properties": {
+              "title": {
+                "type": "string"
+              },
+              "theory": {
+                "type": "string"
+              },
+              "inputs": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string"
+                }
+              },
+              "outputs": {
+                "type": "array",
+                "items": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              },
+              "checks": {
+                "type": "array",
+                "items": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          },
+          "inputs": {
+            "type": "object"
+          },
+          "solve_for": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "review_id"
+        ]
+      }
+    },
+    {
+      "name": "spinzero_pattern",
+      "description": "A pattern card from the knowledge base: how the circuit works, its checks, pitfalls and false positives. Call with no id for the list of cards.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "review_id": {
+            "type": "string",
+            "description": "The id returned by spinzero_start_review."
+          },
+          "step": {
+            "type": "string",
+            "description": "The step id you were given (from spinzero_status `open_steps`). Several steps are open at once, so name yours. Without it you get the oldest step nobody has fetched."
+          },
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "review_id"
+        ]
+      }
+    },
+    {
+      "name": "spinzero_sheet_tile",
+      "description": "Render a crop of a schematic sheet to PNG, with the named parts boxed. Returns the file path; open it and look at it. Read the designer notes on the sheet before you file a finding.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "review_id": {
+            "type": "string",
+            "description": "The id returned by spinzero_start_review."
+          },
+          "step": {
+            "type": "string",
+            "description": "The step id you were given (from spinzero_status `open_steps`). Several steps are open at once, so name yours. Without it you get the oldest step nobody has fetched."
+          },
+          "refdes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "margin_mm": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "review_id",
+          "refdes"
+        ]
+      }
+    },
+    {
+      "name": "spinzero_simulate",
+      "description": "Run a QSPICE simulation, where no closed form exists: loop stability, ringing with real parasitics, nonlinear start-up. Fill a testbench template with params (call with nothing for the list), or write your own netlist in 'netlist' with a 'name'. A netlist must end with .end and report its results with .meas lines. It cannot include files or C++ blocks. The result gives each .meas value and the netlist path.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "review_id": {
+            "type": "string",
+            "description": "The id returned by spinzero_start_review."
+          },
+          "step": {
+            "type": "string",
+            "description": "The step id you were given (from spinzero_status `open_steps`). Several steps are open at once, so name yours. Without it you get the oldest step nobody has fetched."
+          },
+          "template": {
+            "type": "string"
+          },
+          "params": {
+            "type": "object"
+          },
+          "netlist": {
+            "type": "string",
+            "description": "a complete QSPICE netlist that you wrote"
+          },
+          "name": {
+            "type": "string",
+            "description": "a short name for your netlist, e.g. 'gate_ring_q3'"
+          }
+        },
+        "required": [
+          "review_id"
+        ]
       }
     }
   ]

@@ -345,6 +345,7 @@ fn build_sheet(
     // needs the project's parameters, which is why they reach this far.
     for t in doc.texts.iter().filter(|t| {
         !t.template
+            && !super::sch_svg::text_off_sheet(t, &doc.sheet)
             && !t.text.trim().is_empty()
             && !super::sch_svg::special_draws_nothing(&t.text, doc, project_params)
     }) {
@@ -422,7 +423,7 @@ mod tests {
                 width: 0,
             }],
             // Altium names no junction, which is exactly the case `oid` exists for.
-            junctions: vec![Junction { at: pt(20, 10), ..Default::default() }],
+            junctions: vec![Junction { at: pt(20, 10), uuid: String::new(), color: String::new(), locked: false }],
             ..Default::default()
         }
     }

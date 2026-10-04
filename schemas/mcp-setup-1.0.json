@@ -1,0 +1,163 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://spinzero.dev/schemas/mcp-setup-1.0.json",
+  "title": "SpinZero review setup (request and answer)",
+  "description": "The two files behind `SpinZero --setup <dir>`. A review server writes `<dir>/request.json`: the end application and the BOM column mapping it wants confirmed. The app shows it as a form and, when the user presses Confirm, writes `<dir>/answer.json`. Nothing else passes between the two.",
+  "$defs": {
+    "request": {
+      "type": "object",
+      "required": [
+        "schema_version",
+        "review_id",
+        "board",
+        "row_count",
+        "profile",
+        "fields",
+        "columns"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": "mcp-setup-1.0"
+        },
+        "review_id": {
+          "type": "string"
+        },
+        "board": {
+          "type": "string",
+          "description": "The project folder's name, for the window title."
+        },
+        "row_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "profile": {
+          "type": "object",
+          "required": [
+            "value",
+            "options"
+          ],
+          "properties": {
+            "value": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Already stated by the user, or null."
+            },
+            "options": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": [
+                  "id",
+                  "label"
+                ],
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "label": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "fields": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "field",
+              "label",
+              "column"
+            ],
+            "properties": {
+              "field": {
+                "type": "string"
+              },
+              "label": {
+                "type": "string"
+              },
+              "column": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The column this field reads now, or null."
+              }
+            }
+          },
+          "description": "Every field the review reads, in display order."
+        },
+        "columns": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "name",
+              "fill_rate",
+              "sample"
+            ],
+            "properties": {
+              "name": {
+                "type": "string",
+                "description": "The heading in the reviewed CSV. The answer's mapping names this."
+              },
+              "fill_rate": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              },
+              "sample": {
+                "type": "string"
+              },
+              "label": {
+                "type": "string",
+                "description": "The heading in the user's own BOM, when the extractor renamed it. Shown to the user."
+              }
+            }
+          }
+        }
+      }
+    },
+    "answer": {
+      "type": "object",
+      "required": [
+        "schema_version",
+        "review_id",
+        "profile",
+        "mapping",
+        "confirmed_ts"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": "mcp-setup-1.0"
+        },
+        "review_id": {
+          "type": "string",
+          "description": "Copied from the request."
+        },
+        "profile": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "A profile id from the request's options, or null for 'not stated'."
+        },
+        "mapping": {
+          "type": "object",
+          "description": "Only the fields the user changed: field to column name, \"\" meaning 'this BOM has no such column'.",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "confirmed_ts": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    }
+  }
+}

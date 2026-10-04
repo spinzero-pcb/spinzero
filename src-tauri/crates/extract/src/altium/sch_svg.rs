@@ -22,14 +22,26 @@ use std::fmt::Write as _;
 
 use eda_parse_altium::sch::{
     self, ComponentKind, GShape, Graphic, Pin, Port, PowerPort, Pt, SchDoc, SchText, SheetSymbol,
+    TextKind,
 };
 use eda_parse_altium::units;
 
 use super::oid;
 
+/// How far a pin's name and number sit from the body end when the pin record
+/// states no margin (`Name_CustomPosition_Margin`). The file holds a value only
+/// for an override, so these are Altium's own defaults, measured on its viewer.
+/// A number that shares the pin with a visible name stands further out than one
+/// that is alone on it.
+const PIN_TEXT_MARGIN_MM: f64 = 7.5 * 0.254;
+const PIN_NUMBER_ALONE_MARGIN_MM: f64 = 4.0 * 0.254;
+
 /// Padding around the drawn extent, in mm — matches the KiCad renderer so the
 /// two look the same when a report puts them side by side.
 const PAD: f64 = 2.54;
+
+/// Radius of a junction dot, in mm. Altium's dot is about 4 units across.
+const JUNCTION_R: f64 = 2.0 * 0.254;
 
 /// Fallback face for a font the sheet's table does not name. Altium's own
 /// default is Times New Roman, which is what the whole corpus uses.
@@ -184,6 +196,9 @@ impl Specials {
             .or_else(|| self.document.get(&key))
             .or_else(|| self.project.get(&key))
             .cloned()
+            // A design with no variants has no name to give; Altium prints that
+            // fact rather than the special string.
+            .or_else(|| (key == "VARIANTNAME").then(|| "[No Variations]".to_string()))
             .unwrap_or_else(|| text.to_string())
     }
 }
@@ -209,7 +224,7 @@ pub fn palette(sheets: &[&SchDoc]) -> BTreeMap<String, String> {
             vote("bus", &b.color);
         }
         for j in &doc.junctions {
-            vote("junction", junction_color(j));
+            vote("junction", &j.color);
         }
         for n in &doc.no_ercs {
             vote("no_connect", &n.color);
@@ -232,7 +247,7 @@ pub fn palette(sheets: &[&SchDoc]) -> BTreeMap<String, String> {
             vote("sheet_name", &s.name_color);
         }
         for s in &doc.param_sets {
-            vote("netclass_flag", &s.color);
+            vote("netclass_flag", &s.parameters.first().map(|p| p.color.clone()).unwrap_or_default());
         }
         for comp in &doc.components {
             vote("reference", &comp.designator_color);
@@ -299,6 +314,8 @@ struct Ctx<'a> {
     fonts: &'a sch::SheetProps,
     palette: &'a BTreeMap<String, String>,
     specials: Specials,
+    /// The sheet's paper colour, for shapes that must hide what is under them.
+    paper: &'a str,
 }
 
 impl Ctx<'_> {
@@ -315,7 +332,8 @@ impl Ctx<'_> {
             Some(n) if !n.is_empty() => format!("'{}',{FONT_FALLBACK}", n.replace('\'', "")),
             _ => FONT_FALLBACK.to_string(),
         };
-        let size = units::sch_font_mm(self.fonts.font_sizes.get(i).copied().unwrap_or(10));
+        let face = self.fonts.fonts.get(i).map(String::as_str).unwrap_or("");
+        let size = units::sch_font_mm_for(face, self.fonts.font_sizes.get(i).copied().unwrap_or(10));
         (
             family,
             size,
@@ -327,31 +345,27 @@ impl Ctx<'_> {
     fn class(&self, key: &str) -> Option<&String> {
         self.palette.get(key)
     }
+
+    /// Ascent and descent (ems) of the face a `FontID` names.
+    fn face(&self, id: i64) -> (f64, f64) {
+        let i = (id - 1).max(0) as usize;
+        units::face_metrics(self.fonts.fonts.get(i).map(String::as_str).unwrap_or(""))
+    }
+
+    /// Cell height (mm) of a `FontID`: the line pitch of a text frame.
+    fn cell(&self, id: i64) -> f64 {
+        let i = (id - 1).max(0) as usize;
+        units::sch_font_cell_mm(self.fonts.font_sizes.get(i).copied().unwrap_or(10))
+    }
 }
 
 /// Altium's justification grid (0 bottom-left … 8 top-right) as the SVG
 /// `text-anchor` and `dominant-baseline` pair. The vertical sense flips with the
 /// Y axis: Altium's "bottom" is below the anchor in a Y-up sheet, which is the
 /// baseline once the page is the other way up.
-/// A mirrored text's justification, with its horizontal half reversed.
 ///
-/// Altium keeps mirrored text READABLE — it never draws the glyphs backwards —
-/// and reverses which side of its anchor the string runs to, so a designator
-/// still sits outside the symbol it labels rather than across it. The corpus
-/// mirrors 2683 strings: 2484 parameters, 122 free texts and 77 designators.
-fn mirror_justify(justify: i64, mirrored: bool) -> i64 {
-    if !mirrored {
-        return justify;
-    }
-    let j = justify.clamp(0, 8);
-    (j / 3) * 3
-        + match j % 3 {
-            0 => 2,
-            2 => 0,
-            middle => middle,
-        }
-}
-
+/// A mirrored text is NOT special: Altium keeps both the glyphs and the anchor
+/// as they are, so `IsMirrored` never changes the justification.
 fn anchor(justify: i64) -> (&'static str, &'static str) {
     let j = justify.clamp(0, 8);
     let h = match j % 3 {
@@ -414,7 +428,6 @@ fn markup(text: &str) -> (String, bool) {
     (out, any)
 }
 
-
 /// Emit one line of text with Altium's own placement.
 #[allow(clippy::too_many_arguments)]
 fn emit_text(
@@ -434,6 +447,10 @@ fn emit_text(
     let (x, y) = ctx.xy(at);
     let (family, size, bold, italic) = ctx.font(font);
     let (h, v) = anchor(justify);
+    // Bottom-justified text: the anchor is the bottom of the glyph cell, so the
+    // baseline sits one descent above it. `y` moves here, before the rotation,
+    // so a turned text is raised along its own up.
+    let ty = if justify.clamp(0, 8) / 3 == 0 { y - size * ctx.face(font).1 } else { y };
     let (body, _) = markup(text);
     let weight = if bold { r#" font-weight="bold""# } else { "" };
     let style = if italic { r#" font-style="italic""# } else { "" };
@@ -441,9 +458,9 @@ fn emit_text(
     let over = override_attr(color, class_default);
     let _ = write!(
         s,
-        r#"<text x="{}" y="{}" font-family="{}" font-size="{}" text-anchor="{h}" dominant-baseline="{v}" fill="{fill}" stroke="none"{weight}{style}{over}{}>{body}</text>"#,
+        r#"<text x="{}" y="{}" font-family="{}" font-size="{}" text-anchor="{h}" dominant-baseline="{v}" fill="{fill}" stroke="none" xml:space="preserve"{weight}{style}{over}{}>{body}</text>"#,
         c(x),
-        c(y),
+        c(ty),
         esc(&family),
         c(size),
         rotate_attr(orientation, x, y),
@@ -564,9 +581,9 @@ fn emit_arc(
         );
         return;
     }
-    // Y-down flips the sense of the angle, which is also why the sweep flag is
-    // 1: an Altium arc runs counter-clockwise in its own space, and that reads
-    // clockwise once the page is the other way up.
+    // `ctx.xy` flips the page, not the picture: above stays above. An Altium arc
+    // runs counter-clockwise as the designer sees it, and SVG's sweep flag 0 is
+    // counter-clockwise on screen, so the flag is 0.
     let at = |deg: f64| {
         let r = deg.to_radians();
         (cx + rx * r.cos(), cy - ry * r.sin())
@@ -576,7 +593,7 @@ fn emit_arc(
     let large = if sweep > 180.0 { 1 } else { 0 };
     let _ = write!(
         s,
-        r#"<path d="M {} {} A {} {} 0 {large} 1 {} {}" fill="none" stroke="{stroke}" stroke-width="{}"{dash}/>"#,
+        r#"<path d="M {} {} A {} {} 0 {large} 0 {} {}" fill="none" stroke="{stroke}" stroke-width="{}"{dash}/>"#,
         c(sx), c(sy), c(rx), c(ry), c(ex), c(ey), c(w)
     );
 }
@@ -636,6 +653,54 @@ fn emit_line_end(s: &mut String, kind: i64, tip: (f64, f64), from: (f64, f64), s
     }
 }
 
+/// The colour of a wire that passes through `at`, if one does.
+fn wire_color_at(doc: &SchDoc, at: Pt) -> Option<&str> {
+    doc.wires.iter().find_map(|w| {
+        let on = |a: &Pt, b: &Pt| {
+            let cross = (b.x - a.x) as i128 * (at.y - a.y) as i128 - (b.y - a.y) as i128 * (at.x - a.x) as i128;
+            cross == 0
+                && at.x >= a.x.min(b.x)
+                && at.x <= a.x.max(b.x)
+                && at.y >= a.y.min(b.y)
+                && at.y <= a.y.max(b.y)
+        };
+        (!w.color.is_empty() && w.pts.windows(2).any(|p| on(&p[0], &p[1]))).then_some(w.color.as_str())
+    })
+}
+
+/// A No-ERC marker. The file names its style; each style has its own shape, and
+/// the size is the style's, in sheet units (the record stores none).
+fn emit_no_erc(s: &mut String, style: &str, (x, y): (f64, f64), stroke: &str) {
+    let style = style.to_ascii_lowercase();
+    let u = mm(sch::UNIT);
+    let half = if style.contains("small") { 2.0 } else { 4.0 } * u;
+    let pen = units::sch_line_width_mm(if style.contains("thick") { 3 } else { 1 });
+    let cross = |s: &mut String| {
+        let _ = write!(
+            s,
+            r#"<polyline points="{},{} {},{}" stroke="{stroke}" stroke-width="{}"/><polyline points="{},{} {},{}" stroke="{stroke}" stroke-width="{}"/>"#,
+            c(x - half), c(y - half), c(x + half), c(y + half), c(pen),
+            c(x - half), c(y + half), c(x + half), c(y - half), c(pen)
+        );
+    };
+    if style.contains("checkbox") {
+        let _ = write!(
+            s,
+            r#"<rect x="{}" y="{}" width="{}" height="{}" fill="none" stroke="{stroke}" stroke-width="{}"/>"#,
+            c(x - half), c(y - half), c(half * 2.0), c(half * 2.0), c(pen)
+        );
+        cross(s);
+    } else if style.contains("triangle") {
+        let _ = write!(
+            s,
+            r#"<polygon points="{},{} {},{} {},{}" fill="none" stroke="{stroke}" stroke-width="{}"/>"#,
+            c(x - half), c(y + half), c(x + half), c(y + half), c(x), c(y - half), c(pen)
+        );
+    } else {
+        cross(s);
+    }
+}
+
 /// Render one sheet.
 pub fn render_sheet(doc: &SchDoc, ctx: &SheetCtx, palette: &BTreeMap<String, String>) -> String {
     let height = mm(doc.sheet.height).max(1.0);
@@ -645,26 +710,20 @@ pub fn render_sheet(doc: &SchDoc, ctx: &SheetCtx, palette: &BTreeMap<String, Str
         fonts: &doc.sheet,
         palette,
         specials: Specials::new(doc, ctx),
+        paper: &doc.sheet.area_color,
     };
 
-    // The viewBox is the page union whatever the design drew outside it —
-    // Altium still draws off-page objects, and clipping them would hide a
-    // stray part from the review rather than show it in the wrong place.
-    let mut ext = Extent::new();
-    ext.add(0.0, 0.0);
-    ext.add(width, height);
-    for p in every_point(doc) {
-        let (x, y) = ctxt.xy(p);
-        ext.add(x, y);
-    }
-    let (vx, vy) = (ext.minx.min(0.0) - PAD, ext.miny.min(0.0) - PAD);
-    let (vw, vh) = (ext.maxx.max(width) + PAD - vx, ext.maxy.max(height) + PAD - vy);
+    // The viewBox is the sheet. Altium crops to the page, so an object parked
+    // off it (a stray text frame, a part left beside the frame) is out of view
+    // there too; letting it widen the box shrinks the real drawing to a corner.
+    let (vx, vy) = (-PAD, -PAD);
+    let (vw, vh) = (width + 2.0 * PAD, height + 2.0 * PAD);
 
     let mut s = String::new();
     let line = units::sch_line_width_mm(1);
     let _ = write!(
         s,
-        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="{} {} {} {}" fill="none" stroke="#000000" stroke-width="{}" font-family="{}">"##,
+        r##"<svg xmlns="http://www.w3.org/2000/svg" data-colors="native" viewBox="{} {} {} {}" fill="none" stroke="#000000" stroke-width="{}" font-family="{}">"##,
         c(vx), c(vy), c(vw), c(vh), c(line), FONT_FALLBACK
     );
 
@@ -712,17 +771,39 @@ pub fn render_sheet(doc: &SchDoc, ctx: &SheetCtx, palette: &BTreeMap<String, Str
 
     for j in &doc.junctions {
         let (x, y) = ctxt.xy(j.at);
-        let color = junction_color(j);
+        // A dot Altium added itself takes the colour of the wire it sits on; a
+        // dot the designer placed by hand keeps its own.
+        let color = if j.locked { None } else { wire_color_at(doc, j.at) }
+            .unwrap_or(j.color.as_str());
         let fill = if color.is_empty() { "#000000" } else { color };
         let _ = write!(
             s,
             r#"<g data-primitive="junction"{}{}><circle cx="{}" cy="{}" r="{}" fill="{fill}" stroke="none"/></g>"#,
-            uuid_attr(&oid(&j.uuid, "j", j.at)), override_attr(color, ctxt.class("junction")), c(x), c(y), c(mm(sch::UNIT) * JUNCTION_RADIUS)
+            uuid_attr(&oid(&j.uuid, "j", j.at)), override_attr(color, ctxt.class("junction")), c(x), c(y), c(JUNCTION_R)
+        );
+    }
+    // The dots Altium adds on its own. They are drawing only: no uuid, so no
+    // cross-probe handle points at them.
+    for (at, color) in auto_junctions(doc) {
+        let (x, y) = ctxt.xy(at);
+        let fill = if color.is_empty() { "#000000" } else { &color };
+        let _ = write!(
+            s,
+            r#"<g data-primitive="auto-junction"{}><circle cx="{}" cy="{}" r="{}" fill="{fill}" stroke="none"/></g>"#,
+            override_attr(&color, ctxt.class("junction")), c(x), c(y), c(JUNCTION_R)
         );
     }
 
     for n in &doc.no_ercs {
-        emit_no_erc(&mut s, &ctxt, n);
+        let (x, y) = ctxt.xy(n.at);
+        let stroke = if n.color.is_empty() { "#FF0000" } else { &n.color };
+        let _ = write!(
+            s,
+            r#"<g data-primitive="no-connect"{}{}>"#,
+            uuid_attr(&oid(&n.uuid, "nc", n.at)), override_attr(&n.color, ctxt.class("no_connect")),
+        );
+        emit_no_erc(&mut s, &n.symbol, (x, y), stroke);
+        s.push_str("</g>");
     }
 
     for sym in &doc.sheet_symbols {
@@ -804,7 +885,7 @@ pub fn render_sheet(doc: &SchDoc, ctx: &SheetCtx, palette: &BTreeMap<String, Str
     }
 
     // Free text last so an annotation is never buried under the artwork.
-    for t in doc.texts.iter().filter(|t| !t.template) {
+    for t in doc.texts.iter().filter(|t| !t.template && !text_off_sheet(t, &doc.sheet)) {
         emit_free_text(&mut s, &ctxt, t);
     }
 
@@ -822,7 +903,10 @@ fn render_worksheet(s: &mut String, doc: &SchDoc, ctx: &Ctx) {
         return;
     }
     let _ = write!(s, r#"<g data-primitive="worksheet">"#);
-    if doc.sheet.border_on {
+    // A sheet that shows its template's graphics has the template's own frame
+    // and title block; Altium adds no border or zone ruler of its own on top.
+    let templated = doc.sheet.show_template_graphics && !doc.sheet.template_file.is_empty();
+    if doc.sheet.border_on && !templated {
         emit_page_border(s, doc, ctx);
     }
     for img in doc.images.iter().filter(|i| i.template) {
@@ -1053,7 +1137,7 @@ fn emit_component(s: &mut String, ctx: &Ctx, comp: &sch::Component) {
             &comp.designator,
             comp.designator_at,
             comp.designator_font,
-            mirror_justify(0, comp.designator_mirrored),
+            0,
             comp.designator_orientation,
             &comp.designator_color,
             ctx.class("reference"),
@@ -1077,8 +1161,7 @@ fn emit_component(s: &mut String, ctx: &Ctx, comp: &sch::Component) {
             continue;
         }
         let _ = write!(s, r#"<g data-primitive="text" data-kind="field"{}>"#, uuid_attr(&p.uuid));
-        let justify = mirror_justify(p.justify, p.mirrored);
-        emit_text(s, ctx, &text, p.at, p.font, justify, p.orientation, &p.color, ctx.class(key));
+        emit_text(s, ctx, &text, p.at, p.font, p.justify, p.orientation, &p.color, ctx.class(key));
         s.push_str("</g>");
     }
     s.push_str("</g>");
@@ -1105,24 +1188,27 @@ fn emit_pin(s: &mut String, ctx: &Ctx, comp: &sch::Component, p: &Pin) {
     let (ex, ey) = ctx.xy(p.connection()); // free end, where a wire lands
     let stroke = if p.color.is_empty() { "#000000" } else { &p.color };
     let w = units::sch_line_width_mm(1);
-    let dot = mm(sch::UNIT) * 0.6;
-    // The active-low dot sits at the free end, so the stub stops short of it.
+    let dot = mm(sch::UNIT) * 2.0;
+    // The outer-edge dot (an inverted pin) is a hollow circle against the body,
+    // so the stub starts at its far edge.
     let (sx, sy) = if p.outer_edge == 1 {
         let len = ((ex - bx).powi(2) + (ey - by).powi(2)).sqrt().max(1e-9);
-        (ex - (ex - bx) / len * dot * 2.0, ey - (ey - by) / len * dot * 2.0)
+        (bx + (ex - bx) / len * dot * 2.0, by + (ey - by) / len * dot * 2.0)
     } else {
-        (ex, ey)
+        (bx, by)
     };
     let _ = write!(
         s,
         r#"<polyline points="{},{} {},{}" fill="none" stroke="{stroke}" stroke-width="{}"/>"#,
-        c(bx), c(by), c(sx), c(sy), c(w)
+        c(sx), c(sy), c(ex), c(ey), c(w)
     );
     if p.outer_edge == 1 {
         let _ = write!(
             s,
-            r#"<circle cx="{}" cy="{}" r="{}" fill="none" stroke="{stroke}" stroke-width="{}"/>"#,
-            c((sx + ex) / 2.0), c((sy + ey) / 2.0), c(dot), c(w)
+            r#"<circle cx="{}" cy="{}" r="{}" fill="{}" stroke="{stroke}" stroke-width="{}"/>"#,
+            c((sx + bx) / 2.0), c((sy + by) / 2.0), c(dot),
+            if ctx.paper.is_empty() { "none" } else { ctx.paper },
+            c(w)
         );
     }
     if p.inner == 9 {
@@ -1141,48 +1227,101 @@ fn emit_pin(s: &mut String, ctx: &Ctx, comp: &sch::Component, p: &Pin) {
         );
     }
 
-    // Name and number sit in Altium's own places, in sheet units: the name 5
-    // inside the body, the number starting 8 out along the stub with its foot 2
-    // above the line (Altium's descent offset), so it never sits on the stub.
+    // Name and number sit where the pin record puts them; with no value in the
+    // file, Altium's own margin applies. The name starts inside the body and
+    // reads away from the pin; the number ends at its margin outside the body
+    // and reads on towards the free end.
     let len = ((ex - bx).powi(2) + (ey - by).powi(2)).sqrt();
     let (ux, uy) = if len > 1e-9 { ((ex - bx) / len, (ey - by) / len) } else { (1.0, 0.0) };
-    let u = mm(sch::UNIT);
-    let gap = u * 5.0;
-    // Text stays upright: a vertical pin's name reads left to right, the way
-    // Altium draws it.
-    let name_right = ux < -0.5 || (ux.abs() < 0.5 && uy < 0.0);
+    let gap = mm(sch::UNIT) * 0.5;
+    // Altium turns the text of a vertical pin with the pin: the name and the
+    // number read bottom to top. Rotated by 90°, the text's "up" is the
+    // sheet's left, so the number sits left of the stub.
+    let vertical = ux.abs() < 0.5;
+    let rot = if vertical { 1 } else { 0 };
+    // The way the text reads, in page space.
+    let (dx, dy) = if vertical { (0.0, -1.0) } else { (1.0, 0.0) };
+    let along_pin = dx * ux + dy * uy > 0.0;
     if p.show_name() && !p.name.is_empty() && p.name != "~" {
-        let at = px_to_pt(ctx, bx - ux * gap, by - uy * gap);
+        let off = p.name_margin.map(mm).unwrap_or(PIN_TEXT_MARGIN_MM);
+        let at = px_to_pt(ctx, bx - ux * off, by - uy * off);
         emit_text(
             s,
             ctx,
             &p.name,
             at,
             pin_font(p.name_font),
-            if name_right { 3 } else { 5 },
-            0,
+            if along_pin { 5 } else { 3 },
+            rot,
             &p.color,
             ctx.class("pin_name"),
         );
     }
     if p.show_designator() && !p.number.is_empty() {
-        let out = u * 8.0;
-        let foot = u * 2.0;
-        // A horizontal pin's number runs outward from 8 units past the body.
-        // A vertical pin's number sits beside the stub, ending at its line.
-        let (mx, my, justify) = if ux > 0.5 {
-            (bx + out, by - foot, 0)
-        } else if ux < -0.5 {
-            (bx - out, by - foot, 2)
-        } else if uy < 0.0 {
-            (bx - foot, by - out - foot, 8)
+        let off = p.number_margin.map(mm).unwrap_or(if p.show_name() {
+            PIN_TEXT_MARGIN_MM
         } else {
-            (bx - foot, by + out + foot, 2)
-        };
-        let at = px_to_pt(ctx, mx, my);
-        emit_text(s, ctx, &p.number, at, pin_font(p.number_font), justify, 0, &p.color, ctx.class("pin_number"));
+            PIN_NUMBER_ALONE_MARGIN_MM
+        });
+        let (mx, my) = (bx + ux * off, by + uy * off);
+        let at = if vertical { px_to_pt(ctx, bx - gap, my) } else { px_to_pt(ctx, mx, by - gap) };
+        emit_text(
+            s,
+            ctx,
+            &p.number,
+            at,
+            pin_font(p.number_font),
+            if along_pin { 0 } else { 2 },
+            rot,
+            &p.color,
+            ctx.class("pin_number"),
+        );
+    }
+    if matches!(p.electrical, 0 | 1 | 2) {
+        emit_pin_type_mark(s, ctx, p.electrical, (bx, by), (ux, uy), len / 2.0, stroke, w);
     }
     s.push_str("</g>");
+}
+
+/// The small open triangle Altium draws on the middle of an input, output or
+/// bidirectional pin, centred `mid` mm from the body end. An input points into
+/// the body, an output away from it.
+fn emit_pin_type_mark(
+    s: &mut String,
+    ctx: &Ctx,
+    electrical: i64,
+    body: (f64, f64),
+    (ux, uy): (f64, f64),
+    mid: f64,
+    stroke: &str,
+    w: f64,
+) {
+    let u = mm(sch::UNIT);
+    let (len, half) = (2.5 * u, 1.0 * u);
+    let (px, py) = (-uy, ux);
+    let tri = |s: &mut String, centre: f64, into_body: bool| {
+        let dir = if into_body { -1.0 } else { 1.0 };
+        let (cx, cy) = (body.0 + ux * centre, body.1 + uy * centre);
+        let tip = (cx + ux * dir * len / 2.0, cy + uy * dir * len / 2.0);
+        let base = (cx - ux * dir * len / 2.0, cy - uy * dir * len / 2.0);
+        let _ = write!(
+            s,
+            r#"<polygon points="{},{} {},{} {},{}" fill="{}" stroke="{stroke}" stroke-width="{}"/>"#,
+            c(tip.0), c(tip.1),
+            c(base.0 + px * half), c(base.1 + py * half),
+            c(base.0 - px * half), c(base.1 - py * half),
+            if ctx.paper.is_empty() { "none" } else { ctx.paper },
+            c(w)
+        );
+    };
+    match electrical {
+        0 => tri(s, mid, true),
+        2 => tri(s, mid, false),
+        _ => {
+            tri(s, mid - len / 2.0, true);
+            tri(s, mid + len / 2.0, false);
+        }
+    }
 }
 
 /// A pin's own font when the designer overrode it, else the sheet's first —
@@ -1202,109 +1341,7 @@ fn px_to_pt(ctx: &Ctx, x: f64, y: f64) -> Pt {
     Pt { x: inv(x), y: inv(ctx.height - y) }
 }
 
-/// Radius of a junction dot in sheet units: Altium draws a 4-unit dot.
-const JUNCTION_RADIUS: f64 = 2.0;
-
-/// Altium's auto-junction colour (navy). It draws a junction it computed in
-/// this colour whatever colour the cached record carries.
-const AUTO_JUNCTION_COLOR: &str = "#000080";
-
-/// The colour a junction is drawn in.
-fn junction_color(j: &sch::Junction) -> &str {
-    if j.auto {
-        AUTO_JUNCTION_COLOR
-    } else {
-        &j.color
-    }
-}
-
-/// A straight line between two points, in the current group's stroke.
-fn line(s: &mut String, (x1, y1): (f64, f64), (x2, y2): (f64, f64)) {
-    let _ = write!(s, r#"<polyline points="{},{} {},{}"/>"#, c(x1), c(y1), c(x2), c(y2));
-}
-
-/// A no-ERC directive: Altium's marker for the directive's `Symbol`. The sizes
-/// are Altium's own, in sheet units: a cross 8 units across (4 for the small
-/// one), a checkbox, or a filled triangle.
-fn emit_no_erc(s: &mut String, ctx: &Ctx, n: &sch::NoErc) {
-    let (x, y) = ctx.xy(n.at);
-    let u = mm(sch::UNIT);
-    let stroke = if n.color.is_empty() { "#FF0000" } else { &n.color };
-    // The thin cross is a hairline; the other markers use a half-unit pen.
-    let width = if n.symbol == 0 { u * 0.25 } else { units::sch_line_width_mm(0) };
-    let _ = write!(
-        s,
-        r#"<g data-primitive="no-connect"{}{}><g{} stroke="{stroke}" stroke-width="{}" fill="none">"#,
-        uuid_attr(&oid(&n.uuid, "nc", n.at)),
-        override_attr(&n.color, ctx.class("no_connect")),
-        rotate_attr(n.orientation, x, y),
-        c(width)
-    );
-    let p = |dx: f64, dy: f64| (x + dx * u, y + dy * u);
-    match n.symbol {
-        // Checkbox: a stem to a small box holding a tick.
-        3 => {
-            line(s, p(0.0, 0.0), p(-2.0, -2.0));
-            let _ = write!(
-                s,
-                r#"<rect x="{}" y="{}" width="{}" height="{}"/><polyline points="{},{} {},{} {},{}"/>"#,
-                c(x - 6.0 * u), c(y - 6.0 * u), c(4.0 * u), c(4.0 * u),
-                c(x - 5.5 * u), c(y - 4.333 * u),
-                c(x - 4.5 * u), c(y - 3.333 * u),
-                c(x - 2.5 * u), c(y - 5.333 * u)
-            );
-        }
-        // Triangle: filled, its tip on the pin.
-        4 => {
-            let _ = write!(
-                s,
-                r#"<polygon points="{},{} {},{} {},{}" fill="{stroke}"/>"#,
-                c(x), c(y),
-                c(x + 2.6667 * u), c(y - 4.6188 * u),
-                c(x - 2.6667 * u), c(y - 4.6188 * u)
-            );
-        }
-        symbol => {
-            let half = if symbol == 2 { 2.0 } else { 4.0 };
-            line(s, p(-half, -half), p(half, half));
-            line(s, p(-half, half), p(half, -half));
-        }
-    }
-    s.push_str("</g></g>");
-}
-
-/// Length of a power port's stub in sheet units, by `Style`. The glyph sits at
-/// the stub's far end.
-fn power_stub_len(style: i64) -> f64 {
-    match style {
-        0 | 1 => 4.0,
-        3 => 6.0,
-        8 | 9 => 16.0,
-        10 => 20.0,
-        _ => 10.0,
-    }
-}
-
-/// How far a power port's name sits from the port, in sheet units, by `Style`.
-/// The grounds put it past their taller glyphs.
-fn power_text_offset(style: i64) -> f64 {
-    let symbol = match style {
-        8 | 9 => 16.0,
-        10 => 20.0,
-        _ => 10.0,
-    };
-    match style {
-        4..=6 => symbol * 2.0,
-        8 => symbol + 8.0,
-        9 => symbol + 12.0,
-        _ => symbol,
-    }
-}
-
 /// A power port: Altium's glyph for the style, plus the net name.
-///
-/// The glyph is drawn for orientation 0, where the stub runs to the right, and
-/// then turned with the port. The sizes are Altium's own, in sheet units.
 fn emit_power_port(s: &mut String, ctx: &Ctx, p: &PowerPort) {
     let (x, y) = ctx.xy(p.at);
     let stroke = if p.color.is_empty() { "#800000" } else { &p.color };
@@ -1317,79 +1354,144 @@ fn emit_power_port(s: &mut String, ctx: &Ctx, p: &PowerPort) {
         p.style,
         override_attr(&p.color, ctx.class("label_hier"))
     );
-    let rot = rotate_attr(p.orientation, x, y);
+    // The glyph is drawn pointing up, then turned to the port's orientation.
+    // Altium's orientation 0 points right and 1 points up, and its angles run
+    // counter-clockwise in a Y-up sheet, so the SVG turn is 90° less a quarter
+    // turn per step.
+    let deg = 90 - p.orientation.rem_euclid(4) * 90;
+    let rot = if deg == 0 { String::new() } else { format!(r#" transform="rotate({deg} {} {})""#, c(x), c(y)) };
+    if p.cross_sheet {
+        emit_off_sheet(s, ctx, p, stroke, w);
+        s.push_str("</g>");
+        return;
+    }
     let _ = write!(s, r#"<g{rot} stroke="{stroke}" stroke-width="{}" fill="none">"#, c(w));
-    let ex = x + power_stub_len(p.style) * u;
-    // A point relative to the stub's end.
-    let e = |dx: f64, dy: f64| (ex + dx * u, y + dy * u);
-    line(s, (x, y), e(0.0, 0.0));
-    // Parallel bars across the stub: (distance past the end, half length).
-    let bars = |s: &mut String, specs: &[(f64, f64)]| {
-        for &(off, half) in specs {
-            line(s, e(off, -half), e(off, half));
-        }
+    let stem = |s: &mut String, h: f64| {
+        let _ = write!(s, r#"<polyline points="{},{} {},{}"/>"#, c(x), c(y), c(x), c(y - u * h));
     };
-    match p.style {
+    let bar = |s: &mut String, half: f64, at: f64| {
+        let _ = write!(
+            s,
+            r#"<polyline points="{},{} {},{}"/>"#,
+            c(x - u * half), c(y - u * at), c(x + u * half), c(y - u * at)
+        );
+    };
+    // Sizes are in Altium units (10 mil) and match Altium's own glyphs. `reach`
+    // is how far the glyph runs from the hotspot, so the name clears it.
+    let reach = match p.style {
         0 => {
-            let _ = write!(s, r#"<circle cx="{}" cy="{}" r="{}"/>"#, c(ex + 3.0 * u), c(y), c(3.0 * u));
+            stem(s, 5.0);
+            let _ = write!(s, r#"<circle cx="{}" cy="{}" r="{}"/>"#, c(x), c(y - u * 7.5), c(u * 2.5));
+            10.0
         }
+        // The arrow is a closed triangle on a stem.
         1 => {
-            line(s, e(6.0, 0.0), e(0.0, -3.0));
-            line(s, e(6.0, 0.0), e(0.0, 3.0));
-            line(s, e(0.0, -3.0), e(0.0, 3.0));
-        }
-        3 => {
-            let r = 4.0 * u;
+            stem(s, 5.0);
             let _ = write!(
                 s,
-                r#"<path d="M {} {} A {r} {r} 0 0 1 {} {} A {r} {r} 0 0 0 {} {}"/>"#,
-                c(ex - r), c(y - r), c(ex), c(y), c(ex + r), c(y + r),
-                r = c(r)
+                r#"<polygon points="{},{} {},{} {},{}"/>"#,
+                c(x - u * 2.5), c(y - u * 5.0), c(x), c(y - u * 10.0), c(x + u * 2.5), c(y - u * 5.0)
             );
+            10.0
         }
-        4 => bars(s, &[(0.0, 10.0), (3.0, 7.0), (6.0, 4.0), (9.0, 1.0)]),
+        2 => {
+            stem(s, 10.0);
+            bar(s, 5.0, 10.0);
+            10.0
+        }
+        3 => {
+            stem(s, 7.0);
+            let _ = write!(
+                s,
+                r#"<path d="M {} {} q {} {} {} 0 q {} {} {} 0"/>"#,
+                c(x - u * 4.0), c(y - u * 7.0), c(u * 2.0), c(-u * 4.0), c(u * 4.0), c(u * 2.0), c(u * 4.0), c(u * 4.0)
+            );
+            11.0
+        }
+        // Power ground: four shortening bars.
+        4 => {
+            stem(s, 10.0);
+            for (half, at) in [(10.0, 10.0), (7.0, 13.0), (4.0, 16.0), (1.0, 19.0)] {
+                bar(s, half, at);
+            }
+            19.0
+        }
+        // Signal ground: a triangle.
         5 => {
-            line(s, e(0.0, -10.0), e(0.0, 10.0));
-            line(s, e(0.0, -10.0), e(10.0, 0.0));
-            line(s, e(0.0, 10.0), e(10.0, 0.0));
+            stem(s, 10.0);
+            let _ = write!(
+                s,
+                r#"<polygon points="{},{} {},{} {},{}"/>"#,
+                c(x - u * 10.0), c(y - u * 10.0), c(x + u * 10.0), c(y - u * 10.0), c(x), c(y - u * 20.0)
+            );
+            20.0
         }
-        6 => {
-            line(s, e(0.0, -10.0), e(0.0, 10.0));
-            line(s, e(0.0, 10.0), e(10.0, 15.0));
-            line(s, e(0.0, 0.0), e(10.0, 5.0));
-            line(s, e(0.0, -10.0), e(10.0, -5.0));
+        // Earth: a bar with three slanted strokes under it.
+        _ => {
+            stem(s, 15.0);
+            bar(s, 10.0, 15.0);
+            for k in [-1.0f64, 0.0, 1.0] {
+                let _ = write!(
+                    s,
+                    r#"<polyline points="{},{} {},{}"/>"#,
+                    c(x + u * (k * 10.0)), c(y - u * 15.0), c(x + u * (k * 10.0 - 5.0)), c(y - u * 20.0)
+                );
+            }
+            20.0
         }
-        7 => {
-            line(s, e(0.0, 0.0), e(-6.0, -3.0));
-            line(s, e(0.0, 0.0), e(-6.0, 3.0));
-        }
-        8 => bars(s, &[(0.0, 10.0), (4.0, 6.0), (8.0, 2.0)]),
-        9 => {
-            bars(s, &[(0.0, 10.0), (4.0, 6.0), (8.0, 2.0)]);
-            let _ = write!(s, r#"<circle cx="{}" cy="{}" r="{}"/>"#, c(ex), c(y), c(12.0 * u));
-        }
-        10 => bars(s, &[(0.0, 8.0)]),
-        // Style 2 is the bar; an unknown style draws as one too.
-        _ => bars(s, &[(0.0, 5.0)]),
-    }
+    };
     s.push_str("</g>");
     if p.show_net_name {
-        // The name reads upright, past the glyph, on the side the port points.
-        // Altium keeps it 2 units clear; above the port that gap is the room the
-        // text box keeps below its baseline.
-        let off = (power_text_offset(p.style) * sch::UNIT as f64) as i64;
-        let gap = sch::UNIT * 2;
+        let gap = (reach + 2.0) as i64;
+        // The name reads away from the glyph, on the side the port points.
         let (justify, at) = match p.orientation.rem_euclid(4) {
-            1 => (1, Pt { x: p.at.x, y: p.at.y + off + gap }),
-            2 => (5, Pt { x: p.at.x - off - gap, y: p.at.y }),
-            // Below the port a hanging baseline sits at the capitals' tops, so one
-            // unit keeps them off the glyph.
-            3 => (7, Pt { x: p.at.x, y: p.at.y - off - sch::UNIT }),
-            _ => (3, Pt { x: p.at.x + off + gap, y: p.at.y }),
+            1 => (1, Pt { x: p.at.x, y: p.at.y + sch::UNIT * gap }),
+            2 => (5, Pt { x: p.at.x - sch::UNIT * gap, y: p.at.y }),
+            3 => (7, Pt { x: p.at.x, y: p.at.y - sch::UNIT * gap }),
+            _ => (3, Pt { x: p.at.x + sch::UNIT * gap, y: p.at.y }),
         };
         emit_text(s, ctx, &p.text, at, p.font, justify, 0, &p.color, ctx.class("label_hier"));
     }
     s.push_str("</g>");
+}
+
+/// An off-sheet connector: two chevrons and the net name beyond them. Style 0
+/// points the chevrons back at the hotspot, style 1 away from it.
+fn emit_off_sheet(s: &mut String, ctx: &Ctx, p: &PowerPort, stroke: &str, w: f64) {
+    let (x, y) = ctx.xy(p.at);
+    let u = mm(sch::UNIT);
+    // Unit vector the connector runs along, in SVG space (Y down).
+    let (dx, dy) = match p.orientation.rem_euclid(4) {
+        1 => (0.0, -1.0),
+        2 => (-1.0, 0.0),
+        3 => (0.0, 1.0),
+        _ => (1.0, 0.0),
+    };
+    let (nx, ny) = (-dy, dx);
+    let at = |along: f64, side: f64| (x + (dx * along + nx * side) * u, y + (dy * along + ny * side) * u);
+    let back = p.style != 1;
+    // The record stores no size for an off-sheet connector, so the glyph is
+    // Altium's own: two chevrons, each `CHEVRON_DEPTH` deep and `CHEVRON_HALF`
+    // either side of the axis, in sheet units.
+    const CHEVRON_DEPTH: f64 = 5.5;
+    const CHEVRON_HALF: f64 = 4.2;
+    for start in [0.0, CHEVRON_DEPTH] {
+        let (tip, arms) = if back { (start, start + CHEVRON_DEPTH) } else { (start + CHEVRON_DEPTH, start) };
+        let (a, t, b) = (at(arms, CHEVRON_HALF), at(tip, 0.0), at(arms, -CHEVRON_HALF));
+        let _ = write!(
+            s,
+            r#"<polyline points="{},{} {},{} {},{}" fill="none" stroke="{stroke}" stroke-width="{}"/>"#,
+            c(a.0), c(a.1), c(t.0), c(t.1), c(b.0), c(b.1), c(w)
+        );
+    }
+    let gap = sch::UNIT * 14;
+    let (justify, at) = match p.orientation.rem_euclid(4) {
+        1 => (1, Pt { x: p.at.x, y: p.at.y + gap }),
+        2 => (5, Pt { x: p.at.x - gap, y: p.at.y }),
+        3 => (7, Pt { x: p.at.x, y: p.at.y - gap }),
+        _ => (3, Pt { x: p.at.x + gap, y: p.at.y }),
+    };
+    emit_text(s, ctx, &p.text, at, p.font, justify, 0, &p.color, ctx.class("label_hier"));
 }
 
 /// Open a parameter set's group and draw Altium's directive flag: a short line
@@ -1434,6 +1536,11 @@ fn emit_param_set_glyph(s: &mut String, ctx: &Ctx, ps: &sch::ParamSet) {
         _ => 3,
     };
     emit_text(s, ctx, &ps.name, turn(20.0), 1, justify, 0, &ps.color, class);
+}
+
+/// A straight line between two points, in the current group's stroke.
+fn line(s: &mut String, (x1, y1): (f64, f64), (x2, y2): (f64, f64)) {
+    let _ = write!(s, r#"<polyline points="{},{} {},{}"/>"#, c(x1), c(y1), c(x2), c(y2));
 }
 
 /// A port — Altium's cross-sheet connector, which is the hierarchical label of
@@ -1489,6 +1596,16 @@ fn emit_port(s: &mut String, ctx: &Ctx, p: &Port) {
     s.push_str("</g>");
 }
 
+/// True when a text lies wholly off the page. Altium crops to the sheet, so a
+/// frame a designer left parked beside it is not on the drawing, and it gets
+/// neither a group here nor a geometry row.
+pub fn text_off_sheet(t: &SchText, sheet: &sch::SheetProps) -> bool {
+    let corner = t.corner.unwrap_or(t.at);
+    let (x0, x1) = (t.at.x.min(corner.x), t.at.x.max(corner.x));
+    let (y0, y1) = (t.at.y.min(corner.y), t.at.y.max(corner.y));
+    x1 < 0 || y1 < 0 || x0 > sheet.width || y0 > sheet.height
+}
+
 /// A label, text frame or note the designer placed on the sheet.
 fn emit_free_text(s: &mut String, ctx: &Ctx, t: &SchText) {
     let text = ctx.specials.expand(&t.text);
@@ -1504,11 +1621,29 @@ fn emit_free_text(s: &mut String, ctx: &Ctx, t: &SchText) {
         if t.show_border || t.fill.is_some() {
             let fill = t.fill.clone().unwrap_or_else(|| "none".into());
             let stroke = if t.show_border { "#000000" } else { "none" };
-            let _ = write!(
-                s,
-                r#"<rect x="{}" y="{}" width="{}" height="{}" fill="{fill}" stroke="{stroke}" stroke-width="{}"/>"#,
-                c(x), c(y), c(bw), c(bh), c(units::sch_line_width_mm(1))
-            );
+            let lw = c(units::sch_line_width_mm(1));
+            if t.kind == TextKind::Note && bw > 0.0 && bh > 0.0 {
+                // A note is a sticky: the page curls up at the bottom right, and
+                // a small triangle at the top left folds it shut. Its edge is a
+                // shade of its own fill, not black ink.
+                let f = (mm(10 * sch::UNIT)).min(bw / 2.0).min(bh / 2.0);
+                let edge = if fill == "none" { "none".to_string() } else { shade(&fill, 0.75) };
+                let tri = mm(3 * sch::UNIT).min(bw / 4.0).min(bh / 4.0);
+                let (tx, ty) = (x + tri / 2.0, y + tri / 2.0);
+                let _ = write!(
+                    s,
+                    r#"<polygon points="{},{} {},{} {},{} {},{} {},{}" fill="{fill}" stroke="{edge}" stroke-width="{lw}" stroke-linejoin="round"/><polygon points="{},{} {},{} {},{}" fill="{edge}" stroke="{edge}" stroke-width="{lw}" stroke-linejoin="round"/><polygon points="{},{} {},{} {},{}" fill="{edge}" stroke="none"/>"#,
+                    c(x), c(y), c(x + bw), c(y), c(x + bw), c(y + bh - f), c(x + bw - f), c(y + bh), c(x), c(y + bh),
+                    c(x + bw - f), c(y + bh), c(x + bw - f), c(y + bh - f), c(x + bw), c(y + bh - f),
+                    c(tx), c(ty), c(tx + tri), c(ty), c(tx), c(ty + tri)
+                );
+            } else {
+                let _ = write!(
+                    s,
+                    r#"<rect x="{}" y="{}" width="{}" height="{}" fill="{fill}" stroke="{stroke}" stroke-width="{lw}"/>"#,
+                    c(x), c(y), c(bw), c(bh)
+                );
+            }
         }
         // A frame lays its lines out from the top of the box, breaking on the
         // file's own newlines and then on the box width when the frame asks to
@@ -1517,10 +1652,15 @@ fn emit_free_text(s: &mut String, ctx: &Ctx, t: &SchText) {
         // land a word out; the alternative was a 3468-character disclaimer on
         // one line running off the page.
         let (_, size, _, _) = ctx.font(t.font);
+        // Lines are one font CELL apart (ascender to descender), not one em.
+        let cell = ctx.cell(t.font);
+        // A note insets its text by `TextMargin` on every side.
+        let margin = mm(t.margin * sch::UNIT);
+        let (bw_in, y_in) = ((bw - 2.0 * margin).max(0.0), y + margin);
         let inner_x = match t.justify % 3 {
-            0 => x,
+            0 => x + margin,
             1 => x + bw / 2.0,
-            _ => x + bw,
+            _ => x + bw - margin,
         };
         // `~1` is Altium's own paragraph break inside a frame, and it is the
         // ONLY break the motherboard's disclaimer has — 3468 characters with no
@@ -1528,20 +1668,26 @@ fn emit_free_text(s: &mut String, ctx: &Ctx, t: &SchText) {
         let source = text.replace("~1", "
 ");
         let lines: Vec<String> = if t.word_wrap && bw > 0.0 {
-            source.lines().flat_map(|l| wrap(l, bw / size)).collect()
+            source.lines().flat_map(|l| wrap(l, bw_in / size)).collect()
         } else {
             source.lines().map(str::to_string).collect()
         };
         for (i, line) in lines.iter().enumerate() {
-            let at = px_to_pt(ctx, inner_x, y + size * (i as f64 + 0.9));
-            let justify = mirror_justify(t.justify % 3, t.mirrored);
-            emit_text(s, ctx, line, at, t.font, justify, t.orientation, &t.color, ctx.class("note"));
+            // Bottom-justified text takes the bottom of its cell as the anchor.
+            let at = px_to_pt(ctx, inner_x, y_in + cell * (i as f64 + 1.0));
+            emit_text(s, ctx, line, at, t.font, t.justify % 3, t.orientation, &t.color, ctx.class("note"));
         }
     } else {
-        let justify = mirror_justify(t.justify, t.mirrored);
-        emit_text(s, ctx, &text, t.at, t.font, justify, t.orientation, &t.color, ctx.class("note"));
+        emit_text(s, ctx, &text, t.at, t.font, t.justify, t.orientation, &t.color, ctx.class("note"));
     }
     s.push_str("</g>");
+}
+
+/// `#RRGGBB` darkened to `k` of its brightness.
+fn shade(hex: &str, k: f64) -> String {
+    let v = u32::from_str_radix(hex.trim_start_matches('#'), 16).unwrap_or(0);
+    let ch = |shift: u32| (((v >> shift) & 0xFF) as f64 * k).round() as u32;
+    format!("#{:02X}{:02X}{:02X}", ch(16), ch(8), ch(0))
 }
 
 /// Break one line to a box `ems` wide, on spaces.
@@ -1574,73 +1720,58 @@ fn wrap(line: &str, ems: f64) -> Vec<String> {
     }
     out
 }
-
-/// Running min/max of the drawn extent.
-struct Extent {
-    minx: f64,
-    miny: f64,
-    maxx: f64,
-    maxy: f64,
-}
-
-impl Extent {
-    fn new() -> Extent {
-        Extent { minx: f64::MAX, miny: f64::MAX, maxx: f64::MIN, maxy: f64::MIN }
+/// The junction dots Altium draws by itself, as (point, wire colour).
+///
+/// A dot goes where three or more ends meet, or where a wire end or a pin end
+/// lands on the inside of another wire. An "end" is a wire segment's endpoint
+/// (so a bare corner is two ends and gets no dot) or a visible pin's free end.
+/// A point that already has a `RECORD=29` junction gets no second one.
+fn auto_junctions(doc: &SchDoc) -> Vec<(Pt, String)> {
+    let mut segs: Vec<(Pt, Pt, &str)> = Vec::new();
+    for w in &doc.wires {
+        for pair in w.pts.windows(2) {
+            segs.push((pair[0], pair[1], w.color.as_str()));
+        }
     }
-    fn add(&mut self, x: f64, y: f64) {
-        self.minx = self.minx.min(x);
-        self.miny = self.miny.min(y);
-        self.maxx = self.maxx.max(x);
-        self.maxy = self.maxy.max(y);
-    }
-}
-
-/// Every anchor point the sheet draws, for the view box.
-fn every_point(doc: &SchDoc) -> Vec<Pt> {
-    let mut out = Vec::new();
-    for w in doc.wires.iter().chain(&doc.buses) {
-        out.extend(w.pts.iter().copied());
-    }
-    for j in &doc.junctions {
-        out.push(j.at);
-    }
-    for l in doc.net_labels.iter().filter(|l| !l.text.trim().is_empty()) {
-        out.push(l.at);
-    }
-    for p in &doc.power_ports {
-        out.push(p.at);
-    }
-    for p in &doc.ports {
-        out.extend(p.terminals());
-    }
-    for t in &doc.texts {
-        out.push(t.at);
-        out.extend(t.corner);
-    }
-    for i in &doc.images {
-        out.push(i.min);
-        out.push(i.max);
-    }
-    for g in doc.graphics.iter().chain(&doc.template_graphics) {
-        out.extend(graphic_points(g));
-    }
-    for sym in &doc.sheet_symbols {
-        out.push(sym.at);
-        out.push(Pt {
-            x: sym.at.x + sym.xsize * sch::UNIT,
-            y: sym.at.y - sym.ysize * sch::UNIT,
-        });
+    let mut ends: BTreeMap<(i64, i64), (usize, &str)> = BTreeMap::new();
+    for (a, b, color) in &segs {
+        for p in [a, b] {
+            let e = ends.entry((p.x, p.y)).or_insert((0, ""));
+            e.0 += 1;
+            if e.1.is_empty() {
+                e.1 = color;
+            }
+        }
     }
     for comp in &doc.components {
-        if let Some((min, max)) = comp.bbox {
-            out.push(min);
-            out.push(max);
-        }
-        for g in &comp.graphics {
-            out.extend(graphic_points(g));
+        for p in comp.pins.iter().filter(|p| {
+            !p.hidden()
+                && (p.part_id == comp.current_part_id || p.part_id <= 0)
+                && p.display_mode == comp.display_mode
+        }) {
+            let at = p.connection();
+            ends.entry((at.x, at.y)).or_insert((0, "")).0 += 1;
         }
     }
-    out
+    let manual: std::collections::BTreeSet<(i64, i64)> =
+        doc.junctions.iter().map(|j| (j.at.x, j.at.y)).collect();
+    // A point strictly inside a segment (not at either end).
+    let inside = |(px, py): (i64, i64), a: &Pt, b: &Pt| -> bool {
+        if (px, py) == (a.x, a.y) || (px, py) == (b.x, b.y) {
+            return false;
+        }
+        let cross = (b.x - a.x) as i128 * (py - a.y) as i128 - (b.y - a.y) as i128 * (px - a.x) as i128;
+        cross == 0
+            && px >= a.x.min(b.x)
+            && px <= a.x.max(b.x)
+            && py >= a.y.min(b.y)
+            && py <= a.y.max(b.y)
+    };
+    ends.into_iter()
+        .filter(|(k, _)| !manual.contains(k))
+        .filter(|(k, (n, _))| *n >= 3 || segs.iter().any(|(a, b, _)| inside(*k, a, b)))
+        .map(|(k, (_, color))| (Pt { x: k.0, y: k.1 }, color.to_string()))
+        .collect()
 }
 
 /// A graphic's first point — the origin its `oid` fallback is keyed on, so the
@@ -1842,7 +1973,7 @@ mod tests {
             sheet: a4(),
             texts: vec![
                 SchText {
-                    word_wrap: true,                    kind: TextKind::Label,
+                    word_wrap: true,                    margin: 0, kind: TextKind::Label,
                     at: Pt { x: U, y: U },
                     corner: None,
                     text: "=SheetNumber".into(),
@@ -1857,7 +1988,7 @@ mod tests {
                     uuid: "t1".into(),
                 },
                 SchText {
-                    word_wrap: true,                    kind: TextKind::Label,
+                    word_wrap: true,                    margin: 0, kind: TextKind::Label,
                     at: Pt { x: U, y: 2 * U },
                     corner: None,
                     text: "=PRJ_Customer".into(),
@@ -1933,7 +2064,7 @@ mod tests {
                 uuid: "bl".into(),
             }],
             texts: vec![SchText {
-                    word_wrap: true,                kind: TextKind::Note,
+                    word_wrap: true,                margin: 0, kind: TextKind::Note,
                 at: Pt { x: 5 * U, y: 5 * U },
                 corner: Some(Pt { x: 15 * U, y: 2 * U }),
                 text: "one\ntwo".into(),
@@ -2010,63 +2141,207 @@ mod tests {
         assert_eq!(markup("C:\\x"), (format!("C{}x", bar(":")), true));
     }
 
-    /// Glyphs are Altium's size and colour: an auto junction is a navy 4-unit
-    /// dot whatever its record says, a no-ERC cross spans 8 units, and a bar
-    /// power port at orientation 0 has its bar 10 units right with the name
-    /// past it (not on the wire).
-    #[test]
-    fn glyphs_have_altiums_size_colour_and_side() {
-        let u = mm(sch::UNIT);
-        let s = sheet(SchDoc {
+    fn base_text() -> SchText {
+        SchText {
+            kind: TextKind::Label,
+            at: Pt::default(),
+            corner: None,
+            text: String::new(),
+            color: String::new(),
+            fill: None,
+            font: 1,
+            justify: 0,
+            orientation: 0,
+            mirrored: false,
+            show_border: false,
+            word_wrap: false,
+            margin: 0,
+            template: false,
+            uuid: String::new(),
+        }
+    }
+
+    fn text_doc(justify: i64, mirrored: bool) -> String {
+        sheet(SchDoc {
             sheet: a4(),
-            junctions: vec![Junction { at: Pt { x: 0, y: 0 }, uuid: "j".into(), color: "#800000".into(), auto: true }],
-            no_ercs: vec![sch::NoErc { at: Pt { x: 0, y: 0 }, uuid: "x".into(), ..Default::default() }],
-            power_ports: vec![PowerPort {
+            texts: vec![SchText {
                 at: Pt { x: 100 * U, y: 100 * U },
-                text: "GND".into(),
-                style: 2,
-                show_net_name: true,
-                uuid: "pp".into(),
+                text: "D2".into(),
+                justify,
+                mirrored,
+                ..base_text()
+            }],
+            ..Default::default()
+        })
+    }
+
+    fn text_y(svg: &str) -> f64 {
+        let i = svg.find("<text x=").expect("a text");
+        let rest = &svg[i..];
+        let j = rest.find(" y=\"").unwrap() + 4;
+        rest[j..].split('"').next().unwrap().parse().unwrap()
+    }
+
+    /// Altium does not reverse the anchor of a mirrored text: "D2" on the MB1419
+    /// daughterboard starts at its location whether or not the flag is set.
+    #[test]
+    fn a_mirrored_text_keeps_its_anchor() {
+        assert!(text_doc(0, false).contains(r#"text-anchor="start""#));
+        assert!(text_doc(0, true).contains(r#"text-anchor="start""#));
+        assert!(text_doc(2, true).contains(r#"text-anchor="end""#));
+    }
+
+    /// Altium anchors the bottom of the glyph cell, so the baseline is raised by
+    /// the descent (443/2048 em). A centred text does not move.
+    #[test]
+    fn a_bottom_justified_text_is_raised_by_the_descent() {
+        let bottom = text_y(&text_doc(0, false));
+        let centre = text_y(&text_doc(3, false));
+        assert!((centre - (193.04 - 25.4)).abs() < 0.01, "{centre}");
+        let em = units::sch_font_mm(10);
+        assert!((centre - bottom - em * 443.0 / 2048.0).abs() < 0.01, "{bottom}");
+    }
+
+    /// Altium crops to the sheet: an object parked off the page must not widen
+    /// the view box. A4 is 292.1 x 193.04 mm, plus the padding on each side.
+    #[test]
+    fn the_view_box_is_the_sheet() {
+        let svg = sheet(SchDoc {
+            sheet: a4(),
+            wires: vec![Wire {
+                pts: vec![Pt { x: 0, y: 0 }, Pt { x: 2000 * U, y: 2000 * U }],
                 ..Default::default()
             }],
             ..Default::default()
         });
-        assert!(s.contains(&format!(r##"r="{}" fill="#000080""##, c(u * 2.0))), "junction: {s}");
-        assert!(s.contains(&format!(r#"points="{},{} {},{}""#, c(-4.0 * u), c(760.0 * u - 4.0 * u), c(4.0 * u), c(760.0 * u + 4.0 * u))), "cross: {s}");
-        let (px, py) = (100.0 * u, 660.0 * u);
-        assert!(s.contains(&format!(r#"points="{},{} {},{}""#, c(px + 10.0 * u), c(py - 5.0 * u), c(px + 10.0 * u), c(py + 5.0 * u))), "bar: {s}");
-        assert!(s.contains(&format!(r#"x="{}" y="{}""#, c(px + 12.0 * u), c(py))) && s.contains(r#"text-anchor="start""#), "name: {s}");
+        assert!(svg.contains(r#"viewBox="-2.54 -2.54 297.18 198.12""#), "{svg}");
     }
 
-    /// A barred run reaches the sheet as an overlined `tspan` inside the text,
-    /// which is what the viewer measures to draw the bar.
+    fn wire(pts: &[(i64, i64)]) -> Wire {
+        Wire { pts: pts.iter().map(|&(x, y)| Pt { x: x * U, y: y * U }).collect(), ..Default::default() }
+    }
+
+    /// Three wire ends make a dot; a bare corner and a plain end do not.
     #[test]
-    fn a_barred_run_is_an_overlined_tspan_in_its_text() {
-        let s = sheet(SchDoc {
+    fn three_wire_ends_get_an_automatic_junction() {
+        let doc = SchDoc {
             sheet: a4(),
-            net_labels: vec![NetLabel { at: Pt { x: 0, y: 0 }, text: "R\\S\\T\\".into(), ..Default::default() }],
+            wires: vec![wire(&[(0, 0), (10, 0), (10, 10)]), wire(&[(10, 0), (20, 0)])],
+            ..Default::default()
+        };
+        let j = auto_junctions(&doc);
+        assert_eq!(j.len(), 1, "{j:?}");
+        assert_eq!(j[0].0, Pt { x: 10 * U, y: 0 });
+        assert!(sheet(doc).contains(r#"data-primitive="auto-junction""#));
+        let corner = SchDoc { wires: vec![wire(&[(0, 0), (10, 0), (10, 10)])], ..Default::default() };
+        assert!(auto_junctions(&corner).is_empty());
+    }
+
+    /// An Altium arc runs counter-clockwise as drawn, which is SVG sweep flag 0.
+    /// The right half of a circle (270° to 90°) must bulge to the right.
+    #[test]
+    fn an_arc_sweeps_the_way_altium_draws_it() {
+        let mut s = String::new();
+        let palette = BTreeMap::new();
+        let doc = SchDoc { sheet: a4(), ..Default::default() };
+        let ctx = Ctx {
+            height: 100.0,
+            fonts: &doc.sheet,
+            palette: &palette,
+            specials: Specials::new(&doc, &SheetCtx {
+                number: 1,
+                total: 1,
+                sheet_path: "/",
+                file_name: "",
+                full_path: "",
+                project_name: "",
+                project_params: &BTreeMap::new(),
+            }),
+            paper: "",
+        };
+        emit_arc(&mut s, &ctx, Pt { x: 50 * U, y: 50 * U }, 8 * U, 8 * U, 270.0, 90.0, "#000", 0.1, "");
+        assert!(s.contains(" 0 0 0 "), "{s}");
+    }
+
+    /// A No-ERC marker is a cross of the style the file names, a couple of
+    /// millimetres across, not a dot.
+    #[test]
+    fn a_no_erc_marker_is_a_cross_two_millimetres_wide() {
+        let mut s = String::new();
+        emit_no_erc(&mut s, "Thin Cross", (10.0, 10.0), "#FF0000");
+        assert_eq!(s.matches("<polyline").count(), 2, "{s}");
+        assert!(s.contains(r#"points="8.984,8.984 11.016,11.016""#), "{s}");
+    }
+
+    /// A dot Altium added itself takes its wire's colour; a locked dot keeps its own.
+    #[test]
+    fn an_unlocked_junction_takes_the_wire_colour() {
+        let mut w = wire(&[(0, 0), (20, 0)]);
+        w.color = "#000080".into();
+        let at = Pt { x: 10 * U, y: 0 };
+        let doc = |locked| SchDoc {
+            sheet: a4(),
+            wires: vec![w.clone()],
+            junctions: vec![Junction { at, color: "#800000".into(), locked, ..Default::default() }],
+            ..Default::default()
+        };
+        assert!(sheet(doc(false)).contains(r##"fill="#000080" stroke="none""##));
+        assert!(sheet(doc(true)).contains(r##"fill="#800000" stroke="none""##));
+    }
+
+    /// A wire end on the inside of another wire is a T and gets a dot.
+    #[test]
+    fn a_wire_end_on_another_wires_interior_gets_a_junction() {
+        let doc = SchDoc {
+            wires: vec![wire(&[(0, 0), (20, 0)]), wire(&[(10, 0), (10, 10)])],
+            ..Default::default()
+        };
+        let j = auto_junctions(&doc);
+        assert_eq!(j.len(), 1);
+        assert_eq!(j[0].0, Pt { x: 10 * U, y: 0 });
+    }
+
+    /// A point that already has a RECORD=29 junction is not doubled.
+    #[test]
+    fn a_manual_junction_is_not_duplicated() {
+        let doc = SchDoc {
+            wires: vec![wire(&[(0, 0), (20, 0)]), wire(&[(10, 0), (10, 10)])],
+            junctions: vec![Junction { at: Pt { x: 10 * U, y: 0 }, ..Default::default() }],
+            ..Default::default()
+        };
+        assert!(auto_junctions(&doc).is_empty());
+    }
+
+    /// The dot is about 4 units across (r = 0.508 mm).
+    #[test]
+    fn a_junction_dot_is_about_four_units_across() {
+        let svg = sheet(SchDoc {
+            sheet: a4(),
+            junctions: vec![Junction { at: Pt { x: U, y: U }, uuid: "j".into(), ..Default::default() }],
             ..Default::default()
         });
-        assert!(s.contains(r#"<tspan text-decoration="overline" data-overbar="">RST</tspan>"#), "{s}");
+        assert!(svg.contains(r#"r="0.508""#), "{svg}");
     }
-}
 
-#[cfg(test)]
-mod mirror_tests {
-    use super::mirror_justify;
-
-    /// Altium keeps mirrored text readable and reverses which side of its
-    /// anchor the string runs to. The corpus mirrors 2683 strings, and drawing
-    /// them with the un-mirrored anchor puts a designator across the symbol it
-    /// labels instead of beside it.
+    /// A note insets its text by `TextMargin` and folds its top-right corner.
     #[test]
-    fn a_mirrored_text_reverses_its_horizontal_anchor_only() {
-        assert_eq!(mirror_justify(0, false), 0, "an un-mirrored text is untouched");
-        assert_eq!(mirror_justify(0, true), 2, "left becomes right");
-        assert_eq!(mirror_justify(2, true), 0, "right becomes left");
-        assert_eq!(mirror_justify(1, true), 1, "centred stays centred");
-        // The vertical half is a different axis and does not move.
-        assert_eq!(mirror_justify(6, true), 8);
-        assert_eq!(mirror_justify(7, true), 7);
+    fn a_note_has_a_margin_and_a_folded_corner() {
+        let svg = sheet(SchDoc {
+            sheet: a4(),
+            texts: vec![SchText {
+                kind: TextKind::Note,
+                at: Pt { x: 100 * U, y: 200 * U },
+                corner: Some(Pt { x: 200 * U, y: 100 * U }),
+                text: "Notes".into(),
+                justify: 6,
+                show_border: true,
+                margin: 5,
+                ..base_text()
+            }],
+            ..Default::default()
+        });
+        assert!(svg.contains("<polygon"), "dog-ear outline: {svg}");
+        // Box left is 25.4 mm; the text starts 5 units (1.27 mm) inside.
+        assert!(svg.contains(r#"<text x="26.67""#), "{svg}");
     }
 }

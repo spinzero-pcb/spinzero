@@ -69,18 +69,24 @@ npm run tauri build   # release build → src-tauri/target/release/spinzero.exe
 ```
 
 Frontend-only checks: `npm run build` (tsc + vite) and `npx vitest run`.
-Rust tests: `cargo test --lib` in `src-tauri/`.
+Rust tests: `cargo test --lib` in `src-tauri/`. The BOM check runs the
+`bom-rules` program, which is not in this repository — set
+`SPINZERO_BOM_RULES_BIN` to the copy the installer placed beside the app, or
+those tests cannot run.
 
 A build from source has telemetry disabled by default: crash/usage reporting
 is compiled in only when a Sentry DSN is provided at build time (see
 [`.env.example`](.env.example)). Updater signing also lives in `.env` —
 without it you get a normal unsigned dev build.
 
-## License
+## Licence
 
-SpinZero is free software, licensed under the
-[GNU General Public License v3.0 or later](LICENSE) — the same license family
-as KiCad. Individual use is free forever; team sync licenses fund development.
+SpinZero is proprietary. The source is published so you can read it, audit it,
+build it and check what it does on your own machine — not so it can be
+redistributed or reused. [`LICENSE`](LICENSE) has the terms.
+
+The app is free to use. The detailed BOM review is paid, and that is what funds
+the work.
 
 ## Contributing
 

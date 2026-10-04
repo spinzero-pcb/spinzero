@@ -64,12 +64,25 @@ export interface KicadTheme {
   board?: Record<string, string>;
 }
 
+/** A board's own 3D-view appearance (Altium `CFG3D.*`). For a 3D view only: the 2D
+ *  layer colours never read it. Colours are `#RRGGBB` keyed `COPPERCOLOR`,
+ *  `TOPSILKSCREENCOLOR`, `TOPSOLDERMASKCOLOR`, …; opacity is 0..1 keyed `<NAME>OPACITY`.
+ *  Mirrors `Board3d` in extract/src/design.rs. */
+export interface Board3d {
+  colors: Record<string, string>;
+  opacity: Record<string, number>;
+}
+
 export interface DesignIndexes {
   sheets: SheetLite[];
   /** PCB copper layers from the manifest (WS8); empty for schematic-only bundles */
   layers: LayerLite[];
   /** KiCad palette the viewer themes with (see {@link applyKicadTheme}). */
   theme?: KicadTheme | null;
+  /** Altium's 3D board appearance; absent for KiCad. Not used in 2D. */
+  board_3d?: Board3d | null;
+  /** Producing tool ("altium"); absent for KiCad. Picks per-tool viewer defaults. */
+  design_tool?: string | null;
   svg_to_net: Record<string, string>;
   /** Multi-valued: shared-file sheet instances (gate_driver U/V/W) map one element
    *  uuid to one net per instance; disambiguate by the current sheet. */

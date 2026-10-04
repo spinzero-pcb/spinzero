@@ -1,10 +1,10 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
+import { ipc } from "../../lib/ipc";
+import { SEVERITY_WEIGHT } from "../../lib/severity";
 import { isAgentRunning, useAgentReviewStore } from "../../stores/agentReviewStore";
 import { useBomCheckStore } from "../../stores/bomCheckStore";
-import { isRunning, useDetailedReviewStore } from "../../stores/detailedReviewStore";
 import { reviewRows, useReviewRunsStore } from "../../stores/reviewRunsStore";
 import { useReviewInboxStore } from "../../stores/reviewInboxStore";
-import { useSettingsStore } from "../../stores/settingsStore";
 import { useReviewStore } from "../../stores/reviewStore";
 import { useRunLauncherStore } from "../../stores/runLauncherStore";
 import { formatRelative } from "../../lib/time";
@@ -28,7 +28,6 @@ import { ReviewProgress } from "./ReviewProgress";
 // answer to "what has this board been through", and a hidden review reads like one
 // that passed.
 
-const SEV_RANK: Record<CommentSeverity, number> = { info: 0, minor: 1, major: 2, critical: 3 };
 
 /** Which review filed this comment, from the pipeline the backend stamps into every
  *  machine-filed comment's predicate (`bomcheck::ingest`). Pipelines are named
@@ -55,7 +54,7 @@ function openFindings(
     if (c.status !== "open" || filedBy(c) !== id) continue;
     count++;
     const sev = c.severity ?? "info";
-    if (SEV_RANK[sev] > SEV_RANK[worst]) worst = sev;
+    if (SEVERITY_WEIGHT[sev] > SEVERITY_WEIGHT[worst]) worst = sev;
   }
   return { count, worst };
 }
@@ -83,18 +82,15 @@ export function RunReviewMenu() {
   // so the footer counts jobs rather than showing a single boolean — concurrent runs
   // are allowed (decision 2026-08-24).
   const bomRunning = useBomCheckStore((s) => s.running);
-  const detailedPhase = useDetailedReviewStore((s) => s.phase);
-  const detailedBusy = isRunning(detailedPhase);
-  // A review running through the user's own assistant has no stages of ours to
-  // report, so it gets a line of its own rather than the detailed review's bar.
+  // The detailed review now has real progress of its own — the review server's own
+  // counts, read from its `status.json` — so it gets the bar rather than a line.
   const agentPhase = useAgentReviewStore((s) => s.phase);
-  const agentLine = useAgentReviewStore((s) => s.line);
-  const agentBusy = isAgentRunning(agentPhase);
+  const detailedBusy = isAgentRunning(agentPhase);
 
-  // Whether the assistant has been set up at all. Shown on the row rather than
-  // hidden behind a click: "set up" and "configured" answer different questions, and
-  // a row that reads the same either way is a row nobody revisits when it breaks.
-  const agentConfigured = useSettingsStore((s) => s.agentReview !== null);
+  // Which assistants already list SpinZero in their own config. Shown on the row, in
+  // green, rather than hidden behind a click: a row that reads the same either way is
+  // a row nobody revisits when it breaks. Read on open; it only reads files.
+  const [connected, setConnected] = useState<string[]>([]);
 
   const wrapRef = useRef<HTMLDivElement | null>(null);
 
@@ -125,6 +121,14 @@ export function RunReviewMenu() {
     if (menuOpen) void loadInbox();
   }, [menuOpen, loadInbox]);
 
+  useEffect(() => {
+    if (!menuOpen) return;
+    ipc
+      .assistantConnected()
+      .then((list) => setConnected(list.map((c) => c.label)))
+      .catch(() => setConnected([]));
+  }, [menuOpen]);
+
   const rows = reviewRows(runs, current);
 
   return (
@@ -136,14 +140,6 @@ export function RunReviewMenu() {
           failure belongs here: it renders nothing on a healthy run, and does not go
           away by itself on a bad one. */}
       <ReviewOutcome />
-      {agentBusy && (
-        <span className="run-review-active" title={agentLine || "Your assistant is reviewing this BOM"}>
-          <span className="status-dot running" />
-          {/* The assistant's own last line, when it has said something. It narrates at
-              its own pace, and a sign of life beats a bar we would have to invent. */}
-          {agentLine ? agentLine.slice(0, 60) : "Assistant reviewing"}
-        </span>
-      )}
       {bomRunning && (
         <span className="run-review-active">
           <span className="status-dot running" />
@@ -208,8 +204,17 @@ export function RunReviewMenu() {
             title="Run SpinZero reviews through Claude Code, Cursor, or any MCP client — on your own subscription"
             onClick={() => openConnect()}
           >
-            <span className="run-review-name">Connect your AI assistant</span>
-            <span className="run-review-meta">{agentConfigured ? "configured" : "set up"}</span>
+            <span className="run-review-name">Connect your AI agent</span>
+            <span className="run-review-meta">
+              {connected.length > 0 ? (
+                <span className="run-review-connected" title={connected.join(", ")}>
+                  <span className="status-dot succeeded" />
+                  {connected.length === 1 ? connected[0] : `${connected.length} connected`}
+                </span>
+              ) : (
+                "set up"
+              )}
+            </span>
           </button>
           {inbox.length > 0 && (
             <>

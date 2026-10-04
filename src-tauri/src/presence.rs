@@ -5,7 +5,7 @@
 //! synced heartbeat `presence.<user>.<device>.json` on open and on every crunch; the
 //! app reads the others to warn "⚠️ Priya crunched a revision 4 min ago — you may be
 //! about to fork." It never blocks editing; a fork, if it happens, is surfaced loudly
-//! in the history graph and reconciled by a human (see version-control-plan.md §1).
+//! in the history graph and reconciled by a human (see docs/version-control-plan.md §1).
 //!
 //! Device-scoped filename keeps "one writer per file" true (no sync conflict). The file
 //! lives at the project root next to `highlights.<user>.json`, and is synced.
